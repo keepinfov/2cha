@@ -1,0 +1,29 @@
+# 2cha Server Configuration
+# Usage: sudo 2cha server -c server.toml
+
+[server]
+listen = "0.0.0.0:51820"
+
+[tun]
+name = "tun0"
+address = "10.0.0.1"
+netmask = "255.255.255.0"
+mtu = 1400
+
+[crypto]
+cipher = "chacha20-poly1305"
+# key = "YOUR_64_HEX_CHAR_KEY"
+# Generate with: 2cha genkey
+
+[routing]
+# Enable gateway mode (route client internet traffic)
+ip_forward = true
+masquerade = true
+external_interface = "eth0"  # Your internet interface
+
+[timeouts]
+keepalive = 25
+session = 180
+
+[logging]
+level = "info"

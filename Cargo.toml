@@ -1,0 +1,21 @@
+[package]
+name = "twocha"
+version = "0.2.0"
+edition = "2021"
+description = "2cha - Simple VPN utility"
+
+[[bin]]
+name = "2cha"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
