@@ -20,24 +20,22 @@ const IFF_TUN: i16 = 0x0001;
 const IFF_NO_PI: i16 = 0x1000;
 const IFF_MULTI_QUEUE: i16 = 0x0100;
 
-// ioctl commands - these are architecture-specific
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-const TUNSETIFF: libc::c_ulong = 0x400454ca;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-const TUNSETQUEUE: libc::c_ulong = 0x400454d9;
+// Use libc::Ioctl type which is platform-appropriate (c_int on musl, c_ulong on glibc)
+type IoctlRequest = libc::c_int;
 
-#[cfg(target_arch = "arm")]
-const TUNSETIFF: libc::c_ulong = 0x400454ca;
-#[cfg(target_arch = "arm")]
-const TUNSETQUEUE: libc::c_ulong = 0x400454d9;
+// ioctl commands - cast to appropriate type for platform
+const TUNSETIFF: IoctlRequest = 0x400454ca_u32 as IoctlRequest;
+#[allow(dead_code)]
+const TUNSETQUEUE: IoctlRequest = 0x400454d9_u32 as IoctlRequest;
 
 // Socket ioctls
-const SIOCSIFMTU: libc::c_ulong = 0x8922;
-const SIOCSIFADDR: libc::c_ulong = 0x8916;
-const SIOCSIFNETMASK: libc::c_ulong = 0x891c;
-const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
-const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
-const SIOCSIFDSTADDR: libc::c_ulong = 0x8918;
+const SIOCSIFMTU: IoctlRequest = 0x8922_u32 as IoctlRequest;
+const SIOCSIFADDR: IoctlRequest = 0x8916_u32 as IoctlRequest;
+const SIOCSIFNETMASK: IoctlRequest = 0x891c_u32 as IoctlRequest;
+const SIOCGIFFLAGS: IoctlRequest = 0x8913_u32 as IoctlRequest;
+const SIOCSIFFLAGS: IoctlRequest = 0x8914_u32 as IoctlRequest;
+#[allow(dead_code)]
+const SIOCSIFDSTADDR: IoctlRequest = 0x8918_u32 as IoctlRequest;
 
 // Interface flags
 const IFF_UP: libc::c_short = 0x1;
@@ -288,7 +286,7 @@ impl TunDevice {
         };
 
         // SIOCSIFADDR for IPv6 is different
-        const SIOCSIFADDR_IN6: libc::c_ulong = 0x8916;
+        const SIOCSIFADDR_IN6: IoctlRequest = 0x8916_u32 as IoctlRequest;
 
         let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
@@ -431,7 +429,7 @@ impl TunDevice {
         ifr.ifr_name[..self.name.len()].copy_from_slice(self.name.as_bytes());
 
         let sock = self.create_socket(AF_INET)?;
-        const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+        const SIOCGIFINDEX: IoctlRequest = 0x8933_u32 as IoctlRequest;
         
         let result = unsafe { libc::ioctl(sock, SIOCGIFINDEX, &mut ifr) };
         unsafe { libc::close(sock) };
@@ -446,7 +444,7 @@ impl TunDevice {
     fn ioctl_with_socket<T>(
         &self,
         family: libc::sa_family_t,
-        request: libc::c_ulong,
+        request: IoctlRequest,
         arg: &T,
         name: &str,
     ) -> Result<()> {

@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 
 /// Supported cipher suites
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]

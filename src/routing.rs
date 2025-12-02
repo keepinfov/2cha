@@ -3,9 +3,9 @@
 //! Configure IP forwarding, NAT, and routing tables for IPv4/IPv6.
 //! Platform-independent abstractions for route management.
 
-use std::io;
+use std::io::{self, Write};
 use std::process::Command;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IP FORWARDING
@@ -200,15 +200,17 @@ table ip 2cha_filter {{
         vpn_subnet, external_iface, external_iface, external_iface
     );
     
-    let output = Command::new("nft")
+    let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
         .stdin(std::process::Stdio::piped())
-        .spawn()?
-        .stdin.take().unwrap()
-        .write_all(rules.as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .spawn()?;
     
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(rules.as_bytes())?;
+    }
+    
+    child.wait()?;
     Ok(())
 }
 
