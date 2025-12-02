@@ -1,29 +1,69 @@
-# 2cha Server Configuration
+# 2cha VPN Server Configuration v0.3
 # Usage: sudo 2cha server -c server.toml
 
 [server]
-listen = "0.0.0.0:51820"
+listen = "0.0.0.0:51820"      # IPv4 + IPv6 dual-stack
+# listen_v6 = "[::]:51820"    # Separate IPv6 socket (optional)
+max_clients = 256
 
 [tun]
 name = "tun0"
-address = "10.0.0.1"
-netmask = "255.255.255.0"
-mtu = 1400
+mtu = 1420
+queue_len = 500
 
 [crypto]
-cipher = "chacha20-poly1305"
+cipher = "chacha20-poly1305"  # or "aes-256-gcm"
 # key = "YOUR_64_HEX_CHAR_KEY"
-# Generate with: 2cha genkey
+# key_file = "/etc/2cha/server.key"
+# Or use VPN_KEY environment variable
 
-[routing]
-# Enable gateway mode (route client internet traffic)
-ip_forward = true
-masquerade = true
-external_interface = "eth0"  # Your internet interface
+# ─────────────────────────────────────────────────────────────────────────────
+# IPv4 Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[ipv4]
+enable = true
+address = "10.0.0.1"
+prefix = 24                   # /24 = 255.255.255.0
+allowed_ips = []              # Empty = allow all; e.g., ["192.168.0.0/16"]
+blocked_ips = []              # Block specific IPs/ranges
+push_routes = []              # Routes to advertise to clients
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IPv6 Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[ipv6]
+enable = false                # Set to true to enable IPv6
+address = "fd00:2cha::1"      # ULA address recommended
+prefix = 64
+allowed_ips = []
+blocked_ips = []
+push_routes = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gateway Mode (for routing client internet traffic)
+# ─────────────────────────────────────────────────────────────────────────────
+[gateway]
+ip_forward = false            # Enable IPv4 forwarding
+ip6_forward = false           # Enable IPv6 forwarding
+masquerade_v4 = false         # Enable NAT for IPv4
+masquerade_v6 = false         # Enable NAT for IPv6
+external_interface = "eth0"   # Internet-facing interface
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Performance Tuning
+# ─────────────────────────────────────────────────────────────────────────────
+[performance]
+socket_recv_buffer = 2097152  # 2MB
+socket_send_buffer = 2097152  # 2MB
+batch_size = 32               # Packets per batch
+multi_queue = false           # Multi-queue TUN (Linux 3.8+)
+cpu_affinity = []             # Pin to CPUs, e.g., [0, 1]
 
 [timeouts]
-keepalive = 25
-session = 180
+keepalive = 25                # Seconds between keepalives
+session = 180                 # Session timeout (seconds)
+handshake = 10                # Handshake timeout (seconds)
 
 [logging]
-level = "info"
+level = "info"                # trace, debug, info, warn, error
+# file = "/var/log/2cha.log"  # Log to file

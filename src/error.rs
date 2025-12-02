@@ -1,9 +1,6 @@
-//! # Модуль обработки ошибок
+//! # Error Module
 //!
-//! ЛУЧШАЯ ПРАКТИКА: Proper Error Handling
-//! - Result<T, E> вместо panic!
-//! - Свой тип ошибки с enum
-//! - From<T> для удобного преобразования
+//! Unified error handling for the VPN.
 
 use std::fmt;
 use std::io;
@@ -53,6 +50,7 @@ pub enum NetworkError {
     ConnectionClosed,
     Timeout,
     HostUnreachable(String),
+    WouldBlock,
 }
 
 impl std::error::Error for VpnError {
@@ -78,23 +76,33 @@ impl fmt::Display for VpnError {
 }
 
 impl From<io::Error> for VpnError {
-    fn from(e: io::Error) -> Self { VpnError::Io(e) }
+    fn from(e: io::Error) -> Self {
+        VpnError::Io(e)
+    }
 }
 
 impl From<TunError> for VpnError {
-    fn from(e: TunError) -> Self { VpnError::Tun(e) }
+    fn from(e: TunError) -> Self {
+        VpnError::Tun(e)
+    }
 }
 
 impl From<CryptoError> for VpnError {
-    fn from(e: CryptoError) -> Self { VpnError::Crypto(e) }
+    fn from(e: CryptoError) -> Self {
+        VpnError::Crypto(e)
+    }
 }
 
 impl From<ProtocolError> for VpnError {
-    fn from(e: ProtocolError) -> Self { VpnError::Protocol(e) }
+    fn from(e: ProtocolError) -> Self {
+        VpnError::Protocol(e)
+    }
 }
 
 impl From<NetworkError> for VpnError {
-    fn from(e: NetworkError) -> Self { VpnError::Network(e) }
+    fn from(e: NetworkError) -> Self {
+        VpnError::Network(e)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, VpnError>;

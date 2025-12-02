@@ -1,30 +1,23 @@
 //! # VPN Protocol Module
 //!
-//! ЛУЧШАЯ ПРАКТИКА: Type-safe протокол
-//! - Все типы пакетов явно определены
-//! - Сериализация/десериализация безопасны
-//! - Версионирование для совместимости
+//! Type-safe protocol with efficient serialization.
 
 use crate::error::{ProtocolError, Result};
 use crate::{PROTOCOL_VERSION, PROTOCOL_HEADER_SIZE, CHACHA20_NONCE_SIZE};
 
-/// Типы пакетов VPN
+/// Packet types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PacketType {
-    /// Handshake инициация
     HandshakeInit = 1,
-    /// Handshake ответ
     HandshakeResponse = 2,
-    /// Зашифрованные данные
     Data = 3,
-    /// Keep-alive
     Keepalive = 4,
-    /// Запрос на отключение
     Disconnect = 5,
 }
 
 impl PacketType {
+    #[inline]
     pub fn from_u8(value: u8) -> Result<Self> {
         match value {
             1 => Ok(PacketType::HandshakeInit),
@@ -37,16 +30,15 @@ impl PacketType {
     }
 }
 
-/// Заголовок пакета VPN
+/// Packet header (24 bytes)
 ///
-/// Формат (24 байта):
 /// ```text
 /// ┌────────┬────────┬────────────┬──────────────────────────┐
 /// │ Version│  Type  │  Counter   │         Nonce            │
-/// │ (1 byte)│(1 byte)│ (4 bytes)  │       (12 bytes)         │
+/// │ (1)    │  (1)   │   (4)      │         (12)             │
 /// └────────┴────────┴────────────┴──────────────────────────┘
-/// │ Reserved (6 bytes)                                       │
-/// └──────────────────────────────────────────────────────────┘
+/// │ Reserved (6)                                            │
+/// └─────────────────────────────────────────────────────────┘
 /// ```
 #[derive(Debug, Clone)]
 pub struct PacketHeader {
@@ -57,17 +49,24 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
+    /// Create new header with random nonce
     pub fn new(packet_type: PacketType, counter: u32) -> Self {
         let mut nonce = [0u8; CHACHA20_NONCE_SIZE];
+        
         // Nonce = counter (4 bytes) + random (8 bytes)
         nonce[0..4].copy_from_slice(&counter.to_le_bytes());
-        // В реальности здесь должен быть криптографически безопасный random
-        // Для образовательных целей используем простой timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        nonce[4..12].copy_from_slice(&timestamp.to_le_bytes());
+        
+        // Get randomness from /dev/urandom or fallback to timestamp
+        if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = file.read_exact(&mut nonce[4..12]);
+        } else {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            nonce[4..12].copy_from_slice(&timestamp.to_le_bytes());
+        }
         
         PacketHeader {
             version: PROTOCOL_VERSION,
@@ -77,16 +76,40 @@ impl PacketHeader {
         }
     }
 
+    /// Create header with specific nonce
+    #[inline]
+    pub fn with_nonce(packet_type: PacketType, counter: u32, nonce: [u8; CHACHA20_NONCE_SIZE]) -> Self {
+        PacketHeader {
+            version: PROTOCOL_VERSION,
+            packet_type,
+            counter,
+            nonce,
+        }
+    }
+
+    /// Serialize to bytes
+    #[inline]
     pub fn serialize(&self) -> [u8; PROTOCOL_HEADER_SIZE] {
         let mut buf = [0u8; PROTOCOL_HEADER_SIZE];
         buf[0] = self.version;
         buf[1] = self.packet_type as u8;
         buf[2..6].copy_from_slice(&self.counter.to_le_bytes());
         buf[6..18].copy_from_slice(&self.nonce);
-        // bytes 18-23 reserved
         buf
     }
 
+    /// Serialize into existing buffer (zero-copy)
+    #[inline]
+    pub fn serialize_into(&self, buf: &mut [u8]) {
+        debug_assert!(buf.len() >= PROTOCOL_HEADER_SIZE);
+        buf[0] = self.version;
+        buf[1] = self.packet_type as u8;
+        buf[2..6].copy_from_slice(&self.counter.to_le_bytes());
+        buf[6..18].copy_from_slice(&self.nonce);
+    }
+
+    /// Deserialize from bytes
+    #[inline]
     pub fn deserialize(buf: &[u8]) -> Result<Self> {
         if buf.len() < PROTOCOL_HEADER_SIZE {
             return Err(ProtocolError::PacketTooSmall {
@@ -117,7 +140,7 @@ impl PacketHeader {
     }
 }
 
-/// Полный VPN пакет
+/// Complete VPN packet
 #[derive(Debug)]
 pub struct Packet {
     pub header: PacketHeader,
@@ -125,7 +148,7 @@ pub struct Packet {
 }
 
 impl Packet {
-    /// Создаёт новый пакет данных
+    /// Create data packet
     pub fn new_data(counter: u32, payload: Vec<u8>) -> Self {
         Packet {
             header: PacketHeader::new(PacketType::Data, counter),
@@ -133,7 +156,7 @@ impl Packet {
         }
     }
 
-    /// Создаёт keepalive пакет
+    /// Create keepalive packet
     pub fn new_keepalive(counter: u32) -> Self {
         Packet {
             header: PacketHeader::new(PacketType::Keepalive, counter),
@@ -141,15 +164,15 @@ impl Packet {
         }
     }
 
-    /// Создаёт handshake init пакет
-    pub fn new_handshake_init(counter: u32, client_pubkey: [u8; 32]) -> Self {
+    /// Create handshake init packet
+    pub fn new_handshake_init(counter: u32, client_info: Vec<u8>) -> Self {
         Packet {
             header: PacketHeader::new(PacketType::HandshakeInit, counter),
-            payload: client_pubkey.to_vec(),
+            payload: client_info,
         }
     }
 
-    /// Сериализует пакет
+    /// Serialize packet
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(PROTOCOL_HEADER_SIZE + self.payload.len());
         buf.extend_from_slice(&self.header.serialize());
@@ -157,28 +180,29 @@ impl Packet {
         buf
     }
 
-    /// Десериализует пакет
+    /// Deserialize packet
     pub fn deserialize(buf: &[u8]) -> Result<Self> {
         let header = PacketHeader::deserialize(buf)?;
         let payload = buf[PROTOCOL_HEADER_SIZE..].to_vec();
         Ok(Packet { header, payload })
     }
 
-    /// Возвращает полный размер пакета
+    /// Total packet size
+    #[inline]
     pub fn size(&self) -> usize {
         PROTOCOL_HEADER_SIZE + self.payload.len()
     }
 }
 
-// ЛУЧШАЯ ПРАКТИКА: Anti-replay защита
-/// Sliding window для защиты от replay атак
+// ═══════════════════════════════════════════════════════════════════════════
+// ANTI-REPLAY PROTECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Sliding window for replay attack protection
 #[derive(Debug)]
 pub struct ReplayWindow {
-    /// Последний принятый counter
     last_counter: u64,
-    /// Битовая маска для окна (64 пакета)
     bitmap: u64,
-    /// Размер окна
     window_size: u64,
 }
 
@@ -191,21 +215,20 @@ impl ReplayWindow {
         }
     }
 
-    /// Проверяет, является ли пакет replay-атакой
-    /// Возвращает true если пакет валиден (не replay)
+    /// Check if packet is valid (not a replay)
+    /// Returns true if packet should be accepted
+    #[inline]
     pub fn check_and_update(&mut self, counter: u64) -> bool {
         if counter == 0 {
-            return false; // Counter 0 зарезервирован
+            return false;
         }
 
         if counter > self.last_counter {
-            // Новый пакет вперёди окна
+            // New packet ahead of window
             let diff = counter - self.last_counter;
             if diff >= self.window_size {
-                // Полностью новое окно
                 self.bitmap = 1;
             } else {
-                // Сдвигаем окно
                 self.bitmap <<= diff;
                 self.bitmap |= 1;
             }
@@ -213,23 +236,27 @@ impl ReplayWindow {
             return true;
         }
 
-        // Пакет в пределах окна или до него
+        // Packet within or before window
         let diff = self.last_counter - counter;
         if diff >= self.window_size {
-            // Слишком старый пакет
-            return false;
+            return false; // Too old
         }
 
-        // Проверяем бит в маске
+        // Check if already seen
         let bit = 1u64 << diff;
         if self.bitmap & bit != 0 {
-            // Уже видели этот пакет
-            return false;
+            return false; // Replay
         }
 
-        // Отмечаем пакет как принятый
+        // Mark as seen
         self.bitmap |= bit;
         true
+    }
+
+    /// Reset window
+    pub fn reset(&mut self) {
+        self.last_counter = 0;
+        self.bitmap = 0;
     }
 }
 
@@ -257,18 +284,29 @@ mod tests {
     fn test_replay_window() {
         let mut window = ReplayWindow::new();
         
+        // Sequential packets
         assert!(window.check_and_update(1));
         assert!(window.check_and_update(2));
         assert!(window.check_and_update(3));
         
-        // Replay
+        // Replay should fail
         assert!(!window.check_and_update(2));
         
-        // Out of order но в окне
+        // Out of order but within window
         assert!(window.check_and_update(5));
         assert!(window.check_and_update(4));
         
-        // Снова replay
+        // Replay again
         assert!(!window.check_and_update(4));
+    }
+
+    #[test]
+    fn test_replay_window_jump() {
+        let mut window = ReplayWindow::new();
+        
+        assert!(window.check_and_update(1));
+        assert!(window.check_and_update(100)); // Big jump
+        assert!(!window.check_and_update(1)); // Old packet
+        assert!(window.check_and_update(99)); // Just within window
     }
 }

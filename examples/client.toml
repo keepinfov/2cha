@@ -1,28 +1,59 @@
-# 2cha Client Configuration
+# 2cha VPN Client Configuration v0.3
 # Usage: sudo 2cha up -c client.toml
 
 [client]
-server = "YOUR_SERVER_IP:51820"
+server = "vpn.example.com:51820"
+prefer_ipv6 = false           # Prefer IPv6 connection to server
 
 [tun]
 name = "tun0"
-address = "10.0.0.2"
-netmask = "255.255.255.0"
-mtu = 1400
+mtu = 1420
+queue_len = 500
 
 [crypto]
-cipher = "chacha20-poly1305"
-# key = "YOUR_64_HEX_CHAR_KEY"
-# Or use VPN_KEY environment variable
+cipher = "chacha20-poly1305"  # Must match server!
+# key = "SAME_KEY_AS_SERVER"
+# key_file = "/etc/2cha/client.key"
 
-[routing]
-# Route ALL traffic through VPN
-route_all_traffic = true
-dns = ["1.1.1.1", "8.8.8.8"]
+# ─────────────────────────────────────────────────────────────────────────────
+# IPv4 Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[ipv4]
+enable = true
+address = "10.0.0.2"
+prefix = 24
+route_all = false             # Route ALL IPv4 traffic through VPN
+routes = []                   # Specific routes, e.g., ["10.0.0.0/24", "192.168.100.0/24"]
+exclude_ips = []              # Always bypass VPN, e.g., ["192.168.1.0/24"]
 
-# Or route only specific networks:
-# route_all_traffic = false
-# routes = ["10.0.0.0/24", "192.168.100.0/24"]
+# ─────────────────────────────────────────────────────────────────────────────
+# IPv6 Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[ipv6]
+enable = false
+address = "fd00:2cha::2"
+prefix = 64
+route_all = false             # Route ALL IPv6 traffic through VPN
+routes = []                   # Specific IPv6 routes
+exclude_ips = []              # Always bypass VPN
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DNS Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[dns]
+servers_v4 = []               # e.g., ["1.1.1.1", "8.8.8.8"]
+servers_v6 = []               # e.g., ["2606:4700:4700::1111"]
+search = []                   # Search domains
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Performance Tuning
+# ─────────────────────────────────────────────────────────────────────────────
+[performance]
+socket_recv_buffer = 2097152
+socket_send_buffer = 2097152
+batch_size = 32
+multi_queue = false
+cpu_affinity = []
 
 [timeouts]
 keepalive = 25

@@ -1,9 +1,6 @@
 //! # Network Module
 //!
-//! ЛУЧШАЯ ПРАКТИКА: Абстракция сетевого уровня
-//! - UDP туннель для передачи зашифрованных пакетов
-//! - Non-blocking I/O с poll/epoll
-//! - Proper timeout handling
+//! High-performance UDP tunnel with optimized I/O.
 
 use crate::error::{NetworkError, Result};
 use crate::crypto::ChaCha20Poly1305;
@@ -13,21 +10,17 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-/// Конфигурация туннеля
+/// Tunnel configuration
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
-    /// Локальный адрес для bind
     pub local_addr: SocketAddr,
-    /// Удалённый адрес (для клиента)
     pub remote_addr: Option<SocketAddr>,
-    /// Таймаут чтения
     pub read_timeout: Option<Duration>,
-    /// Таймаут записи
     pub write_timeout: Option<Duration>,
-    /// Интервал keepalive
     pub keepalive_interval: Duration,
-    /// Таймаут сессии
     pub session_timeout: Duration,
+    pub recv_buffer_size: usize,
+    pub send_buffer_size: usize,
 }
 
 impl Default for TunnelConfig {
@@ -39,25 +32,23 @@ impl Default for TunnelConfig {
             write_timeout: Some(Duration::from_secs(5)),
             keepalive_interval: Duration::from_secs(25),
             session_timeout: Duration::from_secs(180),
+            recv_buffer_size: 2 * 1024 * 1024,
+            send_buffer_size: 2 * 1024 * 1024,
         }
     }
 }
 
-/// Состояние peer'а
+/// Peer connection state
 #[derive(Debug)]
 pub struct PeerState {
-    /// Адрес peer'а
     pub addr: SocketAddr,
-    /// Последняя активность
     pub last_seen: Instant,
-    /// Счётчик исходящих пакетов
     pub tx_counter: u32,
-    /// Окно для anti-replay
     pub replay_window: ReplayWindow,
-    /// Статистика: отправлено байт
     pub bytes_tx: u64,
-    /// Статистика: получено байт
     pub bytes_rx: u64,
+    pub packets_tx: u64,
+    pub packets_rx: u64,
 }
 
 impl PeerState {
@@ -69,38 +60,39 @@ impl PeerState {
             replay_window: ReplayWindow::new(),
             bytes_tx: 0,
             bytes_rx: 0,
+            packets_tx: 0,
+            packets_rx: 0,
         }
     }
 
+    #[inline]
     pub fn next_counter(&mut self) -> u32 {
         self.tx_counter = self.tx_counter.wrapping_add(1);
         self.tx_counter
     }
 
+    #[inline]
     pub fn is_expired(&self, timeout: Duration) -> bool {
         self.last_seen.elapsed() > timeout
     }
 
+    #[inline]
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
     }
 }
 
-/// UDP туннель для VPN
-/// 
-/// ЛУЧШАЯ ПРАКТИКА: Инкапсуляция сетевой логики
+/// UDP tunnel for VPN traffic
 pub struct UdpTunnel {
     socket: UdpSocket,
     config: TunnelConfig,
     cipher: ChaCha20Poly1305,
-    /// Буфер для приёма (избегаем аллокаций в hot path)
     recv_buffer: Vec<u8>,
-    /// Буфер для отправки
     send_buffer: Vec<u8>,
 }
 
 impl UdpTunnel {
-    /// Создаёт новый UDP туннель
+    /// Create new UDP tunnel
     pub fn new(config: TunnelConfig, key: &[u8; 32]) -> Result<Self> {
         log::info!("Creating UDP tunnel on {}", config.local_addr);
         
@@ -110,7 +102,9 @@ impl UdpTunnel {
         socket.set_read_timeout(config.read_timeout)?;
         socket.set_write_timeout(config.write_timeout)?;
         
-        // ЛУЧШАЯ ПРАКТИКА: Pre-allocate буферы
+        // Set socket buffer sizes
+        Self::set_socket_buffers(&socket, config.recv_buffer_size, config.send_buffer_size);
+        
         let recv_buffer = vec![0u8; MAX_PACKET_SIZE];
         let send_buffer = vec![0u8; MAX_PACKET_SIZE];
         
@@ -123,53 +117,58 @@ impl UdpTunnel {
         })
     }
 
-    /// Возвращает file descriptor для poll/epoll
+    fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
+        let fd = socket.as_raw_fd();
+        
+        unsafe {
+            let recv_size = recv_size as libc::c_int;
+            let send_size = send_size as libc::c_int;
+            
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &recv_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &send_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
+    /// Get file descriptor for poll/epoll
+    #[inline]
     pub fn fd(&self) -> RawFd {
         self.socket.as_raw_fd()
     }
 
-    /// Отправляет зашифрованный пакет
+    /// Send encrypted packet to peer
     pub fn send_encrypted(&mut self, peer: &mut PeerState, data: &[u8]) -> Result<usize> {
         let counter = peer.next_counter();
         let header = PacketHeader::new(PacketType::Data, counter);
         
-        // Шифруем payload с заголовком как AAD
         let header_bytes = header.serialize();
         let encrypted = self.cipher.encrypt(&header.nonce, data, &header_bytes)?;
         
-        // Собираем пакет: header + encrypted(payload + tag)
         let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
         
         let sent = self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
         peer.bytes_tx += sent as u64;
+        peer.packets_tx += 1;
         
         log::trace!("Sent {} bytes to {}", sent, peer.addr);
         Ok(sent)
     }
 
-    /// Получает и расшифровывает пакет
-    pub fn recv_decrypted(&mut self, peer: &mut PeerState) -> Result<Option<(PacketType, Vec<u8>)>> {
-        match self.socket.recv_from(&mut self.recv_buffer) {
-            Ok((len, src)) => {
-                if src != peer.addr {
-                    log::warn!("Packet from unexpected source: {}", src);
-                    return Ok(None);
-                }
-                
-                peer.bytes_rx += len as u64;
-                peer.touch();
-                
-                self.process_received_packet(peer, &self.recv_buffer[..len].to_vec())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Получает пакет от любого источника (для сервера)
+    /// Receive packet from any source (for server)
     pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((len, src)) => {
@@ -182,51 +181,12 @@ impl UdpTunnel {
         }
     }
 
-    /// Обрабатывает полученный пакет
-    fn process_received_packet(&self, peer: &mut PeerState, data: &[u8]) -> Result<Option<(PacketType, Vec<u8>)>> {
-        if data.len() < PROTOCOL_HEADER_SIZE {
-            log::warn!("Packet too small: {} bytes", data.len());
-            return Ok(None);
-        }
-
-        let header = PacketHeader::deserialize(data)?;
-        
-        // Anti-replay проверка
-        if !peer.replay_window.check_and_update(header.counter as u64) {
-            log::warn!("Replay attack detected! Counter: {}", header.counter);
-            return Ok(None);
-        }
-
-        let header_bytes = header.serialize();
-        let encrypted_payload = &data[PROTOCOL_HEADER_SIZE..];
-
-        match header.packet_type {
-            PacketType::Data => {
-                let decrypted = self.cipher.decrypt(&header.nonce, encrypted_payload, &header_bytes)?;
-                Ok(Some((PacketType::Data, decrypted)))
-            }
-            PacketType::Keepalive => {
-                log::trace!("Keepalive from {}", peer.addr);
-                Ok(Some((PacketType::Keepalive, Vec::new())))
-            }
-            PacketType::Disconnect => {
-                log::info!("Disconnect request from {}", peer.addr);
-                Ok(Some((PacketType::Disconnect, Vec::new())))
-            }
-            _ => {
-                log::warn!("Unexpected packet type: {:?}", header.packet_type);
-                Ok(None)
-            }
-        }
-    }
-
-    /// Отправляет keepalive
+    /// Send keepalive
     pub fn send_keepalive(&mut self, peer: &mut PeerState) -> Result<()> {
         let counter = peer.next_counter();
         let header = PacketHeader::new(PacketType::Keepalive, counter);
         let header_bytes = header.serialize();
         
-        // Keepalive тоже шифруем (пустой payload)
         let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
         
         let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
@@ -238,13 +198,23 @@ impl UdpTunnel {
         Ok(())
     }
 
-    /// Отправляет сырые данные (для handshake)
-    pub fn send_raw(&self, addr: SocketAddr, data: &[u8]) -> Result<usize> {
-        let sent = self.socket.send_to(data, addr)?;
-        Ok(sent)
+    /// Send disconnect notification
+    pub fn send_disconnect(&mut self, peer: &mut PeerState) -> Result<()> {
+        let counter = peer.next_counter();
+        let header = PacketHeader::new(PacketType::Disconnect, counter);
+        let header_bytes = header.serialize();
+        
+        let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
+        
+        let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
+        self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
+        self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
+        
+        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        Ok(())
     }
 
-    /// Устанавливает non-blocking режим
+    /// Set non-blocking mode
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         self.socket.set_nonblocking(nonblocking)?;
         Ok(())
@@ -253,12 +223,18 @@ impl UdpTunnel {
     pub fn config(&self) -> &TunnelConfig {
         &self.config
     }
+
+    pub fn cipher(&self) -> &ChaCha20Poly1305 {
+        &self.cipher
+    }
 }
 
-// ЛУЧШАЯ ПРАКТИКА: Event Loop с poll
-/// Простой event loop для VPN
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENT LOOP
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Simple event loop using poll
 pub struct EventLoop {
-    /// File descriptors для poll
     poll_fds: Vec<libc::pollfd>,
 }
 
@@ -267,7 +243,7 @@ impl EventLoop {
         EventLoop { poll_fds: Vec::new() }
     }
 
-    /// Добавляет fd для мониторинга
+    /// Add file descriptor for monitoring
     pub fn add_fd(&mut self, fd: RawFd, events: i16) {
         self.poll_fds.push(libc::pollfd {
             fd,
@@ -276,7 +252,12 @@ impl EventLoop {
         });
     }
 
-    /// Ожидает события
+    /// Remove file descriptor
+    pub fn remove_fd(&mut self, fd: RawFd) {
+        self.poll_fds.retain(|pfd| pfd.fd != fd);
+    }
+
+    /// Poll for events
     pub fn poll(&mut self, timeout_ms: i32) -> Result<Vec<(RawFd, i16)>> {
         let result = unsafe {
             libc::poll(
@@ -297,7 +278,7 @@ impl EventLoop {
             }
         }
 
-        // Сбрасываем revents
+        // Reset revents
         for pfd in &mut self.poll_fds {
             pfd.revents = 0;
         }
@@ -312,10 +293,25 @@ impl Default for EventLoop {
     }
 }
 
-// Константы для poll
+// Poll constants
 pub const POLLIN: i16 = libc::POLLIN as i16;
 pub const POLLOUT: i16 = libc::POLLOUT as i16;
 pub const POLLERR: i16 = libc::POLLERR as i16;
+pub const POLLHUP: i16 = libc::POLLHUP as i16;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Check if error is "would block"
+#[inline]
+pub fn is_would_block(e: &crate::VpnError) -> bool {
+    let s = e.to_string();
+    s.contains("WouldBlock") || 
+    s.contains("temporarily unavailable") || 
+    s.contains("os error 11") ||
+    s.contains("Resource temporarily unavailable")
+}
 
 #[cfg(test)]
 mod tests {
@@ -325,6 +321,7 @@ mod tests {
     fn test_tunnel_config_default() {
         let config = TunnelConfig::default();
         assert_eq!(config.keepalive_interval, Duration::from_secs(25));
+        assert_eq!(config.recv_buffer_size, 2 * 1024 * 1024);
     }
 
     #[test]

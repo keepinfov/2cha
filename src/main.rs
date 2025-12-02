@@ -1,13 +1,10 @@
-//! # 2cha - Simple VPN Utility
+//! # 2cha - High-Performance VPN Utility
 //!
-//! Usage:
-//!   2cha up [--config FILE] [-d]     Connect to VPN
-//!   2cha down                         Disconnect
-//!   2cha status                       Show connection status  
-//!   2cha toggle                       Toggle connection
-//!   2cha server [--config FILE]       Run as server
-//!   2cha genkey                       Generate new key
-//!   2cha init                         Create config template
+//! Features:
+//! - IPv4/IPv6 dual-stack support
+//! - ChaCha20-Poly1305 or AES-256-GCM encryption
+//! - Static binary support (musl)
+//! - Full/split tunnel modes
 
 mod tun;
 mod crypto;
@@ -24,7 +21,7 @@ pub use protocol::{Packet, PacketType};
 pub use network::{UdpTunnel, TunnelConfig};
 pub use config::{ServerConfig, ClientConfig, ConfigError, CipherSuite};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const CHACHA20_KEY_SIZE: usize = 32;
 pub const CHACHA20_NONCE_SIZE: usize = 12;
 pub const POLY1305_TAG_SIZE: usize = 16;
@@ -37,7 +34,7 @@ mod server;
 use std::env;
 use std::process;
 
-const VERSION: &str = "0.2.0";
+const VERSION: &str = "0.3.0";
 const PID_FILE: &str = "/tmp/2cha.pid";
 const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
 const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
@@ -59,7 +56,7 @@ fn main() {
         "genkey" | "key" => cmd_genkey(),
         "init" => cmd_init(&args[2..]),
         "-h" | "--help" | "help" => { print_usage(); Ok(()) }
-        "-v" | "--version" | "version" => { println!("2cha v{}", VERSION); Ok(()) }
+        "-v" | "--version" | "version" => { print_version(); Ok(()) }
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             print_usage();
@@ -73,6 +70,16 @@ fn main() {
     }
 }
 
+fn print_version() {
+    println!("2cha v{}", VERSION);
+    println!("Protocol version: {}", PROTOCOL_VERSION);
+    
+    #[cfg(target_env = "musl")]
+    println!("Build: static (musl)");
+    #[cfg(not(target_env = "musl"))]
+    println!("Build: dynamic (glibc)");
+}
+
 fn print_usage() {
     println!(r#"
   ██████╗  ██████╗██╗  ██╗ █████╗ 
@@ -82,7 +89,7 @@ fn print_usage() {
   ███████╗╚██████╗██║  ██║██║  ██║
   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝  v{}
 
-Simple VPN utility powered by ChaCha20-Poly1305
+High-performance VPN with IPv4/IPv6 support
 
 USAGE:
     2cha <COMMAND> [OPTIONS]
@@ -93,41 +100,32 @@ COMMANDS:
     status, s         Show connection status
     toggle, t         Toggle connection on/off
     server, serve     Run as VPN server
-    genkey, key       Generate a new encryption key
-    init              Create config file template
+    genkey, key       Generate encryption key
+    init              Create config template
 
 OPTIONS:
-    -c, --config <FILE>   Config file (default: /etc/2cha/client.toml)
+    -c, --config <FILE>   Config file path
     -d, --daemon          Run in background
-    -v, --verbose         Show detailed output
+    -v, --verbose         Detailed output
     -q, --quiet           Minimal output
-    -h, --help            Show this help
+    -h, --help            Show help
 
 EXAMPLES:
-    # Quick connect with default config
-    sudo 2cha up
-
-    # Connect with custom config
-    sudo 2cha up -c ~/my-vpn.toml
-
-    # Check status
-    2cha status
-
-    # Run server
-    sudo 2cha server -c /etc/2cha/server.toml
-
-    # Generate new key
-    2cha genkey > /etc/2cha/vpn.key
-
-    # Create config template
+    sudo 2cha up -c client.toml
+    sudo 2cha server -c server.toml
+    2cha genkey > vpn.key
     2cha init client > client.toml
     2cha init server > server.toml
+    2cha status
+
+STATIC BUILD:
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --release --target x86_64-unknown-linux-musl
 "#, VERSION);
 }
 
 fn cmd_up(args: &[String]) -> Result<()> {
     let mut config_path = DEFAULT_CONFIG.to_string();
-    let mut daemon = false;
     let mut verbose = false;
     let mut quiet = false;
 
@@ -140,21 +138,17 @@ fn cmd_up(args: &[String]) -> Result<()> {
                     config_path = args[i].to_string();
                 }
             }
-            "-d" | "--daemon" => daemon = true,
             "-v" | "--verbose" => verbose = true,
             "-q" | "--quiet" => quiet = true,
             _ => {}
         }
         i += 1;
     }
-    
-    let _ = daemon; // TODO: implement daemon mode
 
-    // Check if already running
     if is_running() {
         if !quiet {
             println!("\x1b[33m●\x1b[0m VPN already connected");
-            println!("  Use '\x1b[1m2cha status\x1b[0m' for details or '\x1b[1m2cha down\x1b[0m' to disconnect");
+            println!("  Use '2cha status' or '2cha down'");
         }
         return Ok(());
     }
@@ -171,22 +165,15 @@ fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     if !quiet {
-        println!("\x1b[36m⟳\x1b[0m Connecting to VPN...");
+        println!("\x1b[36m⟳\x1b[0m Connecting...");
     }
 
     // Save PID
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
 
-    // Run client
     let result = client::run(&config_path, quiet);
 
-    // Cleanup PID
     std::fs::remove_file(PID_FILE).ok();
-
-    if !quiet && result.is_ok() {
-        println!("\x1b[32m✓\x1b[0m Disconnected");
-    }
-
     result
 }
 
@@ -194,16 +181,12 @@ fn cmd_down() -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             println!("\x1b[36m⟳\x1b[0m Disconnecting...");
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            // Wait a bit
+            unsafe { libc::kill(pid, libc::SIGTERM); }
             std::thread::sleep(std::time::Duration::from_millis(500));
             
             if !is_running() {
                 println!("\x1b[32m✓\x1b[0m Disconnected");
             } else {
-                // Force kill
                 unsafe { libc::kill(pid, libc::SIGKILL); }
                 std::fs::remove_file(PID_FILE).ok();
                 println!("\x1b[32m✓\x1b[0m Force disconnected");
@@ -212,83 +195,99 @@ fn cmd_down() -> Result<()> {
         }
     }
     
-    println!("\x1b[33m●\x1b[0m VPN not connected");
+    println!("\x1b[90m○\x1b[0m VPN not connected");
     Ok(())
 }
 
 fn cmd_status() -> Result<()> {
     println!();
-    println!("  \x1b[1m2cha VPN Status\x1b[0m");
-    println!("  ─────────────────────────────────");
+    println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
+    println!("  ════════════════════════════════════════");
     
-    // Check connection
     let connected = is_running();
+    let tun_name = "tun0";
+    
+    // Connection status
     if connected {
-        println!("  Status:    \x1b[32m● Connected\x1b[0m");
+        println!("  Status:     \x1b[32m● Connected\x1b[0m");
     } else {
-        println!("  Status:    \x1b[31m○ Disconnected\x1b[0m");
+        println!("  Status:     \x1b[31m○ Disconnected\x1b[0m");
     }
-
-    // Check TUN interface
-    if let Ok(output) = std::process::Command::new("ip")
-        .args(["addr", "show", "tun0"])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(ip_line) = stdout.lines().find(|l| l.contains("inet ")) {
-                let ip = ip_line.split_whitespace()
-                    .nth(1)
-                    .unwrap_or("unknown");
-                println!("  VPN IP:    \x1b[36m{}\x1b[0m", ip);
-            }
-        }
+    
+    // Get routing status
+    let routing_status = routing::get_routing_status(tun_name);
+    
+    // Interface status
+    if routing_status.interface_exists {
+        println!("  Interface:  \x1b[32m●\x1b[0m {}", tun_name);
+    } else {
+        println!("  Interface:  \x1b[90m○\x1b[0m {}", tun_name);
     }
-
-    // Check routing
-    if let Ok(output) = std::process::Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("tun0") {
-            println!("  Routing:   \x1b[32m● Full tunnel\x1b[0m (all traffic via VPN)");
-        } else if connected {
-            println!("  Routing:   \x1b[33m● Split tunnel\x1b[0m (VPN network only)");
+    
+    // IPv4 address
+    if let Some(ref addr) = routing_status.ipv4_address {
+        println!("  IPv4:       \x1b[36m{}\x1b[0m", addr);
+    } else if connected {
+        println!("  IPv4:       \x1b[90mdisabled\x1b[0m");
+    }
+    
+    // IPv6 address
+    if let Some(ref addr) = routing_status.ipv6_address {
+        println!("  IPv6:       \x1b[36m{}\x1b[0m", addr);
+    } else if connected {
+        println!("  IPv6:       \x1b[90mdisabled\x1b[0m");
+    }
+    
+    // Routing mode
+    if routing_status.is_full_tunnel() {
+        print!("  Routing:    \x1b[33m● Full tunnel\x1b[0m");
+        if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+            println!(" (v4+v6)");
+        } else if routing_status.default_route_v4_via_tun {
+            println!(" (v4)");
         } else {
-            println!("  Routing:   \x1b[90m○ Normal\x1b[0m");
+            println!(" (v6)");
+        }
+    } else if connected {
+        println!("  Routing:    \x1b[32m● Split tunnel\x1b[0m");
+    } else {
+        println!("  Routing:    \x1b[90m○ Normal\x1b[0m");
+    }
+
+    // Gateway status (for server mode)
+    if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
+        print!("  Gateway:    \x1b[32m● Forwarding\x1b[0m");
+        if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
+            println!(" (v4+v6)");
+        } else if routing_status.ipv4_forwarding {
+            println!(" (v4)");
+        } else {
+            println!(" (v6)");
         }
     }
 
-    // Get public IP
+    // Traffic statistics
+    if routing_status.interface_exists {
+        if let (Ok(rx), Ok(tx)) = (
+            std::fs::read_to_string(format!("/sys/class/net/{}/statistics/rx_bytes", tun_name)),
+            std::fs::read_to_string(format!("/sys/class/net/{}/statistics/tx_bytes", tun_name)),
+        ) {
+            let rx: u64 = rx.trim().parse().unwrap_or(0);
+            let tx: u64 = tx.trim().parse().unwrap_or(0);
+            println!("  Traffic:    ↓ {} / ↑ {}", format_bytes(rx), format_bytes(tx));
+        }
+    }
+
+    // Public IP (only if connected)
     if connected {
         if let Ok(output) = std::process::Command::new("curl")
-            .args(["-s", "--max-time", "3", "ifconfig.me"])
+            .args(["-s", "--max-time", "3", "-4", "ifconfig.me"])
             .output()
         {
             if output.status.success() {
                 let ip = String::from_utf8_lossy(&output.stdout);
-                println!("  Public IP: \x1b[36m{}\x1b[0m", ip.trim());
+                println!("  Public IP:  \x1b[36m{}\x1b[0m", ip.trim());
             }
-        }
-    }
-
-    // Check IP forwarding (server mode)
-    if let Ok(val) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
-        if val.trim() == "1" {
-            println!("  Gateway:   \x1b[32m● Enabled\x1b[0m (forwarding active)");
-        }
-    }
-
-    // Stats from /sys if available
-    if std::path::Path::new("/sys/class/net/tun0/statistics/rx_bytes").exists() {
-        if let (Ok(rx), Ok(tx)) = (
-            std::fs::read_to_string("/sys/class/net/tun0/statistics/rx_bytes"),
-            std::fs::read_to_string("/sys/class/net/tun0/statistics/tx_bytes"),
-        ) {
-            let rx: u64 = rx.trim().parse().unwrap_or(0);
-            let tx: u64 = tx.trim().parse().unwrap_or(0);
-            println!("  Traffic:   ↓ {} / ↑ {}", format_bytes(rx), format_bytes(tx));
         }
     }
 
@@ -325,7 +324,6 @@ fn cmd_server(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    // Setup logging
     let log_level = if verbose { "debug" } else if quiet { "error" } else { "info" };
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(log_level)
@@ -337,13 +335,11 @@ fn cmd_server(args: &[String]) -> Result<()> {
 fn cmd_genkey() -> Result<()> {
     let mut key = [0u8; 32];
     
-    // Read from /dev/urandom
     if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
         file.read_exact(&mut key).map_err(|e| VpnError::Io(e))?;
     } else {
-        // Fallback to time-based (not cryptographically secure!)
-        eprintln!("Warning: /dev/urandom not available, using weak randomness");
+        eprintln!("Warning: /dev/urandom unavailable");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -353,12 +349,10 @@ fn cmd_genkey() -> Result<()> {
         }
     }
 
-    // Print as hex
     for byte in &key {
         print!("{:02x}", byte);
     }
     println!();
-
     Ok(())
 }
 
@@ -370,7 +364,7 @@ fn cmd_init(args: &[String]) -> Result<()> {
         "server" | "s" => print!("{}", config::example_server_config()),
         _ => {
             eprintln!("Usage: 2cha init <client|server>");
-            std::process::exit(1);
+            process::exit(1);
         }
     }
     
@@ -380,10 +374,7 @@ fn cmd_init(args: &[String]) -> Result<()> {
 fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check if process exists
-            unsafe {
-                return libc::kill(pid, 0) == 0;
-            }
+            unsafe { return libc::kill(pid, 0) == 0; }
         }
     }
     false
@@ -395,11 +386,11 @@ fn format_bytes(bytes: u64) -> String {
     const GB: u64 = MB * 1024;
 
     if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+        format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
+        format!("{:.2} MB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+        format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
     }
