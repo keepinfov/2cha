@@ -20,22 +20,36 @@ const IFF_TUN: i16 = 0x0001;
 const IFF_NO_PI: i16 = 0x1000;
 const IFF_MULTI_QUEUE: i16 = 0x0100;
 
-// Use libc::Ioctl type which is platform-appropriate (c_int on musl, c_ulong on glibc)
-type IoctlRequest = libc::c_int;
-
-// ioctl commands - cast to appropriate type for platform
-const TUNSETIFF: IoctlRequest = 0x400454ca_u32 as IoctlRequest;
+// ioctl request type differs between glibc (c_ulong) and musl (c_int)
+// We use nix::ioctl! macro style approach - store as u32 and cast at call site
+const TUNSETIFF: u32 = 0x400454ca;
 #[allow(dead_code)]
-const TUNSETQUEUE: IoctlRequest = 0x400454d9_u32 as IoctlRequest;
+const TUNSETQUEUE: u32 = 0x400454d9;
 
 // Socket ioctls
-const SIOCSIFMTU: IoctlRequest = 0x8922_u32 as IoctlRequest;
-const SIOCSIFADDR: IoctlRequest = 0x8916_u32 as IoctlRequest;
-const SIOCSIFNETMASK: IoctlRequest = 0x891c_u32 as IoctlRequest;
-const SIOCGIFFLAGS: IoctlRequest = 0x8913_u32 as IoctlRequest;
-const SIOCSIFFLAGS: IoctlRequest = 0x8914_u32 as IoctlRequest;
+const SIOCSIFMTU: u32 = 0x8922;
+const SIOCSIFADDR: u32 = 0x8916;
+const SIOCSIFNETMASK: u32 = 0x891c;
+const SIOCGIFFLAGS: u32 = 0x8913;
+const SIOCSIFFLAGS: u32 = 0x8914;
 #[allow(dead_code)]
-const SIOCSIFDSTADDR: IoctlRequest = 0x8918_u32 as IoctlRequest;
+const SIOCSIFDSTADDR: u32 = 0x8918;
+const SIOCGIFINDEX: u32 = 0x8933;
+
+// Helper to call ioctl with correct type for both glibc and musl
+#[inline]
+unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> libc::c_int {
+    // On musl, ioctl takes c_int; on glibc it takes c_ulong
+    // The libc crate handles this with the Ioctl type alias
+    #[cfg(target_env = "musl")]
+    {
+        libc::ioctl(fd, request as libc::c_int, arg)
+    }
+    #[cfg(not(target_env = "musl"))]
+    {
+        libc::ioctl(fd, request as libc::c_ulong, arg)
+    }
+}
 
 // Interface flags
 const IFF_UP: libc::c_short = 0x1;
@@ -43,6 +57,7 @@ const IFF_RUNNING: libc::c_short = 0x40;
 
 // Address families
 const AF_INET: libc::sa_family_t = libc::AF_INET as libc::sa_family_t;
+#[allow(dead_code)]
 const AF_INET6: libc::sa_family_t = libc::AF_INET6 as libc::sa_family_t;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,7 +142,8 @@ impl IfReqAddr4 {
     }
 }
 
-// IPv6 socket address
+// IPv6 socket address (for future use)
+#[allow(dead_code)]
 #[repr(C)]
 struct SockAddrIn6 {
     sin6_family: libc::sa_family_t,
@@ -201,7 +217,7 @@ impl TunDevice {
         let name_len = name.len().min(IFNAMSIZ - 1);
         ifr.ifr_name[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
 
-        let result = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF, &mut ifr) };
+        let result = unsafe { ioctl_raw(file.as_raw_fd(), TUNSETIFF, &mut ifr as *mut _ as *mut libc::c_void) };
         if result < 0 {
             let errno = std::io::Error::last_os_error();
             return Err(TunError::IoctlFailed(format!("TUNSETIFF: {}", errno)).into());
@@ -286,14 +302,14 @@ impl TunDevice {
         };
 
         // SIOCSIFADDR for IPv6 is different
-        const SIOCSIFADDR_IN6: IoctlRequest = 0x8916_u32 as IoctlRequest;
+        const SIOCSIFADDR_IN6: u32 = 0x8916;
 
         let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
             return Err(TunError::IoctlFailed("Failed to create IPv6 socket".into()).into());
         }
 
-        let result = unsafe { libc::ioctl(sock, SIOCSIFADDR_IN6, &ifr6) };
+        let result = unsafe { ioctl_raw(sock, SIOCSIFADDR_IN6, &ifr6 as *const _ as *mut libc::c_void) };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -333,7 +349,7 @@ impl TunDevice {
         let sock = self.create_socket(AF_INET)?;
 
         // Get current flags
-        let result = unsafe { libc::ioctl(sock, SIOCGIFFLAGS, &mut ifr) };
+        let result = unsafe { ioctl_raw(sock, SIOCGIFFLAGS, &mut ifr as *mut _ as *mut libc::c_void) };
         if result < 0 {
             unsafe { libc::close(sock) };
             return Err(TunError::IoctlFailed("SIOCGIFFLAGS failed".into()).into());
@@ -342,7 +358,7 @@ impl TunDevice {
         // Set UP and RUNNING
         ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
 
-        let result = unsafe { libc::ioctl(sock, SIOCSIFFLAGS, &ifr) };
+        let result = unsafe { ioctl_raw(sock, SIOCSIFFLAGS, &ifr as *const _ as *mut libc::c_void) };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -429,9 +445,8 @@ impl TunDevice {
         ifr.ifr_name[..self.name.len()].copy_from_slice(self.name.as_bytes());
 
         let sock = self.create_socket(AF_INET)?;
-        const SIOCGIFINDEX: IoctlRequest = 0x8933_u32 as IoctlRequest;
         
-        let result = unsafe { libc::ioctl(sock, SIOCGIFINDEX, &mut ifr) };
+        let result = unsafe { ioctl_raw(sock, SIOCGIFINDEX, &mut ifr as *mut _ as *mut libc::c_void) };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -444,12 +459,12 @@ impl TunDevice {
     fn ioctl_with_socket<T>(
         &self,
         family: libc::sa_family_t,
-        request: IoctlRequest,
+        request: u32,
         arg: &T,
         name: &str,
     ) -> Result<()> {
         let sock = self.create_socket(family)?;
-        let result = unsafe { libc::ioctl(sock, request, arg) };
+        let result = unsafe { ioctl_raw(sock, request, arg as *const T as *mut libc::c_void) };
         unsafe { libc::close(sock) };
         
         if result < 0 {
@@ -504,6 +519,7 @@ impl IpVersion {
 }
 
 /// Extract source IP from packet
+#[allow(dead_code)]
 pub fn get_source_ip(data: &[u8]) -> Option<std::net::IpAddr> {
     if data.len() < 20 {
         return None;
@@ -524,6 +540,7 @@ pub fn get_source_ip(data: &[u8]) -> Option<std::net::IpAddr> {
 }
 
 /// Extract destination IP from packet
+#[allow(dead_code)]
 pub fn get_dest_ip(data: &[u8]) -> Option<std::net::IpAddr> {
     if data.len() < 20 {
         return None;

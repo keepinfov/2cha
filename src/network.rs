@@ -253,6 +253,7 @@ impl EventLoop {
     }
 
     /// Remove file descriptor
+    #[allow(dead_code)]
     pub fn remove_fd(&mut self, fd: RawFd) {
         self.poll_fds.retain(|pfd| pfd.fd != fd);
     }
@@ -295,8 +296,11 @@ impl Default for EventLoop {
 
 // Poll constants
 pub const POLLIN: i16 = libc::POLLIN as i16;
+#[allow(dead_code)]
 pub const POLLOUT: i16 = libc::POLLOUT as i16;
+#[allow(dead_code)]
 pub const POLLERR: i16 = libc::POLLERR as i16;
+#[allow(dead_code)]
 pub const POLLHUP: i16 = libc::POLLHUP as i16;
 
 // ═══════════════════════════════════════════════════════════════════════════

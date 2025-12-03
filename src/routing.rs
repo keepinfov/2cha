@@ -57,6 +57,7 @@ pub fn enable_ipv6_forward() -> io::Result<()> {
 }
 
 /// Disable IPv4 forwarding
+#[allow(dead_code)]
 pub fn disable_ipv4_forward() -> io::Result<()> {
     let _ = Command::new("sysctl")
         .args(["-w", "net.ipv4.ip_forward=0"])
@@ -66,6 +67,7 @@ pub fn disable_ipv4_forward() -> io::Result<()> {
 }
 
 /// Disable IPv6 forwarding
+#[allow(dead_code)]
 pub fn disable_ipv6_forward() -> io::Result<()> {
     let _ = Command::new("sysctl")
         .args(["-w", "net.ipv6.conf.all.forwarding=0"])
@@ -248,6 +250,7 @@ table ip6 2cha_filter6 {{
 }
 
 /// Remove IPv4 NAT rules
+#[allow(dead_code)]
 pub fn remove_masquerade_v4(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
     // Try nftables first
     let _ = Command::new("nft").args(["delete", "table", "ip", "2cha_nat"]).output();
@@ -262,6 +265,7 @@ pub fn remove_masquerade_v4(external_iface: &str, vpn_subnet: &str) -> io::Resul
 }
 
 /// Remove IPv6 NAT rules
+#[allow(dead_code)]
 pub fn remove_masquerade_v6(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
     let _ = Command::new("nft").args(["delete", "table", "ip6", "2cha_nat6"]).output();
     let _ = Command::new("nft").args(["delete", "table", "ip6", "2cha_filter6"]).output();

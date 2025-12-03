@@ -559,11 +559,13 @@ impl std::error::Error for ConfigError {}
 // UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     let addr: Ipv4Addr = s.parse().ok()?;
     Some(addr.octets())
 }
 
+#[allow(dead_code)]
 pub fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
     let addr: Ipv6Addr = s.parse().ok()?;
     Some(addr.octets())
@@ -593,6 +595,7 @@ pub fn prefix_to_netmask_v4(prefix: u8) -> [u8; 4] {
     mask.to_be_bytes()
 }
 
+#[allow(dead_code)]
 pub fn prefix_to_netmask_v6(prefix: u8) -> [u8; 16] {
     let mut mask = [0u8; 16];
     let full_bytes = (prefix / 8) as usize;

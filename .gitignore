@@ -1,3 +1,4 @@
 /target
-/*.conf.toml
+*.conf.toml
 /result
+*.key

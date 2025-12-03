@@ -6,20 +6,20 @@
 //! - Static binary support (musl)
 //! - Full/split tunnel modes
 
-mod tun;
-mod crypto;
-mod protocol;
-mod network;
-mod error;
 mod config;
+mod crypto;
+mod error;
+mod network;
+mod protocol;
 mod routing;
+mod tun;
 
-pub use error::{VpnError, Result};
-pub use tun::TunDevice;
-pub use crypto::{ChaCha20, Poly1305, ChaCha20Poly1305, Aes256Gcm, Cipher};
+pub use config::{CipherSuite, ClientConfig, ConfigError, ServerConfig};
+pub use crypto::{Aes256Gcm, ChaCha20, ChaCha20Poly1305, Cipher, Poly1305};
+pub use error::{Result, VpnError};
+pub use network::{TunnelConfig, UdpTunnel};
 pub use protocol::{Packet, PacketType};
-pub use network::{UdpTunnel, TunnelConfig};
-pub use config::{ServerConfig, ClientConfig, ConfigError, CipherSuite};
+pub use tun::TunDevice;
 
 pub const PROTOCOL_VERSION: u8 = 2;
 pub const CHACHA20_KEY_SIZE: usize = 32;
@@ -34,14 +34,14 @@ mod server;
 use std::env;
 use std::process;
 
-const VERSION: &str = "0.3.0";
+const VERSION: &str = "0.3.2";
 const PID_FILE: &str = "/tmp/2cha.pid";
 const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
 const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 {
         print_usage();
         process::exit(1);
@@ -55,8 +55,14 @@ fn main() {
         "server" | "serve" => cmd_server(&args[2..]),
         "genkey" | "key" => cmd_genkey(),
         "init" => cmd_init(&args[2..]),
-        "-h" | "--help" | "help" => { print_usage(); Ok(()) }
-        "-v" | "--version" | "version" => { print_version(); Ok(()) }
+        "-h" | "--help" | "help" => {
+            print_usage();
+            Ok(())
+        }
+        "-v" | "--version" | "version" => {
+            print_version();
+            Ok(())
+        }
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             print_usage();
@@ -73,7 +79,7 @@ fn main() {
 fn print_version() {
     println!("2cha v{}", VERSION);
     println!("Protocol version: {}", PROTOCOL_VERSION);
-    
+
     #[cfg(target_env = "musl")]
     println!("Build: static (musl)");
     #[cfg(not(target_env = "musl"))]
@@ -81,7 +87,8 @@ fn print_version() {
 }
 
 fn print_usage() {
-    println!(r#"
+    println!(
+        r#"
   ██████╗  ██████╗██╗  ██╗ █████╗ 
   ╚════██╗██╔════╝██║  ██║██╔══██╗
    █████╔╝██║     ███████║███████║
@@ -121,7 +128,9 @@ EXAMPLES:
 STATIC BUILD:
     rustup target add x86_64-unknown-linux-musl
     cargo build --release --target x86_64-unknown-linux-musl
-"#, VERSION);
+"#,
+        VERSION
+    );
 }
 
 fn cmd_up(args: &[String]) -> Result<()> {
@@ -155,13 +164,14 @@ fn cmd_up(args: &[String]) -> Result<()> {
 
     // Setup logging
     if verbose {
-        env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("debug")
-        ).format_timestamp_millis().init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .format_timestamp_millis()
+            .init();
     } else if !quiet {
-        env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("warn")
-        ).format_target(false).format_timestamp(None).init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+            .format_target(false)
+            .format_timestamp(None)
+            .init();
     }
 
     if !quiet {
@@ -181,20 +191,24 @@ fn cmd_down() -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             println!("\x1b[36m⟳\x1b[0m Disconnecting...");
-            unsafe { libc::kill(pid, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            
+
             if !is_running() {
                 println!("\x1b[32m✓\x1b[0m Disconnected");
             } else {
-                unsafe { libc::kill(pid, libc::SIGKILL); }
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
                 std::fs::remove_file(PID_FILE).ok();
                 println!("\x1b[32m✓\x1b[0m Force disconnected");
             }
             return Ok(());
         }
     }
-    
+
     println!("\x1b[90m○\x1b[0m VPN not connected");
     Ok(())
 }
@@ -203,41 +217,41 @@ fn cmd_status() -> Result<()> {
     println!();
     println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
     println!("  ════════════════════════════════════════");
-    
+
     let connected = is_running();
     let tun_name = "tun0";
-    
+
     // Connection status
     if connected {
         println!("  Status:     \x1b[32m● Connected\x1b[0m");
     } else {
         println!("  Status:     \x1b[31m○ Disconnected\x1b[0m");
     }
-    
+
     // Get routing status
     let routing_status = routing::get_routing_status(tun_name);
-    
+
     // Interface status
     if routing_status.interface_exists {
         println!("  Interface:  \x1b[32m●\x1b[0m {}", tun_name);
     } else {
         println!("  Interface:  \x1b[90m○\x1b[0m {}", tun_name);
     }
-    
+
     // IPv4 address
     if let Some(ref addr) = routing_status.ipv4_address {
         println!("  IPv4:       \x1b[36m{}\x1b[0m", addr);
     } else if connected {
         println!("  IPv4:       \x1b[90mdisabled\x1b[0m");
     }
-    
+
     // IPv6 address
     if let Some(ref addr) = routing_status.ipv6_address {
         println!("  IPv6:       \x1b[36m{}\x1b[0m", addr);
     } else if connected {
         println!("  IPv6:       \x1b[90mdisabled\x1b[0m");
     }
-    
+
     // Routing mode
     if routing_status.is_full_tunnel() {
         print!("  Routing:    \x1b[33m● Full tunnel\x1b[0m");
@@ -274,7 +288,11 @@ fn cmd_status() -> Result<()> {
         ) {
             let rx: u64 = rx.trim().parse().unwrap_or(0);
             let tx: u64 = tx.trim().parse().unwrap_or(0);
-            println!("  Traffic:    ↓ {} / ↑ {}", format_bytes(rx), format_bytes(tx));
+            println!(
+                "  Traffic:    ↓ {} / ↑ {}",
+                format_bytes(rx),
+                format_bytes(tx)
+            );
         }
     }
 
@@ -324,17 +342,23 @@ fn cmd_server(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    let log_level = if verbose { "debug" } else if quiet { "error" } else { "info" };
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(log_level)
-    ).format_timestamp_millis().init();
+    let log_level = if verbose {
+        "debug"
+    } else if quiet {
+        "error"
+    } else {
+        "info"
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
+        .format_timestamp_millis()
+        .init();
 
     server::run(&config_path)
 }
 
 fn cmd_genkey() -> Result<()> {
     let mut key = [0u8; 32];
-    
+
     if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
         file.read_exact(&mut key).map_err(|e| VpnError::Io(e))?;
@@ -358,7 +382,7 @@ fn cmd_genkey() -> Result<()> {
 
 fn cmd_init(args: &[String]) -> Result<()> {
     let mode = args.first().map(|s| s.as_str()).unwrap_or("client");
-    
+
     match mode {
         "client" | "c" => print!("{}", config::example_client_config()),
         "server" | "s" => print!("{}", config::example_server_config()),
@@ -367,14 +391,16 @@ fn cmd_init(args: &[String]) -> Result<()> {
             process::exit(1);
         }
     }
-    
+
     Ok(())
 }
 
 fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { return libc::kill(pid, 0) == 0; }
+            unsafe {
+                return libc::kill(pid, 0) == 0;
+            }
         }
     }
     false
