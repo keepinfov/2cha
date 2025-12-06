@@ -1,0 +1,334 @@
+name: Release Builds
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Linux Static Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+          - target: armv7-unknown-linux-musleabihf
+            arch: armv7
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build universal binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Create release artifacts
+        run: |
+          cd target/${{ matrix.target }}/release
+
+          # Create three copies with different names
+          cp 2cha 2cha-server
+          cp 2cha 2cha-client
+          cp 2cha 2cha-universal
+
+          # Strip binaries
+          strip 2cha-server 2cha-client 2cha-universal || true
+
+          # Create tarballs
+          tar -czf 2cha-server-linux-${{ matrix.arch }}.tar.gz 2cha-server
+          tar -czf 2cha-client-linux-${{ matrix.arch }}.tar.gz 2cha-client
+          tar -czf 2cha-universal-linux-${{ matrix.arch }}.tar.gz 2cha-universal
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: 2cha-server-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-server-linux-${{ matrix.arch }}.tar.gz
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: 2cha-client-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-client-linux-${{ matrix.arch }}.tar.gz
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: 2cha-universal-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-universal-linux-${{ matrix.arch }}.tar.gz
+
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create release artifacts
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path 2cha.exe -DestinationPath 2cha-windows-${{ matrix.arch }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: 2cha-windows-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-windows-${{ matrix.arch }}.zip
+
+  build-macos:
+    name: Build macOS Binary
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            arch: aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create release artifacts
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip 2cha || true
+          tar -czf 2cha-macos-${{ matrix.arch }}.tar.gz 2cha
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: 2cha-macos-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-macos-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Upload Linux x86_64 server to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-server-linux-x86_64/2cha-server-linux-x86_64.tar.gz
+          asset_name: 2cha-server-linux-x86_64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux x86_64 client to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-client-linux-x86_64/2cha-client-linux-x86_64.tar.gz
+          asset_name: 2cha-client-linux-x86_64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux x86_64 universal to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-universal-linux-x86_64/2cha-universal-linux-x86_64.tar.gz
+          asset_name: 2cha-universal-linux-x86_64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux aarch64 server to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-server-linux-aarch64/2cha-server-linux-aarch64.tar.gz
+          asset_name: 2cha-server-linux-aarch64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux aarch64 client to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-client-linux-aarch64/2cha-client-linux-aarch64.tar.gz
+          asset_name: 2cha-client-linux-aarch64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux aarch64 universal to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-universal-linux-aarch64/2cha-universal-linux-aarch64.tar.gz
+          asset_name: 2cha-universal-linux-aarch64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux armv7 server to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-server-linux-armv7/2cha-server-linux-armv7.tar.gz
+          asset_name: 2cha-server-linux-armv7.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux armv7 client to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-client-linux-armv7/2cha-client-linux-armv7.tar.gz
+          asset_name: 2cha-client-linux-armv7.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux armv7 universal to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-universal-linux-armv7/2cha-universal-linux-armv7.tar.gz
+          asset_name: 2cha-universal-linux-armv7.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Windows x86_64 to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-windows-x86_64/2cha-windows-x86_64.zip
+          asset_name: 2cha-windows-x86_64.zip
+          asset_content_type: application/zip
+
+      - name: Upload macOS x86_64 to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-macos-x86_64/2cha-macos-x86_64.tar.gz
+          asset_name: 2cha-macos-x86_64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload macOS aarch64 to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./artifacts/2cha-macos-aarch64/2cha-macos-aarch64.tar.gz
+          asset_name: 2cha-macos-aarch64.tar.gz
+          asset_content_type: application/gzip
