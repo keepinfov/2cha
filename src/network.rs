@@ -295,13 +295,13 @@ impl Default for EventLoop {
 }
 
 // Poll constants
-pub const POLLIN: i16 = libc::POLLIN as i16;
+pub const POLLIN: i16 = libc::POLLIN;
 #[allow(dead_code)]
-pub const POLLOUT: i16 = libc::POLLOUT as i16;
+pub const POLLOUT: i16 = libc::POLLOUT;
 #[allow(dead_code)]
-pub const POLLERR: i16 = libc::POLLERR as i16;
+pub const POLLERR: i16 = libc::POLLERR;
 #[allow(dead_code)]
-pub const POLLHUP: i16 = libc::POLLHUP as i16;
+pub const POLLHUP: i16 = libc::POLLHUP;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS

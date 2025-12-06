@@ -1,7 +1,7 @@
 //! # TUN Device Module
 //!
 //! High-performance TUN device with IPv4/IPv6 support.
-//! Compatible with both glibc and musl.
+//! Compatible with glibc, musl, and multiple architectures (x86, x86_64, ARM, ARM64).
 
 use crate::error::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
@@ -10,23 +10,58 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM DETECTION AND TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Platform information for debugging
+#[allow(dead_code)]
+pub const PLATFORM_INFO: &str = {
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    { "x86_64-linux" }
+    #[cfg(all(target_arch = "x86", target_os = "linux"))]
+    { "x86-linux" }
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    { "aarch64-linux" }
+    #[cfg(all(target_arch = "arm", target_os = "linux"))]
+    { "arm-linux" }
+    #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
+    { "riscv64-linux" }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_os = "linux"),
+        all(target_arch = "x86", target_os = "linux"),
+        all(target_arch = "aarch64", target_os = "linux"),
+        all(target_arch = "arm", target_os = "linux"),
+        all(target_arch = "riscv64", target_os = "linux"),
+    )))]
+    { "unknown" }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CONSTANTS - Platform-independent
 // ═══════════════════════════════════════════════════════════════════════════
 
 const IFNAMSIZ: usize = 16;
 
-// TUN flags (from linux/if_tun.h)
+// TUN flags (from linux/if_tun.h) - same across all Linux architectures
 const IFF_TUN: i16 = 0x0001;
 const IFF_NO_PI: i16 = 0x1000;
 const IFF_MULTI_QUEUE: i16 = 0x0100;
 
-// ioctl request type differs between glibc (c_ulong) and musl (c_int)
-// We use nix::ioctl! macro style approach - store as u32 and cast at call site
+// ═══════════════════════════════════════════════════════════════════════════
+// IOCTL NUMBERS - Architecture-specific
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ioctl numbers are encoded differently on different architectures:
+// - On x86/x86_64/arm/aarch64: _IOW(type, nr, size) = (dir << 30) | (size << 16) | (type << 8) | nr
+// - TUNSETIFF = _IOW('T', 202, int) = 0x400454ca
+//
+// For socket ioctls (SIOC*), the values are the same across all architectures.
+
 const TUNSETIFF: u32 = 0x400454ca;
 #[allow(dead_code)]
 const TUNSETQUEUE: u32 = 0x400454d9;
 
-// Socket ioctls
+// Socket ioctls - same across all Linux architectures
 const SIOCSIFMTU: u32 = 0x8922;
 const SIOCSIFADDR: u32 = 0x8916;
 const SIOCSIFNETMASK: u32 = 0x891c;
@@ -36,17 +71,37 @@ const SIOCSIFFLAGS: u32 = 0x8914;
 const SIOCSIFDSTADDR: u32 = 0x8918;
 const SIOCGIFINDEX: u32 = 0x8933;
 
-// Helper to call ioctl with correct type for both glibc and musl
+// ═══════════════════════════════════════════════════════════════════════════
+// IOCTL WRAPPER - Multiplatform compatible
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The ioctl() function signature varies across platforms:
+// - glibc x86_64: ioctl(int, unsigned long, ...)
+// - glibc arm32: ioctl(int, unsigned long, ...)
+// - musl: ioctl(int, int, ...)
+//
+// The libc crate abstracts this via the Ioctl type alias.
+
+/// Helper to call ioctl with correct type for all platforms (glibc, musl, ARM, x86)
 #[inline]
 unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> libc::c_int {
-    // On musl, ioctl takes c_int; on glibc it takes c_ulong
-    // The libc crate handles this with the Ioctl type alias
+    // Use libc::Ioctl which is the correct type for ioctl request on each platform
+    // - On musl (any arch): c_int (i32)
+    // - On glibc x86_64/aarch64: c_ulong (u64)
+    // - On glibc x86/arm32: c_ulong (u32)
     #[cfg(target_env = "musl")]
     {
+        // musl uses c_int for ioctl request
         libc::ioctl(fd, request as libc::c_int, arg)
     }
-    #[cfg(not(target_env = "musl"))]
+    #[cfg(all(not(target_env = "musl"), any(target_pointer_width = "32")))]
     {
+        // 32-bit glibc (arm32, x86) uses c_ulong which is u32
+        libc::ioctl(fd, request as libc::c_ulong, arg)
+    }
+    #[cfg(all(not(target_env = "musl"), target_pointer_width = "64"))]
+    {
+        // 64-bit glibc (x86_64, aarch64) uses c_ulong which is u64
         libc::ioctl(fd, request as libc::c_ulong, arg)
     }
 }
@@ -394,16 +449,16 @@ impl TunDevice {
     /// Read multiple packets (batch read for performance)
     pub fn read_batch(&mut self, buffers: &mut [&mut [u8]]) -> Result<Vec<usize>> {
         let mut sizes = Vec::with_capacity(buffers.len());
-        
+
         for buf in buffers {
-            match self.file.read(*buf) {
+            match self.file.read(buf) {
                 Ok(n) if n > 0 => sizes.push(n),
                 Ok(_) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e.into()),
             }
         }
-        
+
         Ok(sizes)
     }
 
