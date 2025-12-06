@@ -1,10 +1,13 @@
 [package]
 name = "twocha"
-version = "0.3.2"
+version = "0.5.1"
 edition = "2021"
 description = "2cha - High-performance VPN utility with IPv4/IPv6 support"
 license = "MIT"
 authors = ["2cha contributors"]
+keywords = ["vpn", "tun", "network", "tunnel"]
+categories = ["network-programming", "command-line-utilities"]
+repository = "https://github.com/keepinfov/2cha"
 
 [[bin]]
 name = "2cha"
@@ -31,10 +34,43 @@ lto = true
 strip = true
 panic = "abort"
 
-# For static musl builds:
-# rustup target add x86_64-unknown-linux-musl
-# cargo build --release --target x86_64-unknown-linux-musl
+# ═══════════════════════════════════════════════════════════════════════════════
+# CROSS-COMPILATION TARGETS
+# ═══════════════════════════════════════════════════════════════════════════════
 #
-# For cross-compilation to ARM:
-# rustup target add aarch64-unknown-linux-musl
-# cargo build --release --target aarch64-unknown-linux-musl
+# Supported platforms:
+#   - x86_64-unknown-linux-gnu     (64-bit glibc)
+#   - x86_64-unknown-linux-musl    (64-bit static)
+#   - i686-unknown-linux-gnu       (32-bit x86 glibc)
+#   - i686-unknown-linux-musl      (32-bit x86 static)
+#   - aarch64-unknown-linux-gnu    (64-bit ARM glibc)
+#   - aarch64-unknown-linux-musl   (64-bit ARM static)
+#   - arm-unknown-linux-gnueabihf  (32-bit ARM glibc, hard float)
+#   - arm-unknown-linux-musleabihf (32-bit ARM static, hard float)
+#   - armv7-unknown-linux-gnueabihf    (ARMv7 glibc)
+#   - armv7-unknown-linux-musleabihf   (ARMv7 static)
+#
+# Build examples:
+#
+# Static x86_64:
+#   rustup target add x86_64-unknown-linux-musl
+#   cargo build --release --target x86_64-unknown-linux-musl
+#
+# Static ARM64:
+#   rustup target add aarch64-unknown-linux-musl
+#   cargo build --release --target aarch64-unknown-linux-musl
+#
+# Static ARM32 (Raspberry Pi, etc.):
+#   rustup target add arm-unknown-linux-musleabihf
+#   cargo build --release --target arm-unknown-linux-musleabihf
+#
+# Static ARMv7 (better for modern ARM32 devices):
+#   rustup target add armv7-unknown-linux-musleabihf
+#   cargo build --release --target armv7-unknown-linux-musleabihf
+#
+# Cross-compilation with cross tool (easier for ARM):
+#   cargo install cross
+#   cross build --release --target armv7-unknown-linux-musleabihf
+#   cross build --release --target aarch64-unknown-linux-musl
+#
+# ═══════════════════════════════════════════════════════════════════════════════

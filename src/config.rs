@@ -411,10 +411,10 @@ impl ServerConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)
             .map_err(|e| ConfigError::IoError(e.to_string()))?;
-        Self::from_str(&content)
+        Self::parse(&content)
     }
 
-    pub fn from_str(content: &str) -> Result<Self, ConfigError> {
+    pub fn parse(content: &str) -> Result<Self, ConfigError> {
         toml::from_str(content)
             .map_err(|e| ConfigError::ParseError(e.to_string()))
     }
@@ -464,10 +464,10 @@ impl ClientConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)
             .map_err(|e| ConfigError::IoError(e.to_string()))?;
-        Self::from_str(&content)
+        Self::parse(&content)
     }
 
-    pub fn from_str(content: &str) -> Result<Self, ConfigError> {
+    pub fn parse(content: &str) -> Result<Self, ConfigError> {
         toml::from_str(content)
             .map_err(|e| ConfigError::ParseError(e.to_string()))
     }
@@ -587,7 +587,9 @@ pub fn hex_to_key(hex: &str) -> Result<[u8; 32], ConfigError> {
 }
 
 pub fn prefix_to_netmask_v4(prefix: u8) -> [u8; 4] {
-    let mask = if prefix >= 32 {
+    let mask = if prefix == 0 {
+        0u32
+    } else if prefix >= 32 {
         0xFFFFFFFFu32
     } else {
         !((1u32 << (32 - prefix)) - 1)
@@ -600,9 +602,9 @@ pub fn prefix_to_netmask_v6(prefix: u8) -> [u8; 16] {
     let mut mask = [0u8; 16];
     let full_bytes = (prefix / 8) as usize;
     let remaining_bits = prefix % 8;
-    
-    for i in 0..full_bytes.min(16) {
-        mask[i] = 0xFF;
+
+    for byte in mask.iter_mut().take(full_bytes.min(16)) {
+        *byte = 0xFF;
     }
     if full_bytes < 16 && remaining_bits > 0 {
         mask[full_bytes] = !((1u8 << (8 - remaining_bits)) - 1);
@@ -751,4 +753,54 @@ keepalive = 25
 [logging]
 level = "info"
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prefix_to_netmask_v4() {
+        // Test edge cases
+        assert_eq!(prefix_to_netmask_v4(0), [0, 0, 0, 0]);
+        assert_eq!(prefix_to_netmask_v4(32), [255, 255, 255, 255]);
+        assert_eq!(prefix_to_netmask_v4(33), [255, 255, 255, 255]); // Clamped
+
+        // Test common prefixes
+        assert_eq!(prefix_to_netmask_v4(8), [255, 0, 0, 0]);
+        assert_eq!(prefix_to_netmask_v4(16), [255, 255, 0, 0]);
+        assert_eq!(prefix_to_netmask_v4(24), [255, 255, 255, 0]);
+        assert_eq!(prefix_to_netmask_v4(25), [255, 255, 255, 128]);
+        assert_eq!(prefix_to_netmask_v4(26), [255, 255, 255, 192]);
+        assert_eq!(prefix_to_netmask_v4(27), [255, 255, 255, 224]);
+        assert_eq!(prefix_to_netmask_v4(28), [255, 255, 255, 240]);
+        assert_eq!(prefix_to_netmask_v4(30), [255, 255, 255, 252]);
+        assert_eq!(prefix_to_netmask_v4(31), [255, 255, 255, 254]);
+    }
+
+    #[test]
+    fn test_prefix_to_netmask_v6() {
+        // Edge cases
+        assert_eq!(prefix_to_netmask_v6(0), [0; 16]);
+        assert_eq!(prefix_to_netmask_v6(128), [255; 16]);
+
+        // Common prefixes
+        assert_eq!(prefix_to_netmask_v6(64), [255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(prefix_to_netmask_v6(48), [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_hex_to_key() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key = hex_to_key(hex).unwrap();
+        assert_eq!(key[0], 0x01);
+        assert_eq!(key[1], 0x23);
+        assert_eq!(key[31], 0xef);
+
+        // Test invalid length
+        assert!(hex_to_key("0123").is_err());
+
+        // Test invalid hex
+        assert!(hex_to_key(&"zz".repeat(32)).is_err());
+    }
 }

@@ -3,6 +3,9 @@
 //! Configure IP forwarding, NAT, and routing tables for IPv4/IPv6.
 //! Platform-independent abstractions for route management.
 
+#![allow(clippy::io_other_error)]
+#![allow(clippy::too_many_arguments)]
+
 use std::io::{self, Write};
 use std::process::Command;
 use std::net::IpAddr;

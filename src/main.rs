@@ -34,7 +34,7 @@ mod server;
 use std::env;
 use std::process;
 
-const VERSION: &str = "0.3.2";
+const VERSION: &str = "0.5.1";
 const PID_FILE: &str = "/tmp/2cha.pid";
 const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
 const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
@@ -361,15 +361,15 @@ fn cmd_genkey() -> Result<()> {
 
     if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
-        file.read_exact(&mut key).map_err(|e| VpnError::Io(e))?;
+        file.read_exact(&mut key).map_err(VpnError::Io)?;
     } else {
         eprintln!("Warning: /dev/urandom unavailable");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        for i in 0..32 {
-            key[i] = ((now >> (i * 2)) & 0xff) as u8;
+        for (i, byte) in key.iter_mut().enumerate() {
+            *byte = ((now >> (i * 2)) & 0xff) as u8;
         }
     }
 

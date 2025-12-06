@@ -388,6 +388,7 @@ pub struct ChaCha20Poly1305 {
     key: [u8; CHACHA20_KEY_SIZE],
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 impl ChaCha20Poly1305 {
     pub fn new(key: &[u8; CHACHA20_KEY_SIZE]) -> Self {
         ChaCha20Poly1305 { key: *key }
