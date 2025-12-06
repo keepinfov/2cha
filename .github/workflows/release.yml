@@ -37,19 +37,19 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
@@ -78,19 +78,19 @@ jobs:
           tar -czf 2cha-universal-linux-${{ matrix.arch }}.tar.gz 2cha-universal
 
       - name: Upload server artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 2cha-server-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-server-linux-${{ matrix.arch }}.tar.gz
 
       - name: Upload client artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 2cha-client-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-client-linux-${{ matrix.arch }}.tar.gz
 
       - name: Upload universal artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 2cha-universal-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-universal-linux-${{ matrix.arch }}.tar.gz
@@ -114,19 +114,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
@@ -140,7 +140,7 @@ jobs:
           Compress-Archive -Path 2cha.exe -DestinationPath 2cha-windows-${{ matrix.arch }}.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 2cha-windows-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-windows-${{ matrix.arch }}.zip
@@ -166,19 +166,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
@@ -193,7 +193,7 @@ jobs:
           tar -czf 2cha-macos-${{ matrix.arch }}.tar.gz 2cha
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 2cha-macos-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-macos-${{ matrix.arch }}.tar.gz
@@ -206,129 +206,22 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
-      - name: Upload Linux x86_64 server to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-server-linux-x86_64/2cha-server-linux-x86_64.tar.gz
-          asset_name: 2cha-server-linux-x86_64.tar.gz
-          asset_content_type: application/gzip
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-files/ \;
+          ls -lh release-files/
 
-      - name: Upload Linux x86_64 client to release
-        uses: actions/upload-release-asset@v1
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-client-linux-x86_64/2cha-client-linux-x86_64.tar.gz
-          asset_name: 2cha-client-linux-x86_64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux x86_64 universal to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-universal-linux-x86_64/2cha-universal-linux-x86_64.tar.gz
-          asset_name: 2cha-universal-linux-x86_64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux aarch64 server to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-server-linux-aarch64/2cha-server-linux-aarch64.tar.gz
-          asset_name: 2cha-server-linux-aarch64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux aarch64 client to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-client-linux-aarch64/2cha-client-linux-aarch64.tar.gz
-          asset_name: 2cha-client-linux-aarch64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux aarch64 universal to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-universal-linux-aarch64/2cha-universal-linux-aarch64.tar.gz
-          asset_name: 2cha-universal-linux-aarch64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux armv7 server to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-server-linux-armv7/2cha-server-linux-armv7.tar.gz
-          asset_name: 2cha-server-linux-armv7.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux armv7 client to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-client-linux-armv7/2cha-client-linux-armv7.tar.gz
-          asset_name: 2cha-client-linux-armv7.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Linux armv7 universal to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-universal-linux-armv7/2cha-universal-linux-armv7.tar.gz
-          asset_name: 2cha-universal-linux-armv7.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Windows x86_64 to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-windows-x86_64/2cha-windows-x86_64.zip
-          asset_name: 2cha-windows-x86_64.zip
-          asset_content_type: application/zip
-
-      - name: Upload macOS x86_64 to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-macos-x86_64/2cha-macos-x86_64.tar.gz
-          asset_name: 2cha-macos-x86_64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload macOS aarch64 to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./artifacts/2cha-macos-aarch64/2cha-macos-aarch64.tar.gz
-          asset_name: 2cha-macos-aarch64.tar.gz
-          asset_content_type: application/gzip
