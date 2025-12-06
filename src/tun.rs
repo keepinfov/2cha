@@ -98,30 +98,8 @@ const SIOCGIFINDEX: u32 = 0x8933;
 #[inline]
 unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> libc::c_int {
     // Use libc::Ioctl which is the correct type for ioctl request on each platform
-    // - On musl (any arch): c_int (i32)
-    // - On glibc x86_64/aarch64: c_ulong (u64)
-    // - On glibc x86/arm32: c_ulong (u32)
-    // - On Android (bionic): c_int (i32)
-    #[cfg(target_os = "android")]
-    {
-        // bionic uses c_int for ioctl request, regardless of pointer width
-        libc::ioctl(fd, request as libc::c_int, arg)
-    }
-    #[cfg(target_env = "musl")]
-    {
-        // musl uses c_int for ioctl request
-        libc::ioctl(fd, request as libc::c_int, arg)
-    }
-    #[cfg(all(not(target_env = "musl"), any(target_pointer_width = "32")))]
-    {
-        // 32-bit glibc (arm32, x86) uses c_ulong which is u32
-        libc::ioctl(fd, request as libc::c_ulong, arg)
-    }
-    #[cfg(all(not(target_env = "musl"), target_pointer_width = "64"))]
-    {
-        // 64-bit glibc (x86_64, aarch64) uses c_ulong which is u64
-        libc::ioctl(fd, request as libc::c_ulong, arg)
-    }
+    // (musl: c_int, glibc 32-bit: c_ulong/u32, glibc 64-bit: c_ulong/u64, Android: c_int).
+    libc::ioctl(fd, request as libc::Ioctl, arg)
 }
 
 // Interface flags
