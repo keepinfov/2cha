@@ -6,8 +6,8 @@
 use crate::error::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::io::{AsRawFd, RawFd};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PLATFORM DETECTION AND TYPES
@@ -17,15 +17,25 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 #[allow(dead_code)]
 pub const PLATFORM_INFO: &str = {
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    { "x86_64-linux" }
+    {
+        "x86_64-linux"
+    }
     #[cfg(all(target_arch = "x86", target_os = "linux"))]
-    { "x86-linux" }
+    {
+        "x86-linux"
+    }
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    { "aarch64-linux" }
+    {
+        "aarch64-linux"
+    }
     #[cfg(all(target_arch = "arm", target_os = "linux"))]
-    { "arm-linux" }
+    {
+        "arm-linux"
+    }
     #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
-    { "riscv64-linux" }
+    {
+        "riscv64-linux"
+    }
     #[cfg(not(any(
         all(target_arch = "x86_64", target_os = "linux"),
         all(target_arch = "x86", target_os = "linux"),
@@ -33,7 +43,9 @@ pub const PLATFORM_INFO: &str = {
         all(target_arch = "arm", target_os = "linux"),
         all(target_arch = "riscv64", target_os = "linux"),
     )))]
-    { "unknown" }
+    {
+        "unknown"
+    }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -89,6 +101,12 @@ unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> li
     // - On musl (any arch): c_int (i32)
     // - On glibc x86_64/aarch64: c_ulong (u64)
     // - On glibc x86/arm32: c_ulong (u32)
+    // - On Android (bionic): c_int (i32)
+    #[cfg(target_os = "android")]
+    {
+        // bionic uses c_int for ioctl request, regardless of pointer width
+        libc::ioctl(fd, request as libc::c_int, arg)
+    }
     #[cfg(target_env = "musl")]
     {
         // musl uses c_int for ioctl request
@@ -272,13 +290,20 @@ impl TunDevice {
         let name_len = name.len().min(IFNAMSIZ - 1);
         ifr.ifr_name[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
 
-        let result = unsafe { ioctl_raw(file.as_raw_fd(), TUNSETIFF, &mut ifr as *mut _ as *mut libc::c_void) };
+        let result = unsafe {
+            ioctl_raw(
+                file.as_raw_fd(),
+                TUNSETIFF,
+                &mut ifr as *mut _ as *mut libc::c_void,
+            )
+        };
         if result < 0 {
             let errno = std::io::Error::last_os_error();
             return Err(TunError::IoctlFailed(format!("TUNSETIFF: {}", errno)).into());
         }
 
-        let actual_name = ifr.ifr_name
+        let actual_name = ifr
+            .ifr_name
             .iter()
             .take_while(|&&c| c != 0)
             .map(|&c| c as char)
@@ -328,7 +353,7 @@ impl TunDevice {
     /// Set IPv4 address
     pub fn set_ipv4_address(&mut self, addr: Ipv4Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv4 address: {}/{}", addr, prefix);
-        
+
         let addr_bytes = addr.octets();
         let ifr = IfReqAddr4::new(&self.name, addr_bytes)?;
         self.ioctl_with_socket(AF_INET, SIOCSIFADDR, &ifr, "SIOCSIFADDR")?;
@@ -345,7 +370,7 @@ impl TunDevice {
     /// Set IPv6 address
     pub fn set_ipv6_address(&mut self, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv6 address: {}/{}", addr, prefix);
-        
+
         // Get interface index
         let ifindex = self.get_ifindex()?;
 
@@ -364,7 +389,13 @@ impl TunDevice {
             return Err(TunError::IoctlFailed("Failed to create IPv6 socket".into()).into());
         }
 
-        let result = unsafe { ioctl_raw(sock, SIOCSIFADDR_IN6, &ifr6 as *const _ as *mut libc::c_void) };
+        let result = unsafe {
+            ioctl_raw(
+                sock,
+                SIOCSIFADDR_IN6,
+                &ifr6 as *const _ as *mut libc::c_void,
+            )
+        };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -374,7 +405,7 @@ impl TunDevice {
             let output = std::process::Command::new("ip")
                 .args(["-6", "addr", "add", &addr_str, "dev", &self.name])
                 .output()?;
-            
+
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 if !err.contains("File exists") {
@@ -399,12 +430,13 @@ impl TunDevice {
     /// Bring up the interface
     pub fn bring_up(&self) -> Result<()> {
         log::info!("Bringing up interface: {}", self.name);
-        
+
         let mut ifr = IfReqFlags::new(&self.name)?;
         let sock = self.create_socket(AF_INET)?;
 
         // Get current flags
-        let result = unsafe { ioctl_raw(sock, SIOCGIFFLAGS, &mut ifr as *mut _ as *mut libc::c_void) };
+        let result =
+            unsafe { ioctl_raw(sock, SIOCGIFFLAGS, &mut ifr as *mut _ as *mut libc::c_void) };
         if result < 0 {
             unsafe { libc::close(sock) };
             return Err(TunError::IoctlFailed("SIOCGIFFLAGS failed".into()).into());
@@ -413,7 +445,8 @@ impl TunDevice {
         // Set UP and RUNNING
         ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
 
-        let result = unsafe { ioctl_raw(sock, SIOCSIFFLAGS, &ifr as *const _ as *mut libc::c_void) };
+        let result =
+            unsafe { ioctl_raw(sock, SIOCSIFFLAGS, &ifr as *const _ as *mut libc::c_void) };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -500,8 +533,9 @@ impl TunDevice {
         ifr.ifr_name[..self.name.len()].copy_from_slice(self.name.as_bytes());
 
         let sock = self.create_socket(AF_INET)?;
-        
-        let result = unsafe { ioctl_raw(sock, SIOCGIFINDEX, &mut ifr as *mut _ as *mut libc::c_void) };
+
+        let result =
+            unsafe { ioctl_raw(sock, SIOCGIFINDEX, &mut ifr as *mut _ as *mut libc::c_void) };
         unsafe { libc::close(sock) };
 
         if result < 0 {
@@ -521,7 +555,7 @@ impl TunDevice {
         let sock = self.create_socket(family)?;
         let result = unsafe { ioctl_raw(sock, request, arg as *const T as *mut libc::c_void) };
         unsafe { libc::close(sock) };
-        
+
         if result < 0 {
             let err = std::io::Error::last_os_error();
             return Err(TunError::IoctlFailed(format!("{}: {}", name, err)).into());
@@ -530,9 +564,7 @@ impl TunDevice {
     }
 
     fn create_socket(&self, family: libc::sa_family_t) -> Result<RawFd> {
-        let sock = unsafe {
-            libc::socket(family as libc::c_int, libc::SOCK_DGRAM, 0)
-        };
+        let sock = unsafe { libc::socket(family as libc::c_int, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
             return Err(TunError::IoctlFailed("Failed to create socket".into()).into());
         }

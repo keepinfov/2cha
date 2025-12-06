@@ -1,6 +1,6 @@
 [package]
 name = "twocha"
-version = "0.5.1"
+version = "0.5.1-2"
 edition = "2021"
 description = "2cha - High-performance VPN utility with IPv4/IPv6 support"
 license = "MIT"

@@ -34,7 +34,7 @@ mod server;
 use std::env;
 use std::process;
 
-const VERSION: &str = "0.5.1";
+const VERSION: &str = "0.5.1-2";
 const PID_FILE: &str = "/tmp/2cha.pid";
 const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
 const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
