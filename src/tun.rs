@@ -98,12 +98,31 @@ const SIOCGIFINDEX: u32 = 0x8933;
 //
 // The libc crate abstracts this via the Ioctl type alias.
 
-/// Helper to call ioctl with correct type for all platforms (glibc, musl, ARM, x86)
+/// Helper to call ioctl with correct type for all platforms (glibc, musl, ARM, x86, macOS)
 #[inline]
 unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> libc::c_int {
-    // Use libc::Ioctl which is the correct type for ioctl request on each platform
-    // (musl: c_int, glibc 32-bit: c_ulong/u32, glibc 64-bit: c_ulong/u64, Android: c_int).
-    libc::ioctl(fd, request as libc::Ioctl, arg)
+    // The ioctl request type varies by platform:
+    // - Linux glibc x86_64: c_ulong (u64)
+    // - Linux glibc 32-bit: c_ulong (u32)
+    // - Linux musl: c_int
+    // - macOS: c_ulong
+    // - Android: c_int
+    #[cfg(target_os = "linux")]
+    {
+        libc::ioctl(fd, request as libc::Ioctl, arg)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        libc::ioctl(fd, request as libc::c_ulong, arg)
+    }
+    #[cfg(target_os = "android")]
+    {
+        libc::ioctl(fd, request as libc::c_int, arg)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "android")))]
+    {
+        libc::ioctl(fd, request as libc::c_ulong, arg)
+    }
 }
 
 // Interface flags

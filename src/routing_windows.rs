@@ -374,15 +374,16 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
 
     // Set IPv4 DNS
     for (i, server) in servers_v4.iter().enumerate() {
-        let args = if i == 0 {
+        let name_arg = format!("name={}", interface);
+        let args: Vec<&str> = if i == 0 {
             vec![
                 "interface", "ipv4", "set", "dnsservers",
-                &format!("name={}", interface), "static", server, "primary"
+                &name_arg, "static", server, "primary"
             ]
         } else {
             vec![
                 "interface", "ipv4", "add", "dnsservers",
-                &format!("name={}", interface), server
+                &name_arg, server
             ]
         };
 
@@ -391,15 +392,16 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
 
     // Set IPv6 DNS
     for (i, server) in servers_v6.iter().enumerate() {
-        let args = if i == 0 {
+        let name_arg = format!("name={}", interface);
+        let args: Vec<&str> = if i == 0 {
             vec![
                 "interface", "ipv6", "set", "dnsservers",
-                &format!("name={}", interface), "static", server, "primary"
+                &name_arg, "static", server, "primary"
             ]
         } else {
             vec![
                 "interface", "ipv6", "add", "dnsservers",
-                &format!("name={}", interface), server
+                &name_arg, server
             ]
         };
 
@@ -413,18 +415,19 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
 /// Restore original DNS (set to DHCP)
 pub fn restore_dns() -> io::Result<()> {
     let interface = "2cha";
+    let name_arg = format!("name={}", interface);
 
     let _ = Command::new("netsh")
         .args([
             "interface", "ipv4", "set", "dnsservers",
-            &format!("name={}", interface), "dhcp"
+            name_arg.as_str(), "dhcp"
         ])
         .output();
 
     let _ = Command::new("netsh")
         .args([
             "interface", "ipv6", "set", "dnsservers",
-            &format!("name={}", interface), "dhcp"
+            name_arg.as_str(), "dhcp"
         ])
         .output();
 
