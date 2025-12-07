@@ -40,7 +40,7 @@
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "2cha";
-          version = "0.5.1-3";
+          version = "0.6.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           
@@ -53,7 +53,7 @@
         # Static musl build
         packages.static = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
           pname = "2cha";
-          version = "0.5.1-3";
+          version = "0.6.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           

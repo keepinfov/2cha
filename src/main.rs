@@ -60,7 +60,7 @@ pub const MAX_PACKET_SIZE: usize = 1500;
 use std::env;
 use std::process;
 
-const VERSION: &str = "0.5.1-3";
+const VERSION: &str = "0.6.0";
 
 #[cfg(unix)]
 const PID_FILE: &str = "/tmp/2cha.pid";
