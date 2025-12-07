@@ -1,51 +1,44 @@
-//! # Windows Server Module
+//! # Server Handler
 //!
-//! VPN server with IPv4/IPv6 dual-stack support for Windows.
+//! VPN server connection handling.
 
-#![cfg(windows)]
-
-use crate::{
-    network_windows::{
-        init_winsock, is_would_block, EventLoop, EventResult, PeerState, TunnelConfig, UdpTunnel,
-    },
-    protocol::{PacketHeader, PacketType},
-    tun_windows::{IpVersion, TunDevice},
-    ChaCha20Poly1305, Result, ServerConfig, VpnError, PROTOCOL_HEADER_SIZE,
+#[cfg(unix)]
+use crate::platform::unix::{
+    is_would_block, routing, tun::IpVersion, EventLoop, PeerState, TunnelConfig, UdpTunnel,
+    TunDevice, POLLIN,
 };
+
+use crate::constants::PROTOCOL_HEADER_SIZE;
+use crate::core::config::ServerConfig;
+use crate::core::crypto::ChaCha20Poly1305;
+use crate::core::error::{Result, VpnError};
+use crate::core::protocol::{PacketHeader, PacketType};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::BOOL;
-use windows::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
-};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
+/// Run the VPN server
+#[cfg(unix)]
 pub fn run(config_path: &str) -> Result<()> {
-    // Initialize Winsock
-    init_winsock()?;
-
-    let cfg =
-        ServerConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
-
-    let listen_addr = cfg
-        .listen_addr()
+    let cfg = ServerConfig::from_file(config_path)
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    log::info!("Starting 2cha server v0.3 (Windows)...");
+    let listen_addr = cfg.listen_addr()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+
+    log::info!("Starting 2cha server v0.6...");
 
     // Create TUN device
     let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
 
     // Configure IPv4
     if cfg.ipv4.enable {
-        if let Some(addr) = cfg
-            .tun_ipv4()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
+        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
             log::info!("IPv4: {}/{}", addr, cfg.ipv4.prefix);
         }
@@ -53,10 +46,7 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Configure IPv6
     if cfg.ipv6.enable {
-        if let Some(addr) = cfg
-            .tun_ipv6()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
+        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
             log::info!("IPv6: {}/{}", addr, cfg.ipv6.prefix);
         }
@@ -75,7 +65,7 @@ pub fn run(config_path: &str) -> Result<()> {
                     cfg.ipv4.address.as_deref().unwrap_or("10.0.0.0"),
                     cfg.ipv4.prefix
                 );
-                if let Err(e) = crate::routing_windows::setup_server_gateway_v4(iface, &subnet) {
+                if let Err(e) = routing::setup_server_gateway_v4(iface, &subnet) {
                     log::error!("Failed to setup IPv4 gateway: {}", e);
                 }
             }
@@ -87,8 +77,7 @@ pub fn run(config_path: &str) -> Result<()> {
             if cfg.ipv6.enable {
                 if let Some(ref addr) = cfg.ipv6.address {
                     let subnet = format!("{}/{}", addr, cfg.ipv6.prefix);
-                    if let Err(e) = crate::routing_windows::setup_server_gateway_v6(iface, &subnet)
-                    {
+                    if let Err(e) = routing::setup_server_gateway_v6(iface, &subnet) {
                         log::error!("Failed to setup IPv6 gateway: {}", e);
                     }
                 }
@@ -115,10 +104,8 @@ pub fn run(config_path: &str) -> Result<()> {
     setup_signal_handler();
 
     let mut event_loop = EventLoop::new();
-    event_loop.add_handle(tun.get_read_wait_event());
-    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(
-        tunnel.socket(),
-    ));
+    event_loop.add_fd(tun.fd(), POLLIN);
+    event_loop.add_fd(tunnel.fd(), POLLIN);
 
     let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
     let cipher = ChaCha20Poly1305::new(&key);
@@ -132,24 +119,16 @@ pub fn run(config_path: &str) -> Result<()> {
     log::info!("Server ready. Max clients: {}", max_clients);
 
     while RUNNING.load(Ordering::SeqCst) {
-        match event_loop.poll(100) {
-            Ok(EventResult::HandleReady(0)) => {
-                // TUN device has data
-                handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut peers)?;
+        let events = event_loop.poll(100)?;
+
+        for (fd, revents) in events {
+            if revents & POLLIN != 0 {
+                if fd == tun.fd() {
+                    handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut peers)?;
+                } else if fd == tunnel.fd() {
+                    handle_udp_read(&mut tunnel, &mut tun, &mut peers, &cipher, max_clients)?;
+                }
             }
-            Ok(EventResult::SocketReady(0)) => {
-                // UDP socket has data
-                handle_udp_read(&mut tunnel, &mut tun, &mut peers, &cipher, max_clients)?;
-            }
-            Ok(EventResult::Timeout) => {
-                // Check for data anyway (non-blocking)
-                let _ = handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut peers);
-                let _ = handle_udp_read(&mut tunnel, &mut tun, &mut peers, &cipher, max_clients);
-            }
-            Err(e) => {
-                log::warn!("Event loop error: {}", e);
-            }
-            _ => {}
         }
 
         // Cleanup expired peers
@@ -172,6 +151,7 @@ pub fn run(config_path: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn handle_tun_read(
     tun: &mut TunDevice,
     buffer: &mut [u8],
@@ -182,12 +162,10 @@ fn handle_tun_read(
         match tun.read(buffer) {
             Ok(n) if n > 0 => {
                 let packet = &buffer[..n];
-
-                // Determine packet type and route accordingly
                 let ip_version = IpVersion::from_packet(packet);
                 log::trace!("TUN read: {} bytes, {:?}", n, ip_version);
 
-                // Send to all peers (could optimize with routing table)
+                // Send to all peers
                 for peer in peers.values_mut() {
                     let _ = tunnel.send_encrypted(peer, packet);
                 }
@@ -200,6 +178,7 @@ fn handle_tun_read(
     Ok(())
 }
 
+#[cfg(unix)]
 fn handle_udp_read(
     tunnel: &mut UdpTunnel,
     tun: &mut TunDevice,
@@ -241,9 +220,7 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) =
-                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
-                            {
+                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
                                 let _ = tun.write(&decrypted);
                             }
                         }
@@ -266,18 +243,20 @@ fn handle_udp_read(
     Ok(())
 }
 
+#[cfg(unix)]
 fn setup_signal_handler() {
     unsafe {
-        SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
+        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
     }
 }
 
-unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
-    match ctrl_type {
-        x if x == CTRL_C_EVENT || x == CTRL_BREAK_EVENT || x == CTRL_CLOSE_EVENT => {
-            RUNNING.store(false, Ordering::SeqCst);
-            BOOL(1) // Handled
-        }
-        _ => BOOL(0), // Not handled
-    }
+#[cfg(unix)]
+extern "C" fn signal_handler(_: libc::c_int) {
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Stop the server
+pub fn stop() {
+    RUNNING.store(false, Ordering::SeqCst);
 }

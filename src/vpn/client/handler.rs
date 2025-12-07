@@ -1,41 +1,42 @@
-//! # Client Module
+//! # Client Handler
 //!
-//! VPN client with IPv4/IPv6 dual-stack support.
-//!
-//! Note: This module is only available on Unix platforms.
+//! VPN client connection handling.
 
-use crate::{
-    network::{is_would_block, EventLoop, PeerState, TunnelConfig, UdpTunnel, POLLIN},
-    protocol::{PacketHeader, PacketType},
-    routing::ClientRoutingContext,
-    ChaCha20Poly1305, ClientConfig, Result, TunDevice, VpnError, PROTOCOL_HEADER_SIZE,
+#[cfg(unix)]
+use crate::platform::unix::{
+    is_would_block, routing::ClientRoutingContext, EventLoop, PeerState, TunnelConfig, UdpTunnel,
+    TunDevice, POLLIN,
 };
+
+use crate::constants::PROTOCOL_HEADER_SIZE;
+use crate::core::config::ClientConfig;
+use crate::core::crypto::ChaCha20Poly1305;
+use crate::core::error::{Result, VpnError};
+use crate::core::protocol::{PacketHeader, PacketType};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
+/// Run the VPN client
+#[cfg(unix)]
 pub fn run(config_path: &str, quiet: bool) -> Result<()> {
-    let cfg =
-        ClientConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
-
-    let server_addr = cfg
-        .server_addr()
+    let cfg = ClientConfig::from_file(config_path)
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
+
+    let server_addr = cfg.server_addr()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
 
     // Create TUN device
     let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
 
     // Configure IPv4
     let ipv4_gateway = if cfg.ipv4.enable {
-        if let Some(addr) = cfg
-            .tun_ipv4()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
+        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
-            // Gateway is typically .1 of the subnet
             let octets = addr.octets();
             Some(format!("{}.{}.{}.1", octets[0], octets[1], octets[2]))
         } else {
@@ -47,17 +48,10 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     // Configure IPv6
     let ipv6_gateway = if cfg.ipv6.enable {
-        if let Some(addr) = cfg
-            .tun_ipv6()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
+        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
-            // For IPv6, gateway is typically ::1 of the prefix
             let segments = addr.segments();
-            Some(format!(
-                "{:x}:{:x}:{:x}:{:x}::1",
-                segments[0], segments[1], segments[2], segments[3]
-            ))
+            Some(format!("{:x}:{:x}:{:x}:{:x}::1", segments[0], segments[1], segments[2], segments[3]))
         } else {
             None
         }
@@ -94,7 +88,6 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     // Setup routing
     let mut routing_ctx = ClientRoutingContext::new();
-
     if let Err(e) = routing_ctx.setup(
         ipv4_gateway.as_deref(),
         ipv6_gateway.as_deref(),
@@ -121,23 +114,12 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     if !quiet {
         println!();
-        println!(
-            "  \x1b[32m●\x1b[0m Connected to \x1b[36m{}\x1b[0m",
-            server_addr
-        );
+        println!("  \x1b[32m●\x1b[0m Connected to \x1b[36m{}\x1b[0m", server_addr);
         if let Some(ref gw) = ipv4_gateway {
-            println!(
-                "  IPv4: {} (gateway: {})",
-                tun.ipv4_addr().map(|a| a.to_string()).unwrap_or_default(),
-                gw
-            );
+            println!("  IPv4: {} (gateway: {})", tun.ipv4_addr().map(|a| a.to_string()).unwrap_or_default(), gw);
         }
         if let Some(ref gw) = ipv6_gateway {
-            println!(
-                "  IPv6: {} (gateway: {})",
-                tun.ipv6_addr().map(|a| a.to_string()).unwrap_or_default(),
-                gw
-            );
+            println!("  IPv6: {} (gateway: {})", tun.ipv6_addr().map(|a| a.to_string()).unwrap_or_default(), gw);
         }
         if cfg.ipv4.route_all || cfg.ipv6.route_all {
             println!("  Mode: \x1b[33mFull tunnel\x1b[0m");
@@ -164,17 +146,13 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
             }
         }
 
-        // Send keepalive
         if last_keepalive.elapsed() > keepalive_interval {
             let _ = tunnel.send_keepalive(&mut server_peer);
             last_keepalive = Instant::now();
         }
     }
 
-    // Send disconnect notification
     let _ = tunnel.send_disconnect(&mut server_peer);
-
-    // Cleanup routing
     let _ = routing_ctx.cleanup();
 
     if !quiet {
@@ -184,6 +162,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn handle_tun_read(
     tun: &mut TunDevice,
     buffer: &mut [u8],
@@ -203,6 +182,7 @@ fn handle_tun_read(
     Ok(())
 }
 
+#[cfg(unix)]
 fn handle_udp_read(
     tunnel: &mut UdpTunnel,
     tun: &mut TunDevice,
@@ -233,9 +213,7 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) =
-                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
-                            {
+                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
                                 let _ = tun.write(&decrypted);
                             }
                         }
@@ -254,6 +232,7 @@ fn handle_udp_read(
     Ok(())
 }
 
+#[cfg(unix)]
 fn setup_signal_handler() {
     unsafe {
         libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
@@ -261,6 +240,12 @@ fn setup_signal_handler() {
     }
 }
 
+#[cfg(unix)]
 extern "C" fn signal_handler(_: libc::c_int) {
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Stop the client
+pub fn stop() {
     RUNNING.store(false, Ordering::SeqCst);
 }

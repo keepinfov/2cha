@@ -13,6 +13,10 @@ repository = "https://github.com/keepinfov/2cha"
 name = "2cha"
 path = "src/main.rs"
 
+[lib]
+name = "twocha"
+path = "src/lib.rs"
+
 [dependencies]
 log = "0.4"
 env_logger = "0.11"

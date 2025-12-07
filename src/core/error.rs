@@ -5,6 +5,7 @@
 use std::fmt;
 use std::io;
 
+/// Main VPN error type
 #[derive(Debug)]
 pub enum VpnError {
     Io(io::Error),
@@ -15,6 +16,7 @@ pub enum VpnError {
     Config(String),
 }
 
+/// TUN device errors
 #[derive(Debug)]
 pub enum TunError {
     OpenFailed,
@@ -26,6 +28,7 @@ pub enum TunError {
     WriteFailed,
 }
 
+/// Cryptographic errors
 #[derive(Debug)]
 pub enum CryptoError {
     InvalidKeyLength { expected: usize, got: usize },
@@ -35,6 +38,7 @@ pub enum CryptoError {
     DataTooLarge,
 }
 
+/// Protocol errors
 #[derive(Debug)]
 pub enum ProtocolError {
     InvalidVersion { expected: u8, got: u8 },
@@ -45,6 +49,7 @@ pub enum ProtocolError {
     UnexpectedPacket(String),
 }
 
+/// Network errors
 #[derive(Debug)]
 pub enum NetworkError {
     SocketCreationFailed,
@@ -107,4 +112,5 @@ impl From<NetworkError> for VpnError {
     }
 }
 
+/// Result type alias for VPN operations
 pub type Result<T> = std::result::Result<T, VpnError>;
