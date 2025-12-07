@@ -9,16 +9,21 @@
 mod config;
 mod crypto;
 mod error;
+#[cfg(unix)]
 mod network;
 mod protocol;
+#[cfg(unix)]
 mod routing;
+#[cfg(unix)]
 mod tun;
 
 pub use config::{CipherSuite, ClientConfig, ConfigError, ServerConfig};
 pub use crypto::{Aes256Gcm, ChaCha20, ChaCha20Poly1305, Cipher, Poly1305};
 pub use error::{Result, VpnError};
+#[cfg(unix)]
 pub use network::{TunnelConfig, UdpTunnel};
 pub use protocol::{Packet, PacketType};
+#[cfg(unix)]
 pub use tun::TunDevice;
 
 pub const PROTOCOL_VERSION: u8 = 2;
@@ -28,16 +33,30 @@ pub const POLY1305_TAG_SIZE: usize = 16;
 pub const PROTOCOL_HEADER_SIZE: usize = 24;
 pub const MAX_PACKET_SIZE: usize = 1500;
 
+#[cfg(unix)]
 mod client;
+#[cfg(unix)]
 mod server;
 
 use std::env;
 use std::process;
 
 const VERSION: &str = "0.5.1-3";
+
+#[cfg(unix)]
 const PID_FILE: &str = "/tmp/2cha.pid";
+#[cfg(windows)]
+const PID_FILE: &str = "C:\\Windows\\Temp\\2cha.pid";
+
+#[cfg(unix)]
 const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
+#[cfg(windows)]
+const DEFAULT_CONFIG: &str = "C:\\ProgramData\\2cha\\client.toml";
+
+#[cfg(unix)]
 const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
+#[cfg(windows)]
+const DEFAULT_SERVER_CONFIG: &str = "C:\\ProgramData\\2cha\\server.toml";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -133,6 +152,7 @@ STATIC BUILD:
     );
 }
 
+#[cfg(unix)]
 fn cmd_up(args: &[String]) -> Result<()> {
     let mut config_path = DEFAULT_CONFIG.to_string();
     let mut verbose = false;
@@ -187,6 +207,14 @@ fn cmd_up(args: &[String]) -> Result<()> {
     result
 }
 
+#[cfg(windows)]
+fn cmd_up(_args: &[String]) -> Result<()> {
+    eprintln!("VPN client is not supported on Windows yet.");
+    eprintln!("TUN device support requires WinTun driver.");
+    Err(VpnError::Config("VPN not supported on Windows".into()))
+}
+
+#[cfg(unix)]
 fn cmd_down() -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
@@ -213,6 +241,29 @@ fn cmd_down() -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn cmd_down() -> Result<()> {
+    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            println!("\x1b[36m⟳\x1b[0m Disconnecting...");
+
+            // Use taskkill on Windows
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output();
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::fs::remove_file(PID_FILE).ok();
+            println!("\x1b[32m✓\x1b[0m Disconnected");
+            return Ok(());
+        }
+    }
+
+    println!("\x1b[90m○\x1b[0m VPN not connected");
+    Ok(())
+}
+
+#[cfg(unix)]
 fn cmd_status() -> Result<()> {
     println!();
     println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
@@ -313,6 +364,25 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn cmd_status() -> Result<()> {
+    println!();
+    println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
+    println!("  ════════════════════════════════════════");
+
+    let connected = is_running();
+
+    if connected {
+        println!("  Status:     \x1b[32m● Connected\x1b[0m");
+    } else {
+        println!("  Status:     \x1b[31m○ Disconnected\x1b[0m");
+    }
+
+    println!("  Platform:   Windows (limited support)");
+    println!();
+    Ok(())
+}
+
 fn cmd_toggle(args: &[String]) -> Result<()> {
     if is_running() {
         cmd_down()
@@ -321,6 +391,7 @@ fn cmd_toggle(args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn cmd_server(args: &[String]) -> Result<()> {
     let mut config_path = DEFAULT_SERVER_CONFIG.to_string();
     let mut verbose = false;
@@ -354,6 +425,13 @@ fn cmd_server(args: &[String]) -> Result<()> {
         .init();
 
     server::run(&config_path)
+}
+
+#[cfg(windows)]
+fn cmd_server(_args: &[String]) -> Result<()> {
+    eprintln!("VPN server is not supported on Windows yet.");
+    eprintln!("TUN device support requires WinTun driver.");
+    Err(VpnError::Config("VPN server not supported on Windows".into()))
 }
 
 fn cmd_genkey() -> Result<()> {
@@ -395,11 +473,29 @@ fn cmd_init(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
                 return libc::kill(pid, 0) == 0;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn is_running() -> bool {
+    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            // Check if process exists using tasklist
+            if let Ok(output) = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout.contains(&pid.to_string());
             }
         }
     }

@@ -1,6 +1,10 @@
 //! # Client Module
 //!
 //! VPN client with IPv4/IPv6 dual-stack support.
+//!
+//! Note: This module is only available on Unix platforms.
+
+#![cfg(unix)]
 
 use crate::{
     TunDevice, Result, ChaCha20Poly1305, ClientConfig, VpnError,

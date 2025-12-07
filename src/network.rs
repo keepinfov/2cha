@@ -1,6 +1,10 @@
 //! # Network Module
 //!
 //! High-performance UDP tunnel with optimized I/O.
+//!
+//! Note: This module is only available on Unix platforms due to poll/epoll usage.
+
+#![cfg(unix)]
 
 use crate::error::{NetworkError, Result};
 use crate::crypto::ChaCha20Poly1305;

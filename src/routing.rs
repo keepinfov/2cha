@@ -1,8 +1,11 @@
 //! # Routing Module
 //!
 //! Configure IP forwarding, NAT, and routing tables for IPv4/IPv6.
-//! Platform-independent abstractions for route management.
+//! Linux-specific routing and NAT configuration.
+//!
+//! Note: This module is only available on Unix platforms (Linux).
 
+#![cfg(unix)]
 #![allow(clippy::io_other_error)]
 #![allow(clippy::too_many_arguments)]
 

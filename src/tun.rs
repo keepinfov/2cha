@@ -2,6 +2,10 @@
 //!
 //! High-performance TUN device with IPv4/IPv6 support.
 //! Compatible with glibc, musl, and multiple architectures (x86, x86_64, ARM, ARM64).
+//!
+//! Note: This module is only available on Unix platforms (Linux, macOS, BSD).
+
+#![cfg(unix)]
 
 use crate::error::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
