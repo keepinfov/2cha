@@ -9,11 +9,10 @@ use crate::crypto::ChaCha20Poly1305;
 use crate::protocol::{PacketHeader, PacketType, ReplayWindow};
 use crate::{PROTOCOL_HEADER_SIZE, MAX_PACKET_SIZE};
 use std::net::{SocketAddr, UdpSocket};
-use std::os::windows::io::AsRawSocket;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Networking::WinSock::{
-    self, SOCKET, FD_SET, TIMEVAL, WSADATA,
+    SOCKET, FD_SET, TIMEVAL, WSADATA,
     WSAStartup, WSACleanup, select,
 };
 
@@ -339,7 +338,7 @@ impl EventLoop {
                 }
             }
 
-            let mut timeout = TIMEVAL {
+            let timeout = TIMEVAL {
                 tv_sec: (timeout_ms / 1000) as i32,
                 tv_usec: ((timeout_ms % 1000) * 1000) as i32,
             };

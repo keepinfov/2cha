@@ -258,7 +258,7 @@ fn setup_signal_handler() {
 
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     match ctrl_type {
-        x if x == CTRL_C_EVENT.0 || x == CTRL_BREAK_EVENT.0 || x == CTRL_CLOSE_EVENT.0 => {
+        x if x == CTRL_C_EVENT || x == CTRL_BREAK_EVENT || x == CTRL_CLOSE_EVENT => {
             RUNNING.store(false, Ordering::SeqCst);
             BOOL(1) // Handled
         }

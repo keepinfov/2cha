@@ -70,7 +70,7 @@ impl TunDevice {
         log::info!("WinTun adapter created: {}", name);
 
         Ok(TunDevice {
-            adapter: Arc::new(adapter),
+            adapter,
             session: Arc::new(session),
             name: name.to_string(),
             mtu: 1500,
@@ -247,7 +247,7 @@ impl TunDevice {
     /// Get read event handle for waiting
     pub fn get_read_wait_event(&self) -> windows::Win32::Foundation::HANDLE {
         self.session.get_read_wait_event()
-            .map(|h| windows::Win32::Foundation::HANDLE(h as isize))
+            .map(|h| windows::Win32::Foundation::HANDLE(h as *mut std::ffi::c_void))
             .unwrap_or(windows::Win32::Foundation::HANDLE::default())
     }
 }
