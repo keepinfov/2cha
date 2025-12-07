@@ -14,11 +14,27 @@ name = "2cha"
 path = "src/main.rs"
 
 [dependencies]
-libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+] }
+wintun = "0.5"
 
 [profile.release]
 opt-level = 3
