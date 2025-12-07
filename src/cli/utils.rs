@@ -166,8 +166,8 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
 /// Daemonize the process (Unix)
 #[cfg(unix)]
 pub fn daemonize() -> Result<()> {
-    // Fork the first time
     unsafe {
+        // Fork the first time
         let pid = libc::fork();
         if pid < 0 {
             return Err(VpnError::Config("Failed to fork process".to_string()));
@@ -176,48 +176,55 @@ pub fn daemonize() -> Result<()> {
             // Parent process exits
             std::process::exit(0);
         }
-    }
 
-    // Create a new session
-    unsafe {
+        // Create a new session (become session leader)
         if libc::setsid() < 0 {
             return Err(VpnError::Config("Failed to create new session".to_string()));
         }
-    }
 
-    // Fork the second time
-    unsafe {
+        // Ignore SIGHUP before second fork
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+
+        // Fork the second time to ensure we can't acquire a controlling terminal
         let pid = libc::fork();
         if pid < 0 {
-            return Err(VpnError::Config("Failed to fork process (second)".to_string()));
+            return Err(VpnError::Config(
+                "Failed to fork process (second)".to_string(),
+            ));
         }
         if pid > 0 {
             // Parent process exits
             std::process::exit(0);
         }
-    }
 
-    // Change working directory to root
-    std::env::set_current_dir("/").ok();
+        // Reset file creation mask
+        libc::umask(0);
 
-    // Close standard file descriptors
-    unsafe {
-        libc::close(libc::STDIN_FILENO);
-        libc::close(libc::STDOUT_FILENO);
-        libc::close(libc::STDERR_FILENO);
-    }
+        // Change working directory to root
+        let _ = std::env::set_current_dir("/");
 
-    // Redirect standard file descriptors to /dev/null
-    unsafe {
+        // Redirect standard file descriptors to /dev/null BEFORE closing them
+        // This prevents issues if open() fails
         let dev_null = std::ffi::CString::new("/dev/null").unwrap();
         let fd = libc::open(dev_null.as_ptr(), libc::O_RDWR);
-        if fd >= 0 {
-            libc::dup2(fd, libc::STDIN_FILENO);
-            libc::dup2(fd, libc::STDOUT_FILENO);
-            libc::dup2(fd, libc::STDERR_FILENO);
-            if fd > libc::STDERR_FILENO {
-                libc::close(fd);
-            }
+        if fd < 0 {
+            return Err(VpnError::Config("Failed to open /dev/null".to_string()));
+        }
+
+        // Redirect stdin, stdout, stderr to /dev/null
+        if libc::dup2(fd, libc::STDIN_FILENO) < 0
+            || libc::dup2(fd, libc::STDOUT_FILENO) < 0
+            || libc::dup2(fd, libc::STDERR_FILENO) < 0
+        {
+            libc::close(fd);
+            return Err(VpnError::Config(
+                "Failed to redirect standard file descriptors".to_string(),
+            ));
+        }
+
+        // Close the original /dev/null fd if it's not one of the standard fds
+        if fd > libc::STDERR_FILENO {
+            libc::close(fd);
         }
     }
 
