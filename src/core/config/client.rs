@@ -9,10 +9,11 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 /// DNS lookup strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DnsLookup {
     /// Automatically determine: try IP first, then DNS if needed (default)
+    #[default]
     Auto,
     /// Always perform DNS lookup
     Always,
@@ -24,12 +25,6 @@ pub enum DnsLookup {
     /// Disable DNS lookup (alias for Never, backward compatibility)
     #[serde(alias = "false")]
     Disabled,
-}
-
-impl Default for DnsLookup {
-    fn default() -> Self {
-        DnsLookup::Auto
-    }
 }
 
 impl DnsLookup {
