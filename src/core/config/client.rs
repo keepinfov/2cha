@@ -8,6 +8,42 @@ use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
+/// DNS lookup strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsLookup {
+    /// Automatically determine: try IP first, then DNS if needed (default)
+    Auto,
+    /// Always perform DNS lookup
+    Always,
+    /// Never perform DNS lookup, IP addresses only
+    Never,
+    /// Enable DNS lookup (alias for Always, backward compatibility)
+    #[serde(alias = "true")]
+    Enabled,
+    /// Disable DNS lookup (alias for Never, backward compatibility)
+    #[serde(alias = "false")]
+    Disabled,
+}
+
+impl Default for DnsLookup {
+    fn default() -> Self {
+        DnsLookup::Auto
+    }
+}
+
+impl DnsLookup {
+    /// Check if DNS lookup is allowed
+    fn is_enabled(&self) -> bool {
+        matches!(self, DnsLookup::Auto | DnsLookup::Always | DnsLookup::Enabled)
+    }
+
+    /// Check if we should always try DNS first
+    fn is_always(&self) -> bool {
+        matches!(self, DnsLookup::Always | DnsLookup::Enabled)
+    }
+}
+
 /// Client configuration
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
@@ -33,8 +69,8 @@ pub struct ClientSection {
     pub server: String,
     #[serde(default)]
     pub prefer_ipv6: bool,
-    #[serde(default = "default_true")]
-    pub dns_lookup: bool,
+    #[serde(default)]
+    pub dns_lookup: DnsLookup,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,13 +150,18 @@ impl ClientConfig {
     }
 
     pub fn server_addr(&self) -> Result<SocketAddr, ConfigError> {
-        // Try to parse as SocketAddr directly first
-        if let Ok(addr) = self.client.server.parse::<SocketAddr>() {
-            return Ok(addr);
+        use std::net::ToSocketAddrs;
+
+        // If "always" mode, skip IP parsing and go straight to DNS
+        if !self.client.dns_lookup.is_always() {
+            // Try to parse as SocketAddr directly first
+            if let Ok(addr) = self.client.server.parse::<SocketAddr>() {
+                return Ok(addr);
+            }
         }
 
         // If dns_lookup is enabled, try to resolve domain name
-        if self.client.dns_lookup {
+        if self.client.dns_lookup.is_enabled() {
             // Split host:port
             let parts: Vec<&str> = self.client.server.rsplitn(2, ':').collect();
             if parts.len() != 2 {
@@ -139,7 +180,6 @@ impl ClientConfig {
                 ))?;
 
             // Perform DNS lookup
-            use std::net::ToSocketAddrs;
             let server_with_port = format!("{}:{}", host, port);
 
             let addrs = server_with_port
@@ -216,8 +256,13 @@ pub fn example_client_config() -> &'static str {
 server = "vpn.example.com:51820"
 # Prefer IPv6 addresses when multiple IPs are resolved
 prefer_ipv6 = false
-# Enable DNS lookup for domain names (required if server is a domain, not an IP)
-dns_lookup = true
+# DNS lookup mode:
+#   auto   - Try IP parsing first, then DNS if needed (default, recommended)
+#   always - Always perform DNS lookup, even for IPs
+#   never  - Never perform DNS lookup, IP addresses only
+#   true   - Same as "always" (backward compatibility)
+#   false  - Same as "never" (backward compatibility)
+dns_lookup = "auto"
 
 [tun]
 name = "tun0"
