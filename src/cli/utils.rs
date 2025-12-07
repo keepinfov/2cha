@@ -164,68 +164,103 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
 }
 
 /// Daemonize the process (Unix)
+/// Based on the classic double-fork approach
 #[cfg(unix)]
 pub fn daemonize() -> Result<()> {
+    // Create a pipe for the daemon to signal readiness back to parent
+    let mut pipe_fds: [libc::c_int; 2] = [0; 2];
     unsafe {
-        // Fork the first time
+        if libc::pipe(pipe_fds.as_mut_ptr()) < 0 {
+            return Err(VpnError::Config("Failed to create pipe".to_string()));
+        }
+    }
+    let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
+
+    unsafe {
+        // First fork: detach from parent
         let pid = libc::fork();
         if pid < 0 {
+            libc::close(read_fd);
+            libc::close(write_fd);
             return Err(VpnError::Config("Failed to fork process".to_string()));
         }
         if pid > 0 {
-            // Parent process exits
-            std::process::exit(0);
+            // Parent: close write end and wait for daemon to signal readiness
+            libc::close(write_fd);
+
+            // Wait for child to signal (read will return 0 when child closes write end)
+            let mut buf: [u8; 1] = [0];
+            let _ = libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1);
+            libc::close(read_fd);
+
+            // Use _exit to avoid running atexit handlers in forked process context
+            libc::_exit(0);
         }
 
-        // Create a new session (become session leader)
+        // Child: close read end
+        libc::close(read_fd);
+
+        // Create a new session (become session leader, detach from terminal)
         if libc::setsid() < 0 {
-            return Err(VpnError::Config("Failed to create new session".to_string()));
+            libc::close(write_fd);
+            libc::_exit(1);
         }
 
-        // Ignore SIGHUP before second fork
+        // Ignore SIGHUP so we don't die when session leader exits
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
 
-        // Fork the second time to ensure we can't acquire a controlling terminal
+        // Second fork: ensure we can never acquire a controlling terminal
         let pid = libc::fork();
         if pid < 0 {
-            return Err(VpnError::Config(
-                "Failed to fork process (second)".to_string(),
-            ));
+            libc::close(write_fd);
+            libc::_exit(1);
         }
         if pid > 0 {
-            // Parent process exits
-            std::process::exit(0);
+            // First child exits, grandchild continues as daemon
+            libc::close(write_fd);
+            libc::_exit(0);
         }
 
-        // Reset file creation mask
-        libc::umask(0);
+        // Grandchild (actual daemon) continues here
+        // Reset file creation mask for predictable permissions
+        libc::umask(0o022);
 
-        // Change working directory to root
-        let _ = std::env::set_current_dir("/");
+        // Change working directory to root to avoid holding mounts
+        let root = std::ffi::CString::new("/").unwrap();
+        libc::chdir(root.as_ptr());
 
-        // Redirect standard file descriptors to /dev/null BEFORE closing them
-        // This prevents issues if open() fails
+        // Close all open file descriptors except the signal pipe
+        // This is important for a clean daemon
+        let max_fd = libc::sysconf(libc::_SC_OPEN_MAX) as libc::c_int;
+        for fd in 0..max_fd {
+            if fd != write_fd {
+                libc::close(fd);
+            }
+        }
+
+        // Reopen stdin, stdout, stderr to /dev/null
         let dev_null = std::ffi::CString::new("/dev/null").unwrap();
-        let fd = libc::open(dev_null.as_ptr(), libc::O_RDWR);
-        if fd < 0 {
-            return Err(VpnError::Config("Failed to open /dev/null".to_string()));
+
+        // Open /dev/null for stdin (fd 0)
+        let fd = libc::open(dev_null.as_ptr(), libc::O_RDONLY);
+        if fd < 0 || fd != libc::STDIN_FILENO {
+            libc::_exit(1);
         }
 
-        // Redirect stdin, stdout, stderr to /dev/null
-        if libc::dup2(fd, libc::STDIN_FILENO) < 0
-            || libc::dup2(fd, libc::STDOUT_FILENO) < 0
-            || libc::dup2(fd, libc::STDERR_FILENO) < 0
-        {
-            libc::close(fd);
-            return Err(VpnError::Config(
-                "Failed to redirect standard file descriptors".to_string(),
-            ));
+        // Open /dev/null for stdout (fd 1)
+        let fd = libc::open(dev_null.as_ptr(), libc::O_WRONLY);
+        if fd < 0 || fd != libc::STDOUT_FILENO {
+            libc::_exit(1);
         }
 
-        // Close the original /dev/null fd if it's not one of the standard fds
-        if fd > libc::STDERR_FILENO {
-            libc::close(fd);
+        // Open /dev/null for stderr (fd 2)
+        let fd = libc::open(dev_null.as_ptr(), libc::O_WRONLY);
+        if fd < 0 || fd != libc::STDERR_FILENO {
+            libc::_exit(1);
         }
+
+        // Signal parent that daemon is ready by closing the write end of pipe
+        libc::close(write_fd);
     }
 
     Ok(())
