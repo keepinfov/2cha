@@ -4,6 +4,8 @@
 
 #[cfg(unix)]
 use crate::cli::utils::LOG_FILE;
+#[cfg(unix)]
+use crate::cli::utils::can_signal_process;
 use crate::cli::utils::{
     daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
     DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG, PID_FILE,
@@ -144,6 +146,18 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
 /// Disconnect from VPN
 #[cfg(unix)]
 pub fn cmd_down() -> Result<()> {
+    if !is_running() {
+        println!("\x1b[90m○\x1b[0m VPN not connected");
+        return Ok(());
+    }
+
+    // Check if we have permission to stop the VPN
+    if !can_signal_process() {
+        println!("\x1b[31m✗\x1b[0m Permission denied");
+        println!("  The VPN is running as root. Use: sudo 2cha down");
+        return Ok(());
+    }
+
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             println!("\x1b[36m⟳\x1b[0m Disconnecting...");

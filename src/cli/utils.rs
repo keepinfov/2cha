@@ -33,8 +33,31 @@ pub fn is_running() -> bool {
                     return true;
                 }
                 // Check if error is EPERM (permission denied) - process exists but owned by another user
+                // Use cross-platform errno access
+                #[cfg(target_os = "linux")]
                 let errno = *libc::__errno_location();
+                #[cfg(target_os = "macos")]
+                let errno = *libc::__error();
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let errno = libc::ESRCH; // Default to "not found" on other platforms
+
                 if errno == libc::EPERM {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if current user can signal the VPN process (has permission to stop it)
+#[cfg(unix)]
+pub fn can_signal_process() -> bool {
+    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe {
+                // Try to send signal 0 (no actual signal, just permission check)
+                if libc::kill(pid, 0) == 0 {
                     return true;
                 }
             }
