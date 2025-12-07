@@ -3,7 +3,7 @@
 //! Command implementations for the VPN CLI.
 
 use crate::cli::utils::{
-    format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
+    daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
     DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG, PID_FILE,
 };
 use crate::core::config::{example_client_config, example_server_config};
@@ -28,6 +28,15 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if !parsed.quiet {
+        println!("\x1b[36m⟳\x1b[0m Connecting...");
+    }
+
+    // Daemonize if requested
+    if parsed.daemon {
+        daemonize()?;
+    }
+
     if parsed.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
@@ -37,10 +46,6 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
             .format_target(false)
             .format_timestamp(None)
             .init();
-    }
-
-    if !parsed.quiet {
-        println!("\x1b[36m⟳\x1b[0m Connecting...");
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
@@ -62,6 +67,16 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if !parsed.quiet {
+        println!("\x1b[36m>\x1b[0m Connecting...");
+        println!("  Note: Requires wintun.dll and Administrator privileges");
+    }
+
+    // Daemonize if requested
+    if parsed.daemon {
+        daemonize()?;
+    }
+
     if parsed.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
@@ -71,11 +86,6 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
             .format_target(false)
             .format_timestamp(None)
             .init();
-    }
-
-    if !parsed.quiet {
-        println!("\x1b[36m>\x1b[0m Connecting...");
-        println!("  Note: Requires wintun.dll and Administrator privileges");
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
@@ -317,6 +327,12 @@ pub fn cmd_toggle(args: &[String]) -> Result<()> {
 /// Run VPN server
 pub fn cmd_server(args: &[String]) -> Result<()> {
     let parsed = ParsedArgs::parse(args, DEFAULT_SERVER_CONFIG);
+
+    // Daemonize if requested
+    if parsed.daemon {
+        daemonize()?;
+    }
+
     setup_logging(parsed.verbose, parsed.quiet);
 
     #[cfg(windows)]

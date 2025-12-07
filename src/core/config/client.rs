@@ -33,6 +33,8 @@ pub struct ClientSection {
     pub server: String,
     #[serde(default)]
     pub prefer_ipv6: bool,
+    #[serde(default = "default_true")]
+    pub dns_lookup: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +159,7 @@ pub fn example_client_config() -> &'static str {
 [client]
 server = "vpn.example.com:51820"
 prefer_ipv6 = false
+dns_lookup = true
 
 [tun]
 name = "tun0"

@@ -112,6 +112,7 @@ pub struct ParsedArgs {
     pub config_path: String,
     pub verbose: bool,
     pub quiet: bool,
+    pub daemon: bool,
 }
 
 impl ParsedArgs {
@@ -119,6 +120,7 @@ impl ParsedArgs {
         let mut config_path = default_config.to_string();
         let mut verbose = false;
         let mut quiet = false;
+        let mut daemon = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -131,6 +133,7 @@ impl ParsedArgs {
                 }
                 "-v" | "--verbose" => verbose = true,
                 "-q" | "--quiet" => quiet = true,
+                "-d" | "--daemon" => daemon = true,
                 _ => {}
             }
             i += 1;
@@ -140,6 +143,7 @@ impl ParsedArgs {
             config_path,
             verbose,
             quiet,
+            daemon,
         }
     }
 }
@@ -157,4 +161,98 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
         .format_timestamp_millis()
         .init();
+}
+
+/// Daemonize the process (Unix)
+#[cfg(unix)]
+pub fn daemonize() -> Result<()> {
+    // Fork the first time
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            return Err(VpnError::Config("Failed to fork process".to_string()));
+        }
+        if pid > 0 {
+            // Parent process exits
+            std::process::exit(0);
+        }
+    }
+
+    // Create a new session
+    unsafe {
+        if libc::setsid() < 0 {
+            return Err(VpnError::Config("Failed to create new session".to_string()));
+        }
+    }
+
+    // Fork the second time
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            return Err(VpnError::Config("Failed to fork process (second)".to_string()));
+        }
+        if pid > 0 {
+            // Parent process exits
+            std::process::exit(0);
+        }
+    }
+
+    // Change working directory to root
+    std::env::set_current_dir("/").ok();
+
+    // Close standard file descriptors
+    unsafe {
+        libc::close(libc::STDIN_FILENO);
+        libc::close(libc::STDOUT_FILENO);
+        libc::close(libc::STDERR_FILENO);
+    }
+
+    // Redirect standard file descriptors to /dev/null
+    unsafe {
+        let dev_null = std::ffi::CString::new("/dev/null").unwrap();
+        let fd = libc::open(dev_null.as_ptr(), libc::O_RDWR);
+        if fd >= 0 {
+            libc::dup2(fd, libc::STDIN_FILENO);
+            libc::dup2(fd, libc::STDOUT_FILENO);
+            libc::dup2(fd, libc::STDERR_FILENO);
+            if fd > libc::STDERR_FILENO {
+                libc::close(fd);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Daemonize the process (Windows)
+#[cfg(windows)]
+pub fn daemonize() -> Result<()> {
+    // On Windows, we use a different approach
+    // We detach from the console and run in the background
+    use std::os::windows::process::CommandExt;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| VpnError::Config(format!("Failed to get executable path: {}", e)))?;
+
+    let args: Vec<String> = std::env::args().collect();
+
+    // Build args without the daemon flag
+    let new_args: Vec<String> = args[1..]
+        .iter()
+        .filter(|arg| *arg != "-d" && *arg != "--daemon")
+        .map(|s| s.to_string())
+        .collect();
+
+    // Start a new detached process
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    std::process::Command::new(exe)
+        .args(&new_args)
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| VpnError::Config(format!("Failed to spawn daemon: {}", e)))?;
+
+    // Exit the parent process
+    std::process::exit(0);
 }
