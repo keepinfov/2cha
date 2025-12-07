@@ -13,27 +13,27 @@ mod protocol;
 
 // Unix-specific modules
 #[cfg(unix)]
+mod client;
+#[cfg(unix)]
 mod network;
 #[cfg(unix)]
 mod routing;
 #[cfg(unix)]
-mod tun;
-#[cfg(unix)]
-mod client;
-#[cfg(unix)]
 mod server;
+#[cfg(unix)]
+mod tun;
 
 // Windows-specific modules
+#[cfg(windows)]
+mod client_windows;
 #[cfg(windows)]
 mod network_windows;
 #[cfg(windows)]
 mod routing_windows;
 #[cfg(windows)]
-mod tun_windows;
-#[cfg(windows)]
-mod client_windows;
-#[cfg(windows)]
 mod server_windows;
+#[cfg(windows)]
+mod tun_windows;
 
 pub use config::{CipherSuite, ClientConfig, ConfigError, ServerConfig};
 pub use crypto::{Aes256Gcm, ChaCha20, ChaCha20Poly1305, Cipher, Poly1305};

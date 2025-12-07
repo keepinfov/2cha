@@ -5,18 +5,21 @@
 #![cfg(windows)]
 
 use crate::{
-    tun_windows::{TunDevice, IpVersion},
-    Result, ChaCha20Poly1305, ServerConfig, VpnError,
-    network_windows::{UdpTunnel, TunnelConfig, PeerState, EventLoop, EventResult, is_would_block, init_winsock},
-    protocol::{PacketType, PacketHeader},
-    PROTOCOL_HEADER_SIZE,
+    network_windows::{
+        init_winsock, is_would_block, EventLoop, EventResult, PeerState, TunnelConfig, UdpTunnel,
+    },
+    protocol::{PacketHeader, PacketType},
+    tun_windows::{IpVersion, TunDevice},
+    ChaCha20Poly1305, Result, ServerConfig, VpnError, PROTOCOL_HEADER_SIZE,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT};
 use windows::Win32::Foundation::BOOL;
+use windows::Win32::System::Console::{
+    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -24,13 +27,13 @@ pub fn run(config_path: &str) -> Result<()> {
     // Initialize Winsock
     init_winsock()?;
 
-    let cfg = ServerConfig::from_file(config_path)
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let cfg =
+        ServerConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    let listen_addr = cfg.listen_addr()
+    let listen_addr = cfg
+        .listen_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
 
     log::info!("Starting 2cha server v0.3 (Windows)...");
 
@@ -39,7 +42,10 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Configure IPv4
     if cfg.ipv4.enable {
-        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv4()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
             log::info!("IPv4: {}/{}", addr, cfg.ipv4.prefix);
         }
@@ -47,7 +53,10 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Configure IPv6
     if cfg.ipv6.enable {
-        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv6()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
             log::info!("IPv6: {}/{}", addr, cfg.ipv6.prefix);
         }
@@ -61,7 +70,8 @@ pub fn run(config_path: &str) -> Result<()> {
     if cfg.gateway.ip_forward {
         if let Some(ref iface) = cfg.gateway.external_interface {
             if cfg.ipv4.enable {
-                let subnet = format!("{}/{}",
+                let subnet = format!(
+                    "{}/{}",
                     cfg.ipv4.address.as_deref().unwrap_or("10.0.0.0"),
                     cfg.ipv4.prefix
                 );
@@ -77,7 +87,8 @@ pub fn run(config_path: &str) -> Result<()> {
             if cfg.ipv6.enable {
                 if let Some(ref addr) = cfg.ipv6.address {
                     let subnet = format!("{}/{}", addr, cfg.ipv6.prefix);
-                    if let Err(e) = crate::routing_windows::setup_server_gateway_v6(iface, &subnet) {
+                    if let Err(e) = crate::routing_windows::setup_server_gateway_v6(iface, &subnet)
+                    {
                         log::error!("Failed to setup IPv6 gateway: {}", e);
                     }
                 }
@@ -105,7 +116,9 @@ pub fn run(config_path: &str) -> Result<()> {
 
     let mut event_loop = EventLoop::new();
     event_loop.add_handle(tun.get_read_wait_event());
-    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(tunnel.socket()));
+    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(
+        tunnel.socket(),
+    ));
 
     let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
     let cipher = ChaCha20Poly1305::new(&key);
@@ -141,7 +154,8 @@ pub fn run(config_path: &str) -> Result<()> {
 
         // Cleanup expired peers
         if last_cleanup.elapsed() > cleanup_interval {
-            let expired: Vec<_> = peers.iter()
+            let expired: Vec<_> = peers
+                .iter()
                 .filter(|(_, p)| p.is_expired(session_timeout))
                 .map(|(a, _)| *a)
                 .collect();
@@ -227,7 +241,9 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
+                            if let Ok(decrypted) =
+                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
+                            {
                                 let _ = tun.write(&decrypted);
                             }
                         }

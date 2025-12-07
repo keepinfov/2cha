@@ -5,7 +5,6 @@
 //!
 //! Note: This module is only available on Unix platforms (Linux).
 
-#![cfg(unix)]
 #![allow(clippy::io_other_error)]
 #![allow(clippy::too_many_arguments)]
 
