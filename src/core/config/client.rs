@@ -141,8 +141,27 @@ pub struct DnsSection {
 
 impl ClientConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-        Self::parse(&content)
+        let mut config = Self::parse(&content)?;
+
+        // Resolve relative key_file path to absolute based on config file's directory
+        if let Some(ref key_file) = config.crypto.key_file {
+            let key_path = Path::new(key_file);
+            if key_path.is_relative() {
+                if let Some(config_dir) = path.parent() {
+                    let absolute_key_path = config_dir.join(key_path);
+                    if let Ok(canonical) = fs::canonicalize(&absolute_key_path) {
+                        config.crypto.key_file = Some(canonical.to_string_lossy().to_string());
+                    } else {
+                        // Try to make it absolute even if file doesn't exist yet (for better error message)
+                        config.crypto.key_file = Some(absolute_key_path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(config)
     }
 
     pub fn parse(content: &str) -> Result<Self, ConfigError> {

@@ -2,6 +2,10 @@
 //!
 //! Command implementations for the VPN CLI.
 
+#[cfg(unix)]
+use crate::cli::utils::LOG_FILE;
+#[cfg(unix)]
+use crate::cli::utils::can_signal_process;
 use crate::cli::utils::{
     daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
     DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG, PID_FILE,
@@ -28,29 +32,55 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Convert config path to absolute before daemonizing (daemon changes cwd to /)
+    let config_path = std::fs::canonicalize(&parsed.config_path)
+        .map_err(|e| crate::core::error::VpnError::Config(
+            format!("Config file '{}' not found: {}", parsed.config_path, e)
+        ))?
+        .to_string_lossy()
+        .to_string();
+
     if !parsed.quiet {
-        println!("\x1b[36m⟳\x1b[0m Connecting...");
+        print!("\x1b[36m⟳\x1b[0m Connecting...");
+        // Flush to ensure message is shown before forking
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     // Daemonize if requested
     if parsed.daemon {
+        if !parsed.quiet {
+            println!(" (background)");
+            println!("  Use '2cha status' to check connection");
+            println!("  Logs: {}", LOG_FILE);
+        }
         daemonize()?;
+    } else if !parsed.quiet {
+        println!();
     }
 
     if parsed.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
             .init();
-    } else if !parsed.quiet {
+    } else if !parsed.quiet && !parsed.daemon {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
             .format_target(false)
             .format_timestamp(None)
             .init();
     }
 
-    std::fs::write(PID_FILE, std::process::id().to_string()).ok();
-    let result = client::run(&parsed.config_path, parsed.quiet);
-    std::fs::remove_file(PID_FILE).ok();
+    // PID file is managed by daemonize crate in daemon mode
+    if !parsed.daemon {
+        std::fs::write(PID_FILE, std::process::id().to_string()).ok();
+    }
+
+    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
+
+    // Clean up PID file on exit (only in non-daemon mode, daemon crate handles it)
+    if !parsed.daemon {
+        std::fs::remove_file(PID_FILE).ok();
+    }
 
     result
 }
@@ -67,14 +97,32 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Convert config path to absolute before daemonizing
+    let config_path = std::fs::canonicalize(&parsed.config_path)
+        .map_err(|e| crate::core::error::VpnError::Config(
+            format!("Config file '{}' not found: {}", parsed.config_path, e)
+        ))?
+        .to_string_lossy()
+        .to_string();
+
     if !parsed.quiet {
-        println!("\x1b[36m>\x1b[0m Connecting...");
-        println!("  Note: Requires wintun.dll and Administrator privileges");
+        print!("\x1b[36m>\x1b[0m Connecting...");
+        // Flush to ensure message is shown before spawning daemon
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     // Daemonize if requested
     if parsed.daemon {
+        if !parsed.quiet {
+            println!(" (background)");
+            println!("  Note: Requires wintun.dll and Administrator privileges");
+            println!("  Use '2cha status' to check connection");
+        }
         daemonize()?;
+    } else if !parsed.quiet {
+        println!();
+        println!("  Note: Requires wintun.dll and Administrator privileges");
     }
 
     if parsed.verbose {
@@ -89,7 +137,7 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
-    let result = client::run(&parsed.config_path, parsed.quiet);
+    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
     std::fs::remove_file(PID_FILE).ok();
 
     result
@@ -98,6 +146,18 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
 /// Disconnect from VPN
 #[cfg(unix)]
 pub fn cmd_down() -> Result<()> {
+    if !is_running() {
+        println!("\x1b[90m○\x1b[0m VPN not connected");
+        return Ok(());
+    }
+
+    // Check if we have permission to stop the VPN
+    if !can_signal_process() {
+        println!("\x1b[31m✗\x1b[0m Permission denied");
+        println!("  The VPN is running as root. Use: sudo 2cha down");
+        return Ok(());
+    }
+
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             println!("\x1b[36m⟳\x1b[0m Disconnecting...");

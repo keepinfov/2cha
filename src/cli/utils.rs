@@ -26,7 +26,40 @@ pub fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
-                return libc::kill(pid, 0) == 0;
+                // kill(pid, 0) returns 0 if we can signal the process
+                // It returns -1 with EPERM if process exists but we lack permission
+                // It returns -1 with ESRCH if process doesn't exist
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
+                // Check if error is EPERM (permission denied) - process exists but owned by another user
+                // Use cross-platform errno access
+                #[cfg(target_os = "linux")]
+                let errno = *libc::__errno_location();
+                #[cfg(target_os = "macos")]
+                let errno = *libc::__error();
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let errno = libc::ESRCH; // Default to "not found" on other platforms
+
+                if errno == libc::EPERM {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if current user can signal the VPN process (has permission to stop it)
+#[cfg(unix)]
+pub fn can_signal_process() -> bool {
+    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe {
+                // Try to send signal 0 (no actual signal, just permission check)
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
             }
         }
     }
@@ -163,75 +196,45 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
         .init();
 }
 
+/// Log file path for daemon mode
+#[cfg(unix)]
+pub const LOG_FILE: &str = "/tmp/2cha.log";
+
 /// Daemonize the process (Unix)
+/// Uses the `daemonize` crate for robust daemon creation
 #[cfg(unix)]
 pub fn daemonize() -> Result<()> {
-    unsafe {
-        // Fork the first time
-        let pid = libc::fork();
-        if pid < 0 {
-            return Err(VpnError::Config("Failed to fork process".to_string()));
-        }
-        if pid > 0 {
-            // Parent process exits
-            std::process::exit(0);
-        }
+    use daemonize::Daemonize;
+    use std::fs::OpenOptions;
 
-        // Create a new session (become session leader)
-        if libc::setsid() < 0 {
-            return Err(VpnError::Config("Failed to create new session".to_string()));
-        }
+    // Create/open log file for daemon output (append mode)
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
 
-        // Ignore SIGHUP before second fork
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    let log_file_err = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
 
-        // Fork the second time to ensure we can't acquire a controlling terminal
-        let pid = libc::fork();
-        if pid < 0 {
-            return Err(VpnError::Config(
-                "Failed to fork process (second)".to_string(),
-            ));
-        }
-        if pid > 0 {
-            // Parent process exits
-            std::process::exit(0);
-        }
+    let daemonize = Daemonize::new()
+        .pid_file(PID_FILE)
+        .chown_pid_file(true)
+        .working_directory("/")
+        .umask(0o022)
+        .stdout(log_file)
+        .stderr(log_file_err);
 
-        // Reset file creation mask
-        libc::umask(0);
-
-        // Change working directory to root
-        let _ = std::env::set_current_dir("/");
-
-        // Redirect standard file descriptors to /dev/null BEFORE closing them
-        // This prevents issues if open() fails
-        let dev_null = std::ffi::CString::new("/dev/null").unwrap();
-        let fd = libc::open(dev_null.as_ptr(), libc::O_RDWR);
-        if fd < 0 {
-            return Err(VpnError::Config("Failed to open /dev/null".to_string()));
-        }
-
-        // Redirect stdin, stdout, stderr to /dev/null
-        if libc::dup2(fd, libc::STDIN_FILENO) < 0
-            || libc::dup2(fd, libc::STDOUT_FILENO) < 0
-            || libc::dup2(fd, libc::STDERR_FILENO) < 0
-        {
-            libc::close(fd);
-            return Err(VpnError::Config(
-                "Failed to redirect standard file descriptors".to_string(),
-            ));
-        }
-
-        // Close the original /dev/null fd if it's not one of the standard fds
-        if fd > libc::STDERR_FILENO {
-            libc::close(fd);
-        }
-    }
-
-    Ok(())
+    daemonize
+        .start()
+        .map_err(|e| VpnError::Config(format!("Failed to daemonize: {}", e)))
 }
 
 /// Daemonize the process (Windows)
+/// Note: config_path should be an absolute path (canonicalized before calling)
 #[cfg(windows)]
 pub fn daemonize() -> Result<()> {
     // On Windows, we use a different approach
@@ -243,12 +246,30 @@ pub fn daemonize() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // Build args without the daemon flag
-    let new_args: Vec<String> = args[1..]
-        .iter()
-        .filter(|arg| *arg != "-d" && *arg != "--daemon")
-        .map(|s| s.to_string())
-        .collect();
+    // Build args without the daemon flag, converting relative config paths to absolute
+    let mut new_args: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-d" || arg == "--daemon" {
+            i += 1;
+            continue;
+        }
+        if (arg == "-c" || arg == "--config") && i + 1 < args.len() {
+            new_args.push(arg.clone());
+            i += 1;
+            // Convert config path to absolute
+            let config_path = &args[i];
+            if let Ok(abs_path) = std::fs::canonicalize(config_path) {
+                new_args.push(abs_path.to_string_lossy().to_string());
+            } else {
+                new_args.push(config_path.clone());
+            }
+        } else {
+            new_args.push(arg.clone());
+        }
+        i += 1;
+    }
 
     // Start a new detached process
     const DETACHED_PROCESS: u32 = 0x00000008;
