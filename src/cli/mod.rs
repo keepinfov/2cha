@@ -9,7 +9,7 @@ pub use commands::{cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_t
 
 use crate::constants::PROTOCOL_VERSION;
 
-const VERSION: &str = "0.6.0";
+const VERSION: &str = "0.6.1";
 
 /// Print version information
 pub fn print_version() {

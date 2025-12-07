@@ -8,6 +8,42 @@ use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
+/// DNS lookup strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsLookup {
+    /// Automatically determine: try IP first, then DNS if needed (default)
+    Auto,
+    /// Always perform DNS lookup
+    Always,
+    /// Never perform DNS lookup, IP addresses only
+    Never,
+    /// Enable DNS lookup (alias for Always, backward compatibility)
+    #[serde(alias = "true")]
+    Enabled,
+    /// Disable DNS lookup (alias for Never, backward compatibility)
+    #[serde(alias = "false")]
+    Disabled,
+}
+
+impl Default for DnsLookup {
+    fn default() -> Self {
+        DnsLookup::Auto
+    }
+}
+
+impl DnsLookup {
+    /// Check if DNS lookup is allowed
+    fn is_enabled(&self) -> bool {
+        matches!(self, DnsLookup::Auto | DnsLookup::Always | DnsLookup::Enabled)
+    }
+
+    /// Check if we should always try DNS first
+    fn is_always(&self) -> bool {
+        matches!(self, DnsLookup::Always | DnsLookup::Enabled)
+    }
+}
+
 /// Client configuration
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
@@ -33,6 +69,8 @@ pub struct ClientSection {
     pub server: String,
     #[serde(default)]
     pub prefer_ipv6: bool,
+    #[serde(default)]
+    pub dns_lookup: DnsLookup,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,10 +150,69 @@ impl ClientConfig {
     }
 
     pub fn server_addr(&self) -> Result<SocketAddr, ConfigError> {
-        self.client
-            .server
-            .parse()
-            .map_err(|_| ConfigError::InvalidAddress(self.client.server.clone()))
+        use std::net::ToSocketAddrs;
+
+        // If "always" mode, skip IP parsing and go straight to DNS
+        if !self.client.dns_lookup.is_always() {
+            // Try to parse as SocketAddr directly first
+            if let Ok(addr) = self.client.server.parse::<SocketAddr>() {
+                return Ok(addr);
+            }
+        }
+
+        // If dns_lookup is enabled, try to resolve domain name
+        if self.client.dns_lookup.is_enabled() {
+            // Split host:port
+            let parts: Vec<&str> = self.client.server.rsplitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(ConfigError::InvalidAddress(
+                    format!("Invalid server format '{}', expected 'host:port'", self.client.server)
+                ));
+            }
+
+            let port_str = parts[0];
+            let host = parts[1];
+
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| ConfigError::InvalidAddress(
+                    format!("Invalid port '{}' in server address", port_str)
+                ))?;
+
+            // Perform DNS lookup
+            let server_with_port = format!("{}:{}", host, port);
+
+            let addrs = server_with_port
+                .to_socket_addrs()
+                .map_err(|e| ConfigError::InvalidAddress(
+                    format!("Failed to resolve '{}': {}", host, e)
+                ))?;
+
+            // Prefer IPv4 unless prefer_ipv6 is set
+            let mut ipv4_addr = None;
+            let mut ipv6_addr = None;
+
+            for addr in addrs {
+                if addr.is_ipv4() && ipv4_addr.is_none() {
+                    ipv4_addr = Some(addr);
+                } else if addr.is_ipv6() && ipv6_addr.is_none() {
+                    ipv6_addr = Some(addr);
+                }
+            }
+
+            if self.client.prefer_ipv6 {
+                ipv6_addr.or(ipv4_addr)
+            } else {
+                ipv4_addr.or(ipv6_addr)
+            }
+            .ok_or_else(|| ConfigError::InvalidAddress(
+                format!("No addresses resolved for '{}'", host)
+            ))
+        } else {
+            Err(ConfigError::InvalidAddress(
+                format!("Invalid socket address '{}' and DNS lookup is disabled", self.client.server)
+            ))
+        }
     }
 
     pub fn tun_ipv4(&self) -> Result<Option<Ipv4Addr>, ConfigError> {
@@ -155,8 +252,17 @@ pub fn example_client_config() -> &'static str {
 # Usage: sudo 2cha up -c client.toml
 
 [client]
+# Server address - can be IP:port (e.g., "1.2.3.4:51820") or domain:port (e.g., "vpn.example.com:51820")
 server = "vpn.example.com:51820"
+# Prefer IPv6 addresses when multiple IPs are resolved
 prefer_ipv6 = false
+# DNS lookup mode:
+#   auto   - Try IP parsing first, then DNS if needed (default, recommended)
+#   always - Always perform DNS lookup, even for IPs
+#   never  - Never perform DNS lookup, IP addresses only
+#   true   - Same as "always" (backward compatibility)
+#   false  - Same as "never" (backward compatibility)
+dns_lookup = "auto"
 
 [tun]
 name = "tun0"
