@@ -26,7 +26,17 @@ pub fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
-                return libc::kill(pid, 0) == 0;
+                // kill(pid, 0) returns 0 if we can signal the process
+                // It returns -1 with EPERM if process exists but we lack permission
+                // It returns -1 with ESRCH if process doesn't exist
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
+                // Check if error is EPERM (permission denied) - process exists but owned by another user
+                let errno = *libc::__errno_location();
+                if errno == libc::EPERM {
+                    return true;
+                }
             }
         }
     }
