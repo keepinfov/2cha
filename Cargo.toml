@@ -40,6 +40,7 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
 ] }
 wintun = "0.5"
+ctrlc = "3.4"
 
 [profile.release]
 opt-level = 3
