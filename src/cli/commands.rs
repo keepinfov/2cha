@@ -28,13 +28,30 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Convert config path to absolute before daemonizing (daemon changes cwd to /)
+    let config_path = std::fs::canonicalize(&parsed.config_path)
+        .map_err(|e| crate::core::error::VpnError::Config(
+            format!("Config file '{}' not found: {}", parsed.config_path, e)
+        ))?
+        .to_string_lossy()
+        .to_string();
+
     if !parsed.quiet {
-        println!("\x1b[36m⟳\x1b[0m Connecting...");
+        print!("\x1b[36m⟳\x1b[0m Connecting...");
+        // Flush to ensure message is shown before forking
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     // Daemonize if requested
     if parsed.daemon {
+        if !parsed.quiet {
+            println!(" (background)");
+            println!("  Use '2cha status' to check connection");
+        }
         daemonize()?;
+    } else if !parsed.quiet {
+        println!();
     }
 
     if parsed.verbose {
@@ -49,7 +66,7 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
-    let result = client::run(&parsed.config_path, parsed.quiet);
+    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
     std::fs::remove_file(PID_FILE).ok();
 
     result
@@ -67,14 +84,32 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Convert config path to absolute before daemonizing
+    let config_path = std::fs::canonicalize(&parsed.config_path)
+        .map_err(|e| crate::core::error::VpnError::Config(
+            format!("Config file '{}' not found: {}", parsed.config_path, e)
+        ))?
+        .to_string_lossy()
+        .to_string();
+
     if !parsed.quiet {
-        println!("\x1b[36m>\x1b[0m Connecting...");
-        println!("  Note: Requires wintun.dll and Administrator privileges");
+        print!("\x1b[36m>\x1b[0m Connecting...");
+        // Flush to ensure message is shown before spawning daemon
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     // Daemonize if requested
     if parsed.daemon {
+        if !parsed.quiet {
+            println!(" (background)");
+            println!("  Note: Requires wintun.dll and Administrator privileges");
+            println!("  Use '2cha status' to check connection");
+        }
         daemonize()?;
+    } else if !parsed.quiet {
+        println!();
+        println!("  Note: Requires wintun.dll and Administrator privileges");
     }
 
     if parsed.verbose {
@@ -89,7 +124,7 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
-    let result = client::run(&parsed.config_path, parsed.quiet);
+    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
     std::fs::remove_file(PID_FILE).ok();
 
     result

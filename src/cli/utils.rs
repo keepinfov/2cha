@@ -232,6 +232,7 @@ pub fn daemonize() -> Result<()> {
 }
 
 /// Daemonize the process (Windows)
+/// Note: config_path should be an absolute path (canonicalized before calling)
 #[cfg(windows)]
 pub fn daemonize() -> Result<()> {
     // On Windows, we use a different approach
@@ -243,12 +244,30 @@ pub fn daemonize() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // Build args without the daemon flag
-    let new_args: Vec<String> = args[1..]
-        .iter()
-        .filter(|arg| *arg != "-d" && *arg != "--daemon")
-        .map(|s| s.to_string())
-        .collect();
+    // Build args without the daemon flag, converting relative config paths to absolute
+    let mut new_args: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-d" || arg == "--daemon" {
+            i += 1;
+            continue;
+        }
+        if (arg == "-c" || arg == "--config") && i + 1 < args.len() {
+            new_args.push(arg.clone());
+            i += 1;
+            // Convert config path to absolute
+            let config_path = &args[i];
+            if let Ok(abs_path) = std::fs::canonicalize(config_path) {
+                new_args.push(abs_path.to_string_lossy().to_string());
+            } else {
+                new_args.push(config_path.clone());
+            }
+        } else {
+            new_args.push(arg.clone());
+        }
+        i += 1;
+    }
 
     // Start a new detached process
     const DETACHED_PROCESS: u32 = 0x00000008;
