@@ -3,7 +3,7 @@
 //! Type-safe protocol with efficient serialization.
 
 use crate::error::{ProtocolError, Result};
-use crate::{PROTOCOL_VERSION, PROTOCOL_HEADER_SIZE, CHACHA20_NONCE_SIZE};
+use crate::{CHACHA20_NONCE_SIZE, PROTOCOL_HEADER_SIZE, PROTOCOL_VERSION};
 
 /// Packet types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,10 +52,10 @@ impl PacketHeader {
     /// Create new header with random nonce
     pub fn new(packet_type: PacketType, counter: u32) -> Self {
         let mut nonce = [0u8; CHACHA20_NONCE_SIZE];
-        
+
         // Nonce = counter (4 bytes) + random (8 bytes)
         nonce[0..4].copy_from_slice(&counter.to_le_bytes());
-        
+
         // Get randomness from /dev/urandom or fallback to timestamp
         if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
             use std::io::Read;
@@ -67,7 +67,7 @@ impl PacketHeader {
                 .as_nanos() as u64;
             nonce[4..12].copy_from_slice(&timestamp.to_le_bytes());
         }
-        
+
         PacketHeader {
             version: PROTOCOL_VERSION,
             packet_type,
@@ -78,7 +78,11 @@ impl PacketHeader {
 
     /// Create header with specific nonce
     #[inline]
-    pub fn with_nonce(packet_type: PacketType, counter: u32, nonce: [u8; CHACHA20_NONCE_SIZE]) -> Self {
+    pub fn with_nonce(
+        packet_type: PacketType,
+        counter: u32,
+        nonce: [u8; CHACHA20_NONCE_SIZE],
+    ) -> Self {
         PacketHeader {
             version: PROTOCOL_VERSION,
             packet_type,
@@ -115,7 +119,8 @@ impl PacketHeader {
             return Err(ProtocolError::PacketTooSmall {
                 min: PROTOCOL_HEADER_SIZE,
                 got: buf.len(),
-            }.into());
+            }
+            .into());
         }
 
         let version = buf[0];
@@ -123,7 +128,8 @@ impl PacketHeader {
             return Err(ProtocolError::InvalidVersion {
                 expected: PROTOCOL_VERSION,
                 got: version,
-            }.into());
+            }
+            .into());
         }
 
         let packet_type = PacketType::from_u8(buf[1])?;
@@ -275,7 +281,7 @@ mod tests {
         let packet = Packet::new_data(42, b"Hello VPN!".to_vec());
         let serialized = packet.serialize();
         let deserialized = Packet::deserialize(&serialized).unwrap();
-        
+
         assert_eq!(packet.header.counter, deserialized.header.counter);
         assert_eq!(packet.payload, deserialized.payload);
     }
@@ -283,19 +289,19 @@ mod tests {
     #[test]
     fn test_replay_window() {
         let mut window = ReplayWindow::new();
-        
+
         // Sequential packets
         assert!(window.check_and_update(1));
         assert!(window.check_and_update(2));
         assert!(window.check_and_update(3));
-        
+
         // Replay should fail
         assert!(!window.check_and_update(2));
-        
+
         // Out of order but within window
         assert!(window.check_and_update(5));
         assert!(window.check_and_update(4));
-        
+
         // Replay again
         assert!(!window.check_and_update(4));
     }
@@ -303,7 +309,7 @@ mod tests {
     #[test]
     fn test_replay_window_jump() {
         let mut window = ReplayWindow::new();
-        
+
         assert!(window.check_and_update(1));
         assert!(window.check_and_update(100)); // Big jump
         assert!(!window.check_and_update(1)); // Old packet

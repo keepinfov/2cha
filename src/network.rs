@@ -6,10 +6,10 @@
 
 #![cfg(unix)]
 
-use crate::error::{NetworkError, Result};
 use crate::crypto::ChaCha20Poly1305;
+use crate::error::{NetworkError, Result};
 use crate::protocol::{PacketHeader, PacketType, ReplayWindow};
-use crate::{PROTOCOL_HEADER_SIZE, MAX_PACKET_SIZE};
+use crate::{MAX_PACKET_SIZE, PROTOCOL_HEADER_SIZE};
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
@@ -99,19 +99,19 @@ impl UdpTunnel {
     /// Create new UDP tunnel
     pub fn new(config: TunnelConfig, key: &[u8; 32]) -> Result<Self> {
         log::info!("Creating UDP tunnel on {}", config.local_addr);
-        
+
         let socket = UdpSocket::bind(config.local_addr)
             .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
-        
+
         socket.set_read_timeout(config.read_timeout)?;
         socket.set_write_timeout(config.write_timeout)?;
-        
+
         // Set socket buffer sizes
         Self::set_socket_buffers(&socket, config.recv_buffer_size, config.send_buffer_size);
-        
+
         let recv_buffer = vec![0u8; MAX_PACKET_SIZE];
         let send_buffer = vec![0u8; MAX_PACKET_SIZE];
-        
+
         Ok(UdpTunnel {
             socket,
             config,
@@ -123,11 +123,11 @@ impl UdpTunnel {
 
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
         let fd = socket.as_raw_fd();
-        
+
         unsafe {
             let recv_size = recv_size as libc::c_int;
             let send_size = send_size as libc::c_int;
-            
+
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,
@@ -135,7 +135,7 @@ impl UdpTunnel {
                 &recv_size as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
-            
+
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,
@@ -156,18 +156,20 @@ impl UdpTunnel {
     pub fn send_encrypted(&mut self, peer: &mut PeerState, data: &[u8]) -> Result<usize> {
         let counter = peer.next_counter();
         let header = PacketHeader::new(PacketType::Data, counter);
-        
+
         let header_bytes = header.serialize();
         let encrypted = self.cipher.encrypt(&header.nonce, data, &header_bytes)?;
-        
+
         let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-        
-        let sent = self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+
+        let sent = self
+            .socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         peer.bytes_tx += sent as u64;
         peer.packets_tx += 1;
-        
+
         log::trace!("Sent {} bytes to {}", sent, peer.addr);
         Ok(sent)
     }
@@ -190,14 +192,15 @@ impl UdpTunnel {
         let counter = peer.next_counter();
         let header = PacketHeader::new(PacketType::Keepalive, counter);
         let header_bytes = header.serialize();
-        
+
         let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
-        
+
         let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-        
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         log::trace!("Sent keepalive to {}", peer.addr);
         Ok(())
     }
@@ -207,14 +210,15 @@ impl UdpTunnel {
         let counter = peer.next_counter();
         let header = PacketHeader::new(PacketType::Disconnect, counter);
         let header_bytes = header.serialize();
-        
+
         let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
-        
+
         let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-        
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         Ok(())
     }
 
@@ -244,7 +248,9 @@ pub struct EventLoop {
 
 impl EventLoop {
     pub fn new() -> Self {
-        EventLoop { poll_fds: Vec::new() }
+        EventLoop {
+            poll_fds: Vec::new(),
+        }
     }
 
     /// Add file descriptor for monitoring
@@ -315,10 +321,10 @@ pub const POLLHUP: i16 = libc::POLLHUP;
 #[inline]
 pub fn is_would_block(e: &crate::VpnError) -> bool {
     let s = e.to_string();
-    s.contains("WouldBlock") || 
-    s.contains("temporarily unavailable") || 
-    s.contains("os error 11") ||
-    s.contains("Resource temporarily unavailable")
+    s.contains("WouldBlock")
+        || s.contains("temporarily unavailable")
+        || s.contains("os error 11")
+        || s.contains("Resource temporarily unavailable")
 }
 
 #[cfg(test)]
@@ -336,7 +342,7 @@ mod tests {
     fn test_peer_state() {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let mut peer = PeerState::new(addr);
-        
+
         assert_eq!(peer.next_counter(), 1);
         assert_eq!(peer.next_counter(), 2);
         assert!(!peer.is_expired(Duration::from_secs(60)));

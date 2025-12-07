@@ -7,11 +7,10 @@
 #![cfg(unix)]
 
 use crate::{
-    TunDevice, Result, ChaCha20Poly1305, ServerConfig, VpnError,
-    network::{UdpTunnel, TunnelConfig, PeerState, EventLoop, POLLIN, is_would_block},
-    protocol::{PacketType, PacketHeader},
+    network::{is_would_block, EventLoop, PeerState, TunnelConfig, UdpTunnel, POLLIN},
+    protocol::{PacketHeader, PacketType},
     tun::IpVersion,
-    PROTOCOL_HEADER_SIZE,
+    ChaCha20Poly1305, Result, ServerConfig, TunDevice, VpnError, PROTOCOL_HEADER_SIZE,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -21,35 +20,41 @@ use std::time::{Duration, Instant};
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 pub fn run(config_path: &str) -> Result<()> {
-    let cfg = ServerConfig::from_file(config_path)
+    let cfg =
+        ServerConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
+
+    let listen_addr = cfg
+        .listen_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    
-    let listen_addr = cfg.listen_addr()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
 
     log::info!("Starting 2cha server v0.3...");
 
     // Create TUN device
     let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
-    
+
     // Configure IPv4
     if cfg.ipv4.enable {
-        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv4()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
             log::info!("IPv4: {}/{}", addr, cfg.ipv4.prefix);
         }
     }
-    
+
     // Configure IPv6
     if cfg.ipv6.enable {
-        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv6()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
             log::info!("IPv6: {}/{}", addr, cfg.ipv6.prefix);
         }
     }
-    
+
     tun.set_mtu(cfg.tun.mtu)?;
     tun.bring_up()?;
     tun.set_nonblocking(true)?;
@@ -58,7 +63,8 @@ pub fn run(config_path: &str) -> Result<()> {
     if cfg.gateway.ip_forward {
         if let Some(ref iface) = cfg.gateway.external_interface {
             if cfg.ipv4.enable {
-                let subnet = format!("{}/{}", 
+                let subnet = format!(
+                    "{}/{}",
                     cfg.ipv4.address.as_deref().unwrap_or("10.0.0.0"),
                     cfg.ipv4.prefix
                 );
@@ -68,7 +74,7 @@ pub fn run(config_path: &str) -> Result<()> {
             }
         }
     }
-    
+
     if cfg.gateway.ip6_forward {
         if let Some(ref iface) = cfg.gateway.external_interface {
             if cfg.ipv6.enable {
@@ -92,10 +98,10 @@ pub fn run(config_path: &str) -> Result<()> {
         send_buffer_size: cfg.performance.socket_send_buffer,
         ..Default::default()
     };
-    
+
     let mut tunnel = UdpTunnel::new(tunnel_config, &key)?;
     tunnel.set_nonblocking(true)?;
-    
+
     log::info!("Listening on {}", listen_addr);
 
     setup_signal_handler();
@@ -130,11 +136,12 @@ pub fn run(config_path: &str) -> Result<()> {
 
         // Cleanup expired peers
         if last_cleanup.elapsed() > cleanup_interval {
-            let expired: Vec<_> = peers.iter()
+            let expired: Vec<_> = peers
+                .iter()
                 .filter(|(_, p)| p.is_expired(session_timeout))
                 .map(|(a, _)| *a)
                 .collect();
-            
+
             for addr in expired {
                 log::info!("Client {} timed out", addr);
                 peers.remove(&addr);
@@ -157,11 +164,11 @@ fn handle_tun_read(
         match tun.read(buffer) {
             Ok(n) if n > 0 => {
                 let packet = &buffer[..n];
-                
+
                 // Determine packet type and route accordingly
                 let ip_version = IpVersion::from_packet(packet);
                 log::trace!("TUN read: {} bytes, {:?}", n, ip_version);
-                
+
                 // Send to all peers (could optimize with routing table)
                 for peer in peers.values_mut() {
                     let _ = tunnel.send_encrypted(peer, packet);
@@ -196,7 +203,7 @@ fn handle_udp_read(
                     log::info!("New client: {}", src);
                     peers.entry(src).or_insert_with(|| PeerState::new(src))
                 };
-                
+
                 peer.touch();
                 peer.bytes_rx += data.len() as u64;
                 peer.packets_rx += 1;
@@ -216,7 +223,9 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
+                            if let Ok(decrypted) =
+                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
+                            {
                                 let _ = tun.write(&decrypted);
                             }
                         }

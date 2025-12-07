@@ -5,8 +5,8 @@
 
 use serde::Deserialize;
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 
 /// Supported cipher suites
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -389,19 +389,45 @@ impl Default for LoggingSection {
 // DEFAULT VALUES
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn default_tun_name() -> String { "tun0".to_string() }
-fn default_mtu() -> u16 { 1420 } // Optimized for most networks
-fn default_queue_len() -> u32 { 500 }
-fn default_prefix_v4() -> u8 { 24 }
-fn default_prefix_v6() -> u8 { 64 }
-fn default_keepalive() -> u64 { 25 }
-fn default_session_timeout() -> u64 { 180 }
-fn default_handshake_timeout() -> u64 { 10 }
-fn default_log_level() -> String { "info".to_string() }
-fn default_max_clients() -> usize { 256 }
-fn default_socket_buffer() -> usize { 2 * 1024 * 1024 }
-fn default_batch_size() -> usize { 32 }
-fn default_true() -> bool { true }
+fn default_tun_name() -> String {
+    "tun0".to_string()
+}
+fn default_mtu() -> u16 {
+    1420
+} // Optimized for most networks
+fn default_queue_len() -> u32 {
+    500
+}
+fn default_prefix_v4() -> u8 {
+    24
+}
+fn default_prefix_v6() -> u8 {
+    64
+}
+fn default_keepalive() -> u64 {
+    25
+}
+fn default_session_timeout() -> u64 {
+    180
+}
+fn default_handshake_timeout() -> u64 {
+    10
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_max_clients() -> usize {
+    256
+}
+fn default_socket_buffer() -> usize {
+    2 * 1024 * 1024
+}
+fn default_batch_size() -> usize {
+    32
+}
+fn default_true() -> bool {
+    true
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IMPLEMENTATION
@@ -409,24 +435,25 @@ fn default_true() -> bool { true }
 
 impl ServerConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         Self::parse(&content)
     }
 
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
-        toml::from_str(content)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))
+        toml::from_str(content).map_err(|e| ConfigError::ParseError(e.to_string()))
     }
 
     pub fn listen_addr(&self) -> Result<SocketAddr, ConfigError> {
-        self.server.listen.parse()
+        self.server
+            .listen
+            .parse()
             .map_err(|_| ConfigError::InvalidAddress(self.server.listen.clone()))
     }
 
     pub fn listen_addr_v6(&self) -> Result<Option<SocketAddr>, ConfigError> {
         match &self.server.listen_v6 {
-            Some(addr) => addr.parse()
+            Some(addr) => addr
+                .parse()
                 .map(Some)
                 .map_err(|_| ConfigError::InvalidAddress(addr.clone())),
             None => Ok(None),
@@ -435,22 +462,20 @@ impl ServerConfig {
 
     pub fn tun_ipv4(&self) -> Result<Option<Ipv4Addr>, ConfigError> {
         match &self.ipv4.address {
-            Some(addr) if self.ipv4.enable => {
-                addr.parse()
-                    .map(Some)
-                    .map_err(|_| ConfigError::InvalidAddress(addr.clone()))
-            }
+            Some(addr) if self.ipv4.enable => addr
+                .parse()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidAddress(addr.clone())),
             _ => Ok(None),
         }
     }
 
     pub fn tun_ipv6(&self) -> Result<Option<Ipv6Addr>, ConfigError> {
         match &self.ipv6.address {
-            Some(addr) if self.ipv6.enable => {
-                addr.parse()
-                    .map(Some)
-                    .map_err(|_| ConfigError::InvalidAddress(addr.clone()))
-            }
+            Some(addr) if self.ipv6.enable => addr
+                .parse()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidAddress(addr.clone())),
             _ => Ok(None),
         }
     }
@@ -462,39 +487,37 @@ impl ServerConfig {
 
 impl ClientConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         Self::parse(&content)
     }
 
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
-        toml::from_str(content)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))
+        toml::from_str(content).map_err(|e| ConfigError::ParseError(e.to_string()))
     }
 
     pub fn server_addr(&self) -> Result<SocketAddr, ConfigError> {
-        self.client.server.parse()
+        self.client
+            .server
+            .parse()
             .map_err(|_| ConfigError::InvalidAddress(self.client.server.clone()))
     }
 
     pub fn tun_ipv4(&self) -> Result<Option<Ipv4Addr>, ConfigError> {
         match &self.ipv4.address {
-            Some(addr) if self.ipv4.enable => {
-                addr.parse()
-                    .map(Some)
-                    .map_err(|_| ConfigError::InvalidAddress(addr.clone()))
-            }
+            Some(addr) if self.ipv4.enable => addr
+                .parse()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidAddress(addr.clone())),
             _ => Ok(None),
         }
     }
 
     pub fn tun_ipv6(&self) -> Result<Option<Ipv6Addr>, ConfigError> {
         match &self.ipv6.address {
-            Some(addr) if self.ipv6.enable => {
-                addr.parse()
-                    .map(Some)
-                    .map_err(|_| ConfigError::InvalidAddress(addr.clone()))
-            }
+            Some(addr) if self.ipv6.enable => addr
+                .parse()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidAddress(addr.clone())),
             _ => Ok(None),
         }
     }
@@ -548,7 +571,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::ParseError(e) => write!(f, "Parse error: {}", e),
             ConfigError::InvalidAddress(a) => write!(f, "Invalid address: {}", a),
             ConfigError::InvalidKey(e) => write!(f, "Invalid key: {}", e),
-            ConfigError::MissingKey => write!(f, "No key provided (use key, key_file, or VPN_KEY env)"),
+            ConfigError::MissingKey => {
+                write!(f, "No key provided (use key, key_file, or VPN_KEY env)")
+            }
         }
     }
 }
@@ -574,13 +599,14 @@ pub fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
 pub fn hex_to_key(hex: &str) -> Result<[u8; 32], ConfigError> {
     let hex = hex.trim();
     if hex.len() != 64 {
-        return Err(ConfigError::InvalidKey(
-            format!("Key must be 64 hex chars, got {}", hex.len())
-        ));
+        return Err(ConfigError::InvalidKey(format!(
+            "Key must be 64 hex chars, got {}",
+            hex.len()
+        )));
     }
     let mut key = [0u8; 32];
     for i in 0..32 {
-        key[i] = u8::from_str_radix(&hex[i*2..i*2+2], 16)
+        key[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
             .map_err(|_| ConfigError::InvalidKey("Invalid hex character".to_string()))?;
     }
     Ok(key)
@@ -785,8 +811,14 @@ mod tests {
         assert_eq!(prefix_to_netmask_v6(128), [255; 16]);
 
         // Common prefixes
-        assert_eq!(prefix_to_netmask_v6(64), [255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(prefix_to_netmask_v6(48), [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            prefix_to_netmask_v6(64),
+            [255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            prefix_to_netmask_v6(48),
+            [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
