@@ -3,12 +3,12 @@
 //! Command implementations for the VPN CLI.
 
 #[cfg(unix)]
-use crate::cli::utils::LOG_FILE;
-#[cfg(unix)]
 use crate::cli::utils::can_signal_process;
+#[cfg(unix)]
+use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
-    daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
-    DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG, PID_FILE,
+    daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs, DEFAULT_CONFIG,
+    DEFAULT_SERVER_CONFIG, PID_FILE,
 };
 use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
@@ -34,9 +34,12 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
 
     // Convert config path to absolute before daemonizing (daemon changes cwd to /)
     let config_path = std::fs::canonicalize(&parsed.config_path)
-        .map_err(|e| crate::core::error::VpnError::Config(
-            format!("Config file '{}' not found: {}", parsed.config_path, e)
-        ))?
+        .map_err(|e| {
+            crate::core::error::VpnError::Config(format!(
+                "Config file '{}' not found: {}",
+                parsed.config_path, e
+            ))
+        })?
         .to_string_lossy()
         .to_string();
 
@@ -99,9 +102,12 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
 
     // Convert config path to absolute before daemonizing
     let config_path = std::fs::canonicalize(&parsed.config_path)
-        .map_err(|e| crate::core::error::VpnError::Config(
-            format!("Config file '{}' not found: {}", parsed.config_path, e)
-        ))?
+        .map_err(|e| {
+            crate::core::error::VpnError::Config(format!(
+                "Config file '{}' not found: {}",
+                parsed.config_path, e
+            ))
+        })?
         .to_string_lossy()
         .to_string();
 

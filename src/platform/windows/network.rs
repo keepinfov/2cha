@@ -119,7 +119,9 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        let sent = self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        let sent = self
+            .socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         peer.bytes_tx += sent as u64;
         peer.packets_tx += 1;
         Ok(sent)
@@ -144,7 +146,8 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         Ok(())
     }
 
@@ -158,7 +161,8 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         Ok(())
     }
 

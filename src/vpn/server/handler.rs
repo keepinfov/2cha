@@ -4,8 +4,8 @@
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, routing, tun::IpVersion, EventLoop, PeerState, TunnelConfig, UdpTunnel,
-    TunDevice, POLLIN,
+    is_would_block, routing, tun::IpVersion, EventLoop, PeerState, TunDevice, TunnelConfig,
+    UdpTunnel, POLLIN,
 };
 
 use crate::constants::PROTOCOL_HEADER_SIZE;
@@ -23,13 +23,13 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// Run the VPN server
 #[cfg(unix)]
 pub fn run(config_path: &str) -> Result<()> {
-    let cfg = ServerConfig::from_file(config_path)
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let cfg =
+        ServerConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    let listen_addr = cfg.listen_addr()
+    let listen_addr = cfg
+        .listen_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
 
     log::info!("Starting 2cha server v0.6...");
 
@@ -38,7 +38,10 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Configure IPv4
     if cfg.ipv4.enable {
-        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv4()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
             log::info!("IPv4: {}/{}", addr, cfg.ipv4.prefix);
         }
@@ -46,7 +49,10 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Configure IPv6
     if cfg.ipv6.enable {
-        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv6()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
             log::info!("IPv6: {}/{}", addr, cfg.ipv6.prefix);
         }
@@ -220,7 +226,9 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
+                            if let Ok(decrypted) =
+                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
+                            {
                                 let _ = tun.write(&decrypted);
                             }
                         }

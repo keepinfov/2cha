@@ -2,8 +2,8 @@
 //!
 //! VPN protocol packet structures and serialization.
 
-use crate::core::error::{ProtocolError, Result};
 use crate::constants::{CHACHA20_NONCE_SIZE, PROTOCOL_HEADER_SIZE, PROTOCOL_VERSION};
+use crate::core::error::{ProtocolError, Result};
 
 /// Packet types for the VPN protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

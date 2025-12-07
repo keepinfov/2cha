@@ -83,7 +83,10 @@ impl Cipher for Aes256Gcm {
 
 /// Create cipher from config
 #[allow(dead_code)]
-pub fn create_cipher(cipher_type: crate::core::config::CipherSuite, key: &[u8; 32]) -> Box<dyn Cipher> {
+pub fn create_cipher(
+    cipher_type: crate::core::config::CipherSuite,
+    key: &[u8; 32],
+) -> Box<dyn Cipher> {
     match cipher_type {
         crate::core::config::CipherSuite::ChaCha20Poly1305 => Box::new(ChaCha20Poly1305::new(key)),
         crate::core::config::CipherSuite::Aes256Gcm => Box::new(Aes256Gcm::new(key)),

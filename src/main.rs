@@ -7,8 +7,8 @@ use std::process;
 
 // Import from library
 use twocha::cli::{
-    cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up,
-    print_usage, print_version,
+    cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up, print_usage,
+    print_version,
 };
 
 fn main() {

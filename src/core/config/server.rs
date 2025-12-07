@@ -122,7 +122,8 @@ impl ServerConfig {
                     if let Ok(canonical) = fs::canonicalize(&absolute_key_path) {
                         config.crypto.key_file = Some(canonical.to_string_lossy().to_string());
                     } else {
-                        config.crypto.key_file = Some(absolute_key_path.to_string_lossy().to_string());
+                        config.crypto.key_file =
+                            Some(absolute_key_path.to_string_lossy().to_string());
                     }
                 }
             }

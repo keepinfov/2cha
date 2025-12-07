@@ -35,7 +35,10 @@ impl Default for DnsLookup {
 impl DnsLookup {
     /// Check if DNS lookup is allowed
     fn is_enabled(&self) -> bool {
-        matches!(self, DnsLookup::Auto | DnsLookup::Always | DnsLookup::Enabled)
+        matches!(
+            self,
+            DnsLookup::Auto | DnsLookup::Always | DnsLookup::Enabled
+        )
     }
 
     /// Check if we should always try DNS first
@@ -155,7 +158,8 @@ impl ClientConfig {
                         config.crypto.key_file = Some(canonical.to_string_lossy().to_string());
                     } else {
                         // Try to make it absolute even if file doesn't exist yet (for better error message)
-                        config.crypto.key_file = Some(absolute_key_path.to_string_lossy().to_string());
+                        config.crypto.key_file =
+                            Some(absolute_key_path.to_string_lossy().to_string());
                     }
                 }
             }
@@ -184,28 +188,28 @@ impl ClientConfig {
             // Split host:port
             let parts: Vec<&str> = self.client.server.rsplitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(ConfigError::InvalidAddress(
-                    format!("Invalid server format '{}', expected 'host:port'", self.client.server)
-                ));
+                return Err(ConfigError::InvalidAddress(format!(
+                    "Invalid server format '{}', expected 'host:port'",
+                    self.client.server
+                )));
             }
 
             let port_str = parts[0];
             let host = parts[1];
 
-            let port: u16 = port_str
-                .parse()
-                .map_err(|_| ConfigError::InvalidAddress(
-                    format!("Invalid port '{}' in server address", port_str)
-                ))?;
+            let port: u16 = port_str.parse().map_err(|_| {
+                ConfigError::InvalidAddress(format!(
+                    "Invalid port '{}' in server address",
+                    port_str
+                ))
+            })?;
 
             // Perform DNS lookup
             let server_with_port = format!("{}:{}", host, port);
 
-            let addrs = server_with_port
-                .to_socket_addrs()
-                .map_err(|e| ConfigError::InvalidAddress(
-                    format!("Failed to resolve '{}': {}", host, e)
-                ))?;
+            let addrs = server_with_port.to_socket_addrs().map_err(|e| {
+                ConfigError::InvalidAddress(format!("Failed to resolve '{}': {}", host, e))
+            })?;
 
             // Prefer IPv4 unless prefer_ipv6 is set
             let mut ipv4_addr = None;
@@ -224,13 +228,14 @@ impl ClientConfig {
             } else {
                 ipv4_addr.or(ipv6_addr)
             }
-            .ok_or_else(|| ConfigError::InvalidAddress(
-                format!("No addresses resolved for '{}'", host)
-            ))
+            .ok_or_else(|| {
+                ConfigError::InvalidAddress(format!("No addresses resolved for '{}'", host))
+            })
         } else {
-            Err(ConfigError::InvalidAddress(
-                format!("Invalid socket address '{}' and DNS lookup is disabled", self.client.server)
-            ))
+            Err(ConfigError::InvalidAddress(format!(
+                "Invalid socket address '{}' and DNS lookup is disabled",
+                self.client.server
+            )))
         }
     }
 

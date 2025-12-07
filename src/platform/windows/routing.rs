@@ -82,22 +82,38 @@ pub fn add_route_v4(destination: &str, gateway: &str) -> io::Result<()> {
 
 /// Delete IPv4 route on Windows
 pub fn del_route_v4(destination: &str) -> io::Result<()> {
-    let _ = Command::new("route")
-        .args(["delete", destination])
-        .output();
+    let _ = Command::new("route").args(["delete", destination]).output();
     Ok(())
 }
 
 /// Set default gateway on Windows
-pub fn set_default_gateway_v4(vpn_gateway: &str, _original_gateway: &str, server_ip: &str) -> io::Result<()> {
+pub fn set_default_gateway_v4(
+    vpn_gateway: &str,
+    _original_gateway: &str,
+    server_ip: &str,
+) -> io::Result<()> {
     // Add route to server via original gateway
     let _ = Command::new("route")
-        .args(["add", server_ip, "mask", "255.255.255.255", _original_gateway])
+        .args([
+            "add",
+            server_ip,
+            "mask",
+            "255.255.255.255",
+            _original_gateway,
+        ])
         .output();
 
     // Set new default route
     let _ = Command::new("route")
-        .args(["add", "0.0.0.0", "mask", "0.0.0.0", vpn_gateway, "metric", "1"])
+        .args([
+            "add",
+            "0.0.0.0",
+            "mask",
+            "0.0.0.0",
+            vpn_gateway,
+            "metric",
+            "1",
+        ])
         .output()?;
 
     Ok(())
@@ -108,9 +124,7 @@ pub fn restore_default_gateway_v4(original_gateway: &str, server_ip: &str) -> io
     let _ = Command::new("route")
         .args(["delete", "0.0.0.0", "mask", "0.0.0.0"])
         .output();
-    let _ = Command::new("route")
-        .args(["delete", server_ip])
-        .output();
+    let _ = Command::new("route").args(["delete", server_ip]).output();
     Ok(())
 }
 
@@ -131,7 +145,10 @@ pub fn get_default_gateway_v4() -> io::Result<String> {
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::NotFound, "No default gateway found"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No default gateway found",
+    ))
 }
 
 /// Enable IP forwarding on Windows
