@@ -120,7 +120,7 @@ pub fn set_default_gateway_v4(
 }
 
 /// Restore original default gateway
-pub fn restore_default_gateway_v4(original_gateway: &str, server_ip: &str) -> io::Result<()> {
+pub fn restore_default_gateway_v4(_original_gateway: &str, server_ip: &str) -> io::Result<()> {
     let _ = Command::new("route")
         .args(["delete", "0.0.0.0", "mask", "0.0.0.0"])
         .output();
@@ -164,5 +164,15 @@ pub fn setup_server_gateway_v4(_external_iface: &str, _vpn_subnet: &str) -> io::
     // Windows NAT requires different approach (ICS or netsh routing)
     enable_ipv4_forward()?;
     log::info!("Note: Full NAT on Windows requires manual ICS configuration");
+    Ok(())
+}
+
+/// Setup server gateway for IPv6 on Windows
+pub fn setup_server_gateway_v6(_external_iface: &str, _vpn_subnet: &str) -> io::Result<()> {
+    // Enable IPv6 forwarding
+    let _ = Command::new("netsh")
+        .args(["interface", "ipv6", "set", "global", "forwarding=enabled"])
+        .output()?;
+    log::info!("Note: Full IPv6 NAT on Windows requires manual configuration");
     Ok(())
 }

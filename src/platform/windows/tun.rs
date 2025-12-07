@@ -5,7 +5,7 @@
 
 #![cfg(windows)]
 
-use crate::core::error::{Result, TunError, VpnError};
+use crate::core::error::Result;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// IP version detection

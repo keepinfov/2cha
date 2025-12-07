@@ -6,8 +6,10 @@
 use crate::cli::utils::can_signal_process;
 #[cfg(unix)]
 use crate::cli::utils::LOG_FILE;
+#[cfg(unix)]
+use crate::cli::utils::format_bytes;
 use crate::cli::utils::{
-    daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs, DEFAULT_CONFIG,
+    daemonize, generate_key, is_running, setup_logging, ParsedArgs, DEFAULT_CONFIG,
     DEFAULT_SERVER_CONFIG, PID_FILE,
 };
 use crate::core::config::{example_client_config, example_server_config};
