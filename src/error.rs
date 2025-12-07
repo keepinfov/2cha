@@ -22,6 +22,8 @@ pub enum TunError {
     DeviceNotFound(String),
     PermissionDenied,
     InvalidName(String),
+    ReadFailed,
+    WriteFailed,
 }
 
 #[derive(Debug)]

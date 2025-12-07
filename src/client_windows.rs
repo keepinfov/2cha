@@ -1,22 +1,32 @@
-//! # Client Module
+//! # Windows Client Module
 //!
-//! VPN client with IPv4/IPv6 dual-stack support.
-//!
-//! Note: This module is only available on Unix platforms.
+//! VPN client with IPv4/IPv6 dual-stack support for Windows.
+
+#![cfg(windows)]
 
 use crate::{
-    network::{is_would_block, EventLoop, PeerState, TunnelConfig, UdpTunnel, POLLIN},
+    network_windows::{
+        init_winsock, is_would_block, EventLoop, EventResult, PeerState, TunnelConfig, UdpTunnel,
+    },
     protocol::{PacketHeader, PacketType},
-    routing::ClientRoutingContext,
-    ChaCha20Poly1305, ClientConfig, Result, TunDevice, VpnError, PROTOCOL_HEADER_SIZE,
+    routing_windows::ClientRoutingContext,
+    tun_windows::TunDevice,
+    ChaCha20Poly1305, ClientConfig, Result, VpnError, PROTOCOL_HEADER_SIZE,
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use windows::Win32::Foundation::BOOL;
+use windows::Win32::System::Console::{
+    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 pub fn run(config_path: &str, quiet: bool) -> Result<()> {
+    // Initialize Winsock
+    init_winsock()?;
+
     let cfg =
         ClientConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
 
@@ -35,7 +45,6 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
             .map_err(|e| VpnError::Config(format!("{}", e)))?
         {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
-            // Gateway is typically .1 of the subnet
             let octets = addr.octets();
             Some(format!("{}.{}.{}.1", octets[0], octets[1], octets[2]))
         } else {
@@ -52,7 +61,6 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
             .map_err(|e| VpnError::Config(format!("{}", e)))?
         {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
-            // For IPv6, gateway is typically ::1 of the prefix
             let segments = addr.segments();
             Some(format!(
                 "{:x}:{:x}:{:x}:{:x}::1",
@@ -112,9 +120,12 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     setup_signal_handler();
 
+    // Setup event loop with TUN read event and socket
     let mut event_loop = EventLoop::new();
-    event_loop.add_fd(tun.fd(), POLLIN);
-    event_loop.add_fd(tunnel.fd(), POLLIN);
+    event_loop.add_handle(tun.get_read_wait_event());
+    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(
+        tunnel.socket(),
+    ));
 
     // Initial keepalive
     tunnel.send_keepalive(&mut server_peer)?;
@@ -122,7 +133,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     if !quiet {
         println!();
         println!(
-            "  \x1b[32m●\x1b[0m Connected to \x1b[36m{}\x1b[0m",
+            "  \x1b[32m*\x1b[0m Connected to \x1b[36m{}\x1b[0m",
             server_addr
         );
         if let Some(ref gw) = ipv4_gateway {
@@ -152,16 +163,24 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     let keepalive_interval = Duration::from_secs(cfg.timeouts.keepalive);
 
     while RUNNING.load(Ordering::SeqCst) {
-        let events = event_loop.poll(100)?;
-
-        for (fd, revents) in events {
-            if revents & POLLIN != 0 {
-                if fd == tun.fd() {
-                    handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut server_peer)?;
-                } else if fd == tunnel.fd() {
-                    handle_udp_read(&mut tunnel, &mut tun, &mut server_peer, &cipher)?;
-                }
+        match event_loop.poll(100) {
+            Ok(EventResult::HandleReady(0)) => {
+                // TUN device has data
+                handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut server_peer)?;
             }
+            Ok(EventResult::SocketReady(0)) => {
+                // UDP socket has data
+                handle_udp_read(&mut tunnel, &mut tun, &mut server_peer, &cipher)?;
+            }
+            Ok(EventResult::Timeout) => {
+                // Check for TUN data anyway (non-blocking)
+                let _ = handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut server_peer);
+                let _ = handle_udp_read(&mut tunnel, &mut tun, &mut server_peer, &cipher);
+            }
+            Err(e) => {
+                log::warn!("Event loop error: {}", e);
+            }
+            _ => {}
         }
 
         // Send keepalive
@@ -178,7 +197,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     let _ = routing_ctx.cleanup();
 
     if !quiet {
-        println!("\n  \x1b[32m✓\x1b[0m Disconnected");
+        println!("\n  \x1b[32m*\x1b[0m Disconnected");
     }
 
     Ok(())
@@ -256,11 +275,16 @@ fn handle_udp_read(
 
 fn setup_signal_handler() {
     unsafe {
-        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
+        SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
     }
 }
 
-extern "C" fn signal_handler(_: libc::c_int) {
-    RUNNING.store(false, Ordering::SeqCst);
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    match ctrl_type {
+        x if x == CTRL_C_EVENT || x == CTRL_BREAK_EVENT || x == CTRL_CLOSE_EVENT => {
+            RUNNING.store(false, Ordering::SeqCst);
+            BOOL(1) // Handled
+        }
+        _ => BOOL(0), // Not handled
+    }
 }
