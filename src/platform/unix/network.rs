@@ -1,46 +1,14 @@
-//! # Windows Network Module
+//! # Network Module (Unix)
 //!
-//! High-performance UDP tunnel with Windows-compatible I/O.
+//! High-performance UDP tunnel with optimized I/O.
 
-#![cfg(windows)]
-
-use crate::crypto::ChaCha20Poly1305;
-use crate::error::{NetworkError, Result};
-use crate::protocol::{PacketHeader, PacketType, ReplayWindow};
-use crate::{MAX_PACKET_SIZE, PROTOCOL_HEADER_SIZE};
+use crate::constants::{MAX_PACKET_SIZE, PROTOCOL_HEADER_SIZE};
+use crate::core::crypto::ChaCha20Poly1305;
+use crate::core::error::{NetworkError, Result};
+use crate::core::protocol::{PacketHeader, PacketType, ReplayWindow};
 use std::net::{SocketAddr, UdpSocket};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Networking::WinSock::{
-    select, WSACleanup, WSAStartup, FD_SET, SOCKET, TIMEVAL, WSADATA,
-};
-
-// =============================================================================
-// WINSOCK INITIALIZATION
-// =============================================================================
-
-/// Initialize Winsock (called once at startup)
-pub fn init_winsock() -> Result<()> {
-    unsafe {
-        let mut wsa_data: WSADATA = std::mem::zeroed();
-        let result = WSAStartup(0x0202, &mut wsa_data);
-        if result != 0 {
-            return Err(NetworkError::BindFailed("WSAStartup failed".into()).into());
-        }
-    }
-    Ok(())
-}
-
-/// Cleanup Winsock
-pub fn cleanup_winsock() {
-    unsafe {
-        WSACleanup();
-    }
-}
-
-// =============================================================================
-// TUNNEL CONFIG
-// =============================================================================
 
 /// Tunnel configuration
 #[derive(Debug, Clone)]
@@ -69,10 +37,6 @@ impl Default for TunnelConfig {
         }
     }
 }
-
-// =============================================================================
-// PEER STATE
-// =============================================================================
 
 /// Peer connection state
 #[derive(Debug)]
@@ -118,10 +82,6 @@ impl PeerState {
     }
 }
 
-// =============================================================================
-// UDP TUNNEL
-// =============================================================================
-
 /// UDP tunnel for VPN traffic
 pub struct UdpTunnel {
     socket: UdpSocket,
@@ -142,7 +102,6 @@ impl UdpTunnel {
         socket.set_read_timeout(config.read_timeout)?;
         socket.set_write_timeout(config.write_timeout)?;
 
-        // Set socket buffer sizes using Windows setsockopt
         Self::set_socket_buffers(&socket, config.recv_buffer_size, config.send_buffer_size);
 
         let recv_buffer = vec![0u8; MAX_PACKET_SIZE];
@@ -158,36 +117,33 @@ impl UdpTunnel {
     }
 
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
-        use std::os::windows::io::AsRawSocket;
-        use windows::Win32::Networking::WinSock::{
-            setsockopt, SOCKET, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF,
-        };
-
-        let sock = SOCKET(socket.as_raw_socket() as usize);
+        let fd = socket.as_raw_fd();
 
         unsafe {
-            let recv_size = recv_size as i32;
-            let send_size = send_size as i32;
+            let recv_size = recv_size as libc::c_int;
+            let send_size = send_size as libc::c_int;
 
-            setsockopt(
-                sock,
-                SOL_SOCKET as i32,
-                SO_RCVBUF as i32,
-                Some(&recv_size.to_ne_bytes()),
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &recv_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
 
-            setsockopt(
-                sock,
-                SOL_SOCKET as i32,
-                SO_SNDBUF as i32,
-                Some(&send_size.to_ne_bytes()),
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &send_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
         }
     }
 
-    /// Get the raw socket for event waiting
-    pub fn socket(&self) -> &UdpSocket {
-        &self.socket
+    #[inline]
+    pub fn fd(&self) -> RawFd {
+        self.socket.as_raw_fd()
     }
 
     /// Send encrypted packet to peer
@@ -212,7 +168,7 @@ impl UdpTunnel {
         Ok(sent)
     }
 
-    /// Receive packet from any source (for server)
+    /// Receive packet from any source
     pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((len, src)) => {
@@ -260,7 +216,6 @@ impl UdpTunnel {
         Ok(())
     }
 
-    /// Set non-blocking mode
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         self.socket.set_nonblocking(nonblocking)?;
         Ok(())
@@ -275,90 +230,60 @@ impl UdpTunnel {
     }
 }
 
-// =============================================================================
-// EVENT LOOP (Windows version using select/WaitForMultipleObjects)
-// =============================================================================
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENT LOOP
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Event source types for Windows event loop
-pub enum EventSource {
-    Socket(std::os::windows::io::RawSocket),
-    Handle(HANDLE),
-}
-
-/// Simple event loop using Windows select/WaitForMultipleObjects
+/// Simple event loop using poll
 pub struct EventLoop {
-    sockets: Vec<std::os::windows::io::RawSocket>,
-    handles: Vec<HANDLE>,
+    poll_fds: Vec<libc::pollfd>,
 }
 
 impl EventLoop {
     pub fn new() -> Self {
         EventLoop {
-            sockets: Vec::new(),
-            handles: Vec::new(),
+            poll_fds: Vec::new(),
         }
     }
 
-    /// Add a socket for monitoring
-    pub fn add_socket(&mut self, socket: std::os::windows::io::RawSocket) {
-        self.sockets.push(socket);
+    pub fn add_fd(&mut self, fd: RawFd, events: i16) {
+        self.poll_fds.push(libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        });
     }
 
-    /// Add a Windows HANDLE for monitoring (e.g., WinTun read event)
-    pub fn add_handle(&mut self, handle: HANDLE) {
-        self.handles.push(handle);
+    #[allow(dead_code)]
+    pub fn remove_fd(&mut self, fd: RawFd) {
+        self.poll_fds.retain(|pfd| pfd.fd != fd);
     }
 
-    /// Poll for events with timeout
-    pub fn poll(&mut self, timeout_ms: u32) -> Result<EventResult> {
-        use windows::Win32::Foundation::WAIT_TIMEOUT;
-        use windows::Win32::System::Threading::WaitForMultipleObjects;
+    pub fn poll(&mut self, timeout_ms: i32) -> Result<Vec<(RawFd, i16)>> {
+        let result = unsafe {
+            libc::poll(
+                self.poll_fds.as_mut_ptr(),
+                self.poll_fds.len() as libc::nfds_t,
+                timeout_ms,
+            )
+        };
 
-        // If we have handles (like TUN read event), use WaitForMultipleObjects
-        if !self.handles.is_empty() {
-            let result = unsafe { WaitForMultipleObjects(&self.handles, false, timeout_ms) };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
 
-            if result == WAIT_TIMEOUT {
-                return Ok(EventResult::Timeout);
-            }
-
-            let index = result.0 as usize;
-            if index < self.handles.len() {
-                return Ok(EventResult::HandleReady(index));
+        let mut events = Vec::new();
+        for pfd in &self.poll_fds {
+            if pfd.revents != 0 {
+                events.push((pfd.fd, pfd.revents));
             }
         }
 
-        // Use select for sockets
-        if !self.sockets.is_empty() {
-            let mut read_fds: FD_SET = unsafe { std::mem::zeroed() };
-            read_fds.fd_count = self.sockets.len() as u32;
-
-            for (i, &sock) in self.sockets.iter().enumerate() {
-                if i < 64 {
-                    read_fds.fd_array[i] = SOCKET(sock as usize);
-                }
-            }
-
-            let timeout = TIMEVAL {
-                tv_sec: (timeout_ms / 1000) as i32,
-                tv_usec: ((timeout_ms % 1000) * 1000) as i32,
-            };
-
-            let result = unsafe { select(0, Some(&mut read_fds), None, None, Some(&timeout)) };
-
-            if result > 0 {
-                // Find which socket is ready
-                for (i, &sock) in self.sockets.iter().enumerate() {
-                    for j in 0..read_fds.fd_count as usize {
-                        if read_fds.fd_array[j] == SOCKET(sock as usize) {
-                            return Ok(EventResult::SocketReady(i));
-                        }
-                    }
-                }
-            }
+        for pfd in &mut self.poll_fds {
+            pfd.revents = 0;
         }
 
-        Ok(EventResult::Timeout)
+        Ok(events)
     }
 }
 
@@ -368,45 +293,21 @@ impl Default for EventLoop {
     }
 }
 
-/// Result of event loop poll
-pub enum EventResult {
-    Timeout,
-    SocketReady(usize),
-    HandleReady(usize),
-}
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
+// Poll constants
+pub const POLLIN: i16 = libc::POLLIN;
+#[allow(dead_code)]
+pub const POLLOUT: i16 = libc::POLLOUT;
+#[allow(dead_code)]
+pub const POLLERR: i16 = libc::POLLERR;
+#[allow(dead_code)]
+pub const POLLHUP: i16 = libc::POLLHUP;
 
 /// Check if error is "would block"
 #[inline]
-pub fn is_would_block(e: &crate::VpnError) -> bool {
+pub fn is_would_block(e: &crate::core::error::VpnError) -> bool {
     let s = e.to_string();
     s.contains("WouldBlock")
         || s.contains("temporarily unavailable")
+        || s.contains("os error 11")
         || s.contains("Resource temporarily unavailable")
-        || s.contains("10035") // WSAEWOULDBLOCK
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tunnel_config_default() {
-        let config = TunnelConfig::default();
-        assert_eq!(config.keepalive_interval, Duration::from_secs(25));
-        assert_eq!(config.recv_buffer_size, 2 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_peer_state() {
-        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let mut peer = PeerState::new(addr);
-
-        assert_eq!(peer.next_counter(), 1);
-        assert_eq!(peer.next_counter(), 2);
-        assert!(!peer.is_expired(Duration::from_secs(60)));
-    }
 }

@@ -1,110 +1,41 @@
-//! # TUN Device Module
+//! # TUN Device Module (Unix)
 //!
 //! High-performance TUN device with IPv4/IPv6 support.
-//! Compatible with glibc, musl, and multiple architectures (x86, x86_64, ARM, ARM64).
-//!
-//! Note: This module is only available on Unix platforms (Linux, macOS, BSD).
 
-use crate::error::{Result, TunError, VpnError};
+use crate::core::config::prefix_to_netmask_v4;
+use crate::core::error::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::{AsRawFd, RawFd};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PLATFORM DETECTION AND TYPES
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Platform information for debugging
-#[allow(dead_code)]
-pub const PLATFORM_INFO: &str = {
-    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    {
-        "x86_64-linux"
-    }
-    #[cfg(all(target_arch = "x86", target_os = "linux"))]
-    {
-        "x86-linux"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    {
-        "aarch64-linux"
-    }
-    #[cfg(all(target_arch = "arm", target_os = "linux"))]
-    {
-        "arm-linux"
-    }
-    #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
-    {
-        "riscv64-linux"
-    }
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_os = "linux"),
-        all(target_arch = "x86", target_os = "linux"),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "arm", target_os = "linux"),
-        all(target_arch = "riscv64", target_os = "linux"),
-    )))]
-    {
-        "unknown"
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CONSTANTS - Platform-independent
+// CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 
 const IFNAMSIZ: usize = 16;
-
-// TUN flags (from linux/if_tun.h) - same across all Linux architectures
 const IFF_TUN: i16 = 0x0001;
 const IFF_NO_PI: i16 = 0x1000;
 const IFF_MULTI_QUEUE: i16 = 0x0100;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// IOCTL NUMBERS - Architecture-specific
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// ioctl numbers are encoded differently on different architectures:
-// - On x86/x86_64/arm/aarch64: _IOW(type, nr, size) = (dir << 30) | (size << 16) | (type << 8) | nr
-// - TUNSETIFF = _IOW('T', 202, int) = 0x400454ca
-//
-// For socket ioctls (SIOC*), the values are the same across all architectures.
-
 const TUNSETIFF: u32 = 0x400454ca;
-#[allow(dead_code)]
-const TUNSETQUEUE: u32 = 0x400454d9;
-
-// Socket ioctls - same across all Linux architectures
 const SIOCSIFMTU: u32 = 0x8922;
 const SIOCSIFADDR: u32 = 0x8916;
 const SIOCSIFNETMASK: u32 = 0x891c;
 const SIOCGIFFLAGS: u32 = 0x8913;
 const SIOCSIFFLAGS: u32 = 0x8914;
-#[allow(dead_code)]
-const SIOCSIFDSTADDR: u32 = 0x8918;
 const SIOCGIFINDEX: u32 = 0x8933;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// IOCTL WRAPPER - Multiplatform compatible
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// The ioctl() function signature varies across platforms:
-// - glibc x86_64: ioctl(int, unsigned long, ...)
-// - glibc arm32: ioctl(int, unsigned long, ...)
-// - musl: ioctl(int, int, ...)
-//
-// The libc crate abstracts this via the Ioctl type alias.
+const IFF_UP: libc::c_short = 0x1;
+const IFF_RUNNING: libc::c_short = 0x40;
+const AF_INET: libc::sa_family_t = libc::AF_INET as libc::sa_family_t;
 
-/// Helper to call ioctl with correct type for all platforms (glibc, musl, ARM, x86, macOS)
+// ═══════════════════════════════════════════════════════════════════════════
+// IOCTL WRAPPER
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[inline]
 unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> libc::c_int {
-    // The ioctl request type varies by platform:
-    // - Linux glibc x86_64: c_ulong (u64)
-    // - Linux glibc 32-bit: c_ulong (u32)
-    // - Linux musl: c_int
-    // - macOS: c_ulong
-    // - Android: c_int
     #[cfg(target_os = "linux")]
     {
         libc::ioctl(fd, request as libc::Ioctl, arg)
@@ -123,17 +54,8 @@ unsafe fn ioctl_raw(fd: libc::c_int, request: u32, arg: *mut libc::c_void) -> li
     }
 }
 
-// Interface flags
-const IFF_UP: libc::c_short = 0x1;
-const IFF_RUNNING: libc::c_short = 0x40;
-
-// Address families
-const AF_INET: libc::sa_family_t = libc::AF_INET as libc::sa_family_t;
-#[allow(dead_code)]
-const AF_INET6: libc::sa_family_t = libc::AF_INET6 as libc::sa_family_t;
-
 // ═══════════════════════════════════════════════════════════════════════════
-// IOCTL STRUCTURES - musl/glibc compatible
+// IOCTL STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
@@ -180,7 +102,6 @@ impl IfReqMtu {
     }
 }
 
-// IPv4 socket address
 #[repr(C)]
 struct SockAddrIn {
     sin_family: libc::sa_family_t,
@@ -212,17 +133,6 @@ impl IfReqAddr4 {
         ifr.ifr_name[..name.len()].copy_from_slice(name.as_bytes());
         Ok(ifr)
     }
-}
-
-// IPv6 socket address (for future use)
-#[allow(dead_code)]
-#[repr(C)]
-struct SockAddrIn6 {
-    sin6_family: libc::sa_family_t,
-    sin6_port: u16,
-    sin6_flowinfo: u32,
-    sin6_addr: [u8; 16],
-    sin6_scope_id: u32,
 }
 
 #[repr(C)]
@@ -272,7 +182,6 @@ impl TunDevice {
             flags |= IFF_MULTI_QUEUE;
         }
 
-        // Create ifreq structure for TUNSETIFF
         #[repr(C)]
         struct IfReqTun {
             ifr_name: [u8; IFNAMSIZ],
@@ -319,37 +228,31 @@ impl TunDevice {
         })
     }
 
-    /// Get device name
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get file descriptor
     #[inline]
     pub fn fd(&self) -> RawFd {
         self.file.as_raw_fd()
     }
 
-    /// Get configured MTU
     #[inline]
     pub fn mtu(&self) -> u16 {
         self.mtu
     }
 
-    /// Get IPv4 address if set
     #[inline]
     pub fn ipv4_addr(&self) -> Option<Ipv4Addr> {
         self.ipv4_addr
     }
 
-    /// Get IPv6 address if set
     #[inline]
     pub fn ipv6_addr(&self) -> Option<Ipv6Addr> {
         self.ipv6_addr
     }
 
-    /// Set IPv4 address
     pub fn set_ipv4_address(&mut self, addr: Ipv4Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv4 address: {}/{}", addr, prefix);
 
@@ -357,8 +260,7 @@ impl TunDevice {
         let ifr = IfReqAddr4::new(&self.name, addr_bytes)?;
         self.ioctl_with_socket(AF_INET, SIOCSIFADDR, &ifr, "SIOCSIFADDR")?;
 
-        // Set netmask
-        let mask = crate::config::prefix_to_netmask_v4(prefix);
+        let mask = prefix_to_netmask_v4(prefix);
         let ifr_mask = IfReqAddr4::new(&self.name, mask)?;
         self.ioctl_with_socket(AF_INET, SIOCSIFNETMASK, &ifr_mask, "SIOCSIFNETMASK")?;
 
@@ -366,21 +268,17 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Set IPv6 address
     pub fn set_ipv6_address(&mut self, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv6 address: {}/{}", addr, prefix);
 
-        // Get interface index
         let ifindex = self.get_ifindex()?;
 
-        // Use in6_ifreq for IPv6
         let ifr6 = In6IfReq {
             ifr6_addr: addr.octets(),
             ifr6_prefixlen: prefix as u32,
             ifr6_ifindex: ifindex,
         };
 
-        // SIOCSIFADDR for IPv6 is different
         const SIOCSIFADDR_IN6: u32 = 0x8916;
 
         let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
@@ -398,7 +296,6 @@ impl TunDevice {
         unsafe { libc::close(sock) };
 
         if result < 0 {
-            // Fallback: use ip command
             log::debug!("ioctl failed, using ip command");
             let addr_str = format!("{}/{}", addr, prefix);
             let output = std::process::Command::new("ip")
@@ -417,7 +314,6 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Set MTU
     pub fn set_mtu(&mut self, mtu: u16) -> Result<()> {
         log::debug!("Setting MTU: {}", mtu);
         let ifr = IfReqMtu::new(&self.name, mtu as i32)?;
@@ -426,14 +322,12 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Bring up the interface
     pub fn bring_up(&self) -> Result<()> {
         log::info!("Bringing up interface: {}", self.name);
 
         let mut ifr = IfReqFlags::new(&self.name)?;
         let sock = self.create_socket(AF_INET)?;
 
-        // Get current flags
         let result =
             unsafe { ioctl_raw(sock, SIOCGIFFLAGS, &mut ifr as *mut _ as *mut libc::c_void) };
         if result < 0 {
@@ -441,7 +335,6 @@ impl TunDevice {
             return Err(TunError::IoctlFailed("SIOCGIFFLAGS failed".into()).into());
         }
 
-        // Set UP and RUNNING
         ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
 
         let result =
@@ -457,7 +350,6 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Read packet from TUN
     #[inline]
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self.file.read(buf) {
@@ -470,7 +362,6 @@ impl TunDevice {
         }
     }
 
-    /// Write packet to TUN
     #[inline]
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let n = self.file.write(buf)?;
@@ -478,23 +369,6 @@ impl TunDevice {
         Ok(n)
     }
 
-    /// Read multiple packets (batch read for performance)
-    pub fn read_batch(&mut self, buffers: &mut [&mut [u8]]) -> Result<Vec<usize>> {
-        let mut sizes = Vec::with_capacity(buffers.len());
-
-        for buf in buffers {
-            match self.file.read(buf) {
-                Ok(n) if n > 0 => sizes.push(n),
-                Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        Ok(sizes)
-    }
-
-    /// Set non-blocking mode
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         let flags = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
@@ -515,7 +389,6 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Get interface index
     fn get_ifindex(&self) -> Result<libc::c_int> {
         #[repr(C)]
         struct IfReqIndex {
@@ -581,7 +454,6 @@ impl AsRawFd for TunDevice {
 // IP PACKET HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// IP packet version detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpVersion {
     V4,
@@ -590,7 +462,6 @@ pub enum IpVersion {
 }
 
 impl IpVersion {
-    /// Detect IP version from packet
     #[inline]
     pub fn from_packet(data: &[u8]) -> Self {
         if data.is_empty() {
@@ -601,66 +472,5 @@ impl IpVersion {
             6 => IpVersion::V6,
             _ => IpVersion::Unknown,
         }
-    }
-}
-
-/// Extract source IP from packet
-#[allow(dead_code)]
-pub fn get_source_ip(data: &[u8]) -> Option<std::net::IpAddr> {
-    if data.len() < 20 {
-        return None;
-    }
-
-    match IpVersion::from_packet(data) {
-        IpVersion::V4 => {
-            let src = [data[12], data[13], data[14], data[15]];
-            Some(std::net::IpAddr::V4(Ipv4Addr::from(src)))
-        }
-        IpVersion::V6 if data.len() >= 40 => {
-            let mut src = [0u8; 16];
-            src.copy_from_slice(&data[8..24]);
-            Some(std::net::IpAddr::V6(Ipv6Addr::from(src)))
-        }
-        _ => None,
-    }
-}
-
-/// Extract destination IP from packet
-#[allow(dead_code)]
-pub fn get_dest_ip(data: &[u8]) -> Option<std::net::IpAddr> {
-    if data.len() < 20 {
-        return None;
-    }
-
-    match IpVersion::from_packet(data) {
-        IpVersion::V4 => {
-            let dst = [data[16], data[17], data[18], data[19]];
-            Some(std::net::IpAddr::V4(Ipv4Addr::from(dst)))
-        }
-        IpVersion::V6 if data.len() >= 40 => {
-            let mut dst = [0u8; 16];
-            dst.copy_from_slice(&data[24..40]);
-            Some(std::net::IpAddr::V6(Ipv6Addr::from(dst)))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ip_version_detection() {
-        // IPv4 packet (version nibble = 4)
-        let ipv4_packet = [0x45, 0x00, 0x00, 0x3c];
-        assert_eq!(IpVersion::from_packet(&ipv4_packet), IpVersion::V4);
-
-        // IPv6 packet (version nibble = 6)
-        let ipv6_packet = [0x60, 0x00, 0x00, 0x00];
-        assert_eq!(IpVersion::from_packet(&ipv6_packet), IpVersion::V6);
-
-        // Empty packet
-        assert_eq!(IpVersion::from_packet(&[]), IpVersion::Unknown);
     }
 }

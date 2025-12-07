@@ -1,6 +1,6 @@
 [package]
 name = "twocha"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "2cha - High-performance VPN utility with IPv4/IPv6 support"
 license = "MIT"
@@ -13,6 +13,10 @@ repository = "https://github.com/keepinfov/2cha"
 name = "2cha"
 path = "src/main.rs"
 
+[lib]
+name = "twocha"
+path = "src/lib.rs"
+
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
@@ -21,6 +25,7 @@ toml = "0.9.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+daemonize = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -35,6 +40,7 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
 ] }
 wintun = "0.5"
+ctrlc = "3.4"
 
 [profile.release]
 opt-level = 3
