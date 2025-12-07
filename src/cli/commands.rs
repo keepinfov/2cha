@@ -2,6 +2,8 @@
 //!
 //! Command implementations for the VPN CLI.
 
+#[cfg(unix)]
+use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
     daemonize, format_bytes, generate_key, is_running, setup_logging, ParsedArgs,
     DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG, PID_FILE,
@@ -48,6 +50,7 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         if !parsed.quiet {
             println!(" (background)");
             println!("  Use '2cha status' to check connection");
+            println!("  Logs: {}", LOG_FILE);
         }
         daemonize()?;
     } else if !parsed.quiet {
@@ -58,16 +61,24 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
             .init();
-    } else if !parsed.quiet {
+    } else if !parsed.quiet && !parsed.daemon {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
             .format_target(false)
             .format_timestamp(None)
             .init();
     }
 
-    std::fs::write(PID_FILE, std::process::id().to_string()).ok();
+    // PID file is managed by daemonize crate in daemon mode
+    if !parsed.daemon {
+        std::fs::write(PID_FILE, std::process::id().to_string()).ok();
+    }
+
     let result = client::run(&config_path, parsed.quiet || parsed.daemon);
-    std::fs::remove_file(PID_FILE).ok();
+
+    // Clean up PID file on exit (only in non-daemon mode, daemon crate handles it)
+    if !parsed.daemon {
+        std::fs::remove_file(PID_FILE).ok();
+    }
 
     result
 }

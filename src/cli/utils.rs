@@ -163,27 +163,41 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
         .init();
 }
 
+/// Log file path for daemon mode
+#[cfg(unix)]
+pub const LOG_FILE: &str = "/tmp/2cha.log";
+
 /// Daemonize the process (Unix)
-/// Uses the `fork` crate for safe, tested daemonization
+/// Uses the `daemonize` crate for robust daemon creation
 #[cfg(unix)]
 pub fn daemonize() -> Result<()> {
-    use fork::{daemon, Fork};
+    use daemonize::Daemonize;
+    use std::fs::OpenOptions;
 
-    // daemon(nochdir, noclose):
-    // - nochdir=false: change working directory to "/"
-    // - noclose=false: redirect stdin/stdout/stderr to /dev/null
-    match daemon(false, false) {
-        Ok(Fork::Child) => {
-            // We are the daemon child process, continue execution
-            Ok(())
-        }
-        Ok(Fork::Parent(_child_pid)) => {
-            // Parent process should exit - this is handled by the fork crate
-            // but we explicitly exit here to be safe
-            std::process::exit(0);
-        }
-        Err(e) => Err(VpnError::Config(format!("Failed to daemonize: {:?}", e))),
-    }
+    // Create/open log file for daemon output (append mode)
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
+
+    let log_file_err = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
+
+    let daemonize = Daemonize::new()
+        .pid_file(PID_FILE)
+        .chown_pid_file(true)
+        .working_directory("/")
+        .umask(0o022)
+        .stdout(log_file)
+        .stderr(log_file_err);
+
+    daemonize
+        .start()
+        .map_err(|e| VpnError::Config(format!("Failed to daemonize: {}", e)))
 }
 
 /// Daemonize the process (Windows)
