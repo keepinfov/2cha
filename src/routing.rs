@@ -7,8 +7,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::io::{self, Write};
-use std::process::Command;
 use std::net::IpAddr;
+use std::process::Command;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // IP FORWARDING
@@ -17,12 +17,12 @@ use std::net::IpAddr;
 /// Enable IPv4 forwarding
 pub fn enable_ipv4_forward() -> io::Result<()> {
     log::info!("Enabling IPv4 forwarding...");
-    
+
     // Try sysctl first
     let output = Command::new("sysctl")
         .args(["-w", "net.ipv4.ip_forward=1"])
         .output();
-    
+
     match output {
         Ok(o) if o.status.success() => {
             log::info!("✓ IPv4 forwarding enabled via sysctl");
@@ -30,7 +30,7 @@ pub fn enable_ipv4_forward() -> io::Result<()> {
         }
         _ => {}
     }
-    
+
     // Fallback to direct write
     std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")?;
     log::info!("✓ IPv4 forwarding enabled");
@@ -40,11 +40,11 @@ pub fn enable_ipv4_forward() -> io::Result<()> {
 /// Enable IPv6 forwarding
 pub fn enable_ipv6_forward() -> io::Result<()> {
     log::info!("Enabling IPv6 forwarding...");
-    
+
     let output = Command::new("sysctl")
         .args(["-w", "net.ipv6.conf.all.forwarding=1"])
         .output();
-    
+
     match output {
         Ok(o) if o.status.success() => {
             log::info!("✓ IPv6 forwarding enabled via sysctl");
@@ -52,7 +52,7 @@ pub fn enable_ipv6_forward() -> io::Result<()> {
         }
         _ => {}
     }
-    
+
     // Fallback
     std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1")?;
     log::info!("✓ IPv6 forwarding enabled");
@@ -99,90 +99,142 @@ pub fn is_ipv6_forward_enabled() -> bool {
 
 /// Setup IPv4 NAT/masquerading
 pub fn setup_masquerade_v4(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
-    log::info!("Setting up IPv4 NAT on {} for {}", external_iface, vpn_subnet);
-    
+    log::info!(
+        "Setting up IPv4 NAT on {} for {}",
+        external_iface,
+        vpn_subnet
+    );
+
     // Try nftables first (modern)
     if setup_nat_nftables_v4(external_iface, vpn_subnet).is_ok() {
         log::info!("✓ IPv4 NAT configured via nftables");
         return Ok(());
     }
-    
+
     // Fallback to iptables
     let output = Command::new("iptables")
         .args([
-            "-t", "nat",
-            "-A", "POSTROUTING",
-            "-s", vpn_subnet,
-            "-o", external_iface,
-            "-j", "MASQUERADE"
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            external_iface,
+            "-j",
+            "MASQUERADE",
         ])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         log::error!("iptables error: {}", err);
         return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
     }
-    
+
     // Forward rules
     let _ = Command::new("iptables")
-        .args(["-A", "FORWARD", "-i", "tun0", "-o", external_iface, "-j", "ACCEPT"])
-        .output();
-    
-    let _ = Command::new("iptables")
         .args([
-            "-A", "FORWARD",
-            "-i", external_iface, "-o", "tun0",
-            "-m", "state", "--state", "RELATED,ESTABLISHED",
-            "-j", "ACCEPT"
+            "-A",
+            "FORWARD",
+            "-i",
+            "tun0",
+            "-o",
+            external_iface,
+            "-j",
+            "ACCEPT",
         ])
         .output();
-    
+
+    let _ = Command::new("iptables")
+        .args([
+            "-A",
+            "FORWARD",
+            "-i",
+            external_iface,
+            "-o",
+            "tun0",
+            "-m",
+            "state",
+            "--state",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "ACCEPT",
+        ])
+        .output();
+
     log::info!("✓ IPv4 NAT configured via iptables");
     Ok(())
 }
 
 /// Setup IPv6 NAT/masquerading
 pub fn setup_masquerade_v6(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
-    log::info!("Setting up IPv6 NAT on {} for {}", external_iface, vpn_subnet);
-    
+    log::info!(
+        "Setting up IPv6 NAT on {} for {}",
+        external_iface,
+        vpn_subnet
+    );
+
     // Try nftables first
     if setup_nat_nftables_v6(external_iface, vpn_subnet).is_ok() {
         log::info!("✓ IPv6 NAT configured via nftables");
         return Ok(());
     }
-    
+
     // Fallback to ip6tables
     let output = Command::new("ip6tables")
         .args([
-            "-t", "nat",
-            "-A", "POSTROUTING",
-            "-s", vpn_subnet,
-            "-o", external_iface,
-            "-j", "MASQUERADE"
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            external_iface,
+            "-j",
+            "MASQUERADE",
         ])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         log::error!("ip6tables error: {}", err);
         return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
     }
-    
+
     // Forward rules
     let _ = Command::new("ip6tables")
-        .args(["-A", "FORWARD", "-i", "tun0", "-o", external_iface, "-j", "ACCEPT"])
-        .output();
-    
-    let _ = Command::new("ip6tables")
         .args([
-            "-A", "FORWARD",
-            "-i", external_iface, "-o", "tun0",
-            "-m", "state", "--state", "RELATED,ESTABLISHED",
-            "-j", "ACCEPT"
+            "-A",
+            "FORWARD",
+            "-i",
+            "tun0",
+            "-o",
+            external_iface,
+            "-j",
+            "ACCEPT",
         ])
         .output();
-    
+
+    let _ = Command::new("ip6tables")
+        .args([
+            "-A",
+            "FORWARD",
+            "-i",
+            external_iface,
+            "-o",
+            "tun0",
+            "-m",
+            "state",
+            "--state",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "ACCEPT",
+        ])
+        .output();
+
     log::info!("✓ IPv6 NAT configured via ip6tables");
     Ok(())
 }
@@ -204,17 +256,17 @@ table ip 2cha_filter {{
 }}"#,
         vpn_subnet, external_iface, external_iface, external_iface
     );
-    
+
     let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
         .stdin(std::process::Stdio::piped())
         .spawn()?;
-    
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(rules.as_bytes())?;
     }
-    
+
     child.wait()?;
     Ok(())
 }
@@ -236,18 +288,18 @@ table ip6 2cha_filter6 {{
 }}"#,
         vpn_subnet, external_iface, external_iface, external_iface
     );
-    
+
     let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
         .stdin(std::process::Stdio::piped())
         .spawn()?;
-    
+
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin.write_all(rules.as_bytes())?;
     }
-    
+
     child.wait()?;
     Ok(())
 }
@@ -256,27 +308,57 @@ table ip6 2cha_filter6 {{
 #[allow(dead_code)]
 pub fn remove_masquerade_v4(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
     // Try nftables first
-    let _ = Command::new("nft").args(["delete", "table", "ip", "2cha_nat"]).output();
-    let _ = Command::new("nft").args(["delete", "table", "ip", "2cha_filter"]).output();
-    
+    let _ = Command::new("nft")
+        .args(["delete", "table", "ip", "2cha_nat"])
+        .output();
+    let _ = Command::new("nft")
+        .args(["delete", "table", "ip", "2cha_filter"])
+        .output();
+
     // iptables cleanup
     let _ = Command::new("iptables")
-        .args(["-t", "nat", "-D", "POSTROUTING", "-s", vpn_subnet, "-o", external_iface, "-j", "MASQUERADE"])
+        .args([
+            "-t",
+            "nat",
+            "-D",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            external_iface,
+            "-j",
+            "MASQUERADE",
+        ])
         .output();
-    
+
     Ok(())
 }
 
 /// Remove IPv6 NAT rules
 #[allow(dead_code)]
 pub fn remove_masquerade_v6(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
-    let _ = Command::new("nft").args(["delete", "table", "ip6", "2cha_nat6"]).output();
-    let _ = Command::new("nft").args(["delete", "table", "ip6", "2cha_filter6"]).output();
-    
-    let _ = Command::new("ip6tables")
-        .args(["-t", "nat", "-D", "POSTROUTING", "-s", vpn_subnet, "-o", external_iface, "-j", "MASQUERADE"])
+    let _ = Command::new("nft")
+        .args(["delete", "table", "ip6", "2cha_nat6"])
         .output();
-    
+    let _ = Command::new("nft")
+        .args(["delete", "table", "ip6", "2cha_filter6"])
+        .output();
+
+    let _ = Command::new("ip6tables")
+        .args([
+            "-t",
+            "nat",
+            "-D",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            external_iface,
+            "-j",
+            "MASQUERADE",
+        ])
+        .output();
+
     Ok(())
 }
 
@@ -287,36 +369,36 @@ pub fn remove_masquerade_v6(external_iface: &str, vpn_subnet: &str) -> io::Resul
 /// Add IPv4 route
 pub fn add_route_v4(destination: &str, gateway: &str) -> io::Result<()> {
     log::info!("Adding IPv4 route: {} via {}", destination, gateway);
-    
+
     let output = Command::new("ip")
         .args(["-4", "route", "add", destination, "via", gateway])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         if !err.contains("File exists") {
             log::warn!("Route add warning: {}", err);
         }
     }
-    
+
     Ok(())
 }
 
 /// Add IPv6 route
 pub fn add_route_v6(destination: &str, gateway: &str) -> io::Result<()> {
     log::info!("Adding IPv6 route: {} via {}", destination, gateway);
-    
+
     let output = Command::new("ip")
         .args(["-6", "route", "add", destination, "via", gateway])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         if !err.contains("File exists") {
             log::warn!("Route add warning: {}", err);
         }
     }
-    
+
     Ok(())
 }
 
@@ -337,51 +419,66 @@ pub fn del_route_v6(destination: &str) -> io::Result<()> {
 }
 
 /// Set default IPv4 gateway through VPN
-pub fn set_default_gateway_v4(vpn_gateway: &str, original_gateway: &str, server_ip: &str) -> io::Result<()> {
+pub fn set_default_gateway_v4(
+    vpn_gateway: &str,
+    original_gateway: &str,
+    server_ip: &str,
+) -> io::Result<()> {
     log::info!("Setting IPv4 default gateway to {}...", vpn_gateway);
-    
+
     // Add route to VPN server via original gateway
     let _ = Command::new("ip")
-        .args(["-4", "route", "add", &format!("{}/32", server_ip), "via", original_gateway])
+        .args([
+            "-4",
+            "route",
+            "add",
+            &format!("{}/32", server_ip),
+            "via",
+            original_gateway,
+        ])
         .output();
-    
+
     // Replace default route
     let output = Command::new("ip")
         .args(["-4", "route", "replace", "default", "via", vpn_gateway])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         log::error!("Failed to set default gateway: {}", err);
         return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
     }
-    
+
     log::info!("✓ IPv4 default gateway set to {}", vpn_gateway);
     Ok(())
 }
 
 /// Set default IPv6 gateway through VPN
-pub fn set_default_gateway_v6(vpn_gateway: &str, original_gateway: Option<&str>, server_ip: Option<&str>) -> io::Result<()> {
+pub fn set_default_gateway_v6(
+    vpn_gateway: &str,
+    original_gateway: Option<&str>,
+    server_ip: Option<&str>,
+) -> io::Result<()> {
     log::info!("Setting IPv6 default gateway to {}...", vpn_gateway);
-    
+
     // Add route to VPN server via original gateway (if IPv6 server)
     if let (Some(orig), Some(srv)) = (original_gateway, server_ip) {
         let _ = Command::new("ip")
             .args(["-6", "route", "add", &format!("{}/128", srv), "via", orig])
             .output();
     }
-    
+
     // Replace default route
     let output = Command::new("ip")
         .args(["-6", "route", "replace", "default", "via", vpn_gateway])
         .output()?;
-    
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         log::error!("Failed to set IPv6 default gateway: {}", err);
         return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
     }
-    
+
     log::info!("✓ IPv6 default gateway set to {}", vpn_gateway);
     Ok(())
 }
@@ -389,34 +486,37 @@ pub fn set_default_gateway_v6(vpn_gateway: &str, original_gateway: Option<&str>,
 /// Restore original default IPv4 gateway
 pub fn restore_default_gateway_v4(original_gateway: &str, server_ip: &str) -> io::Result<()> {
     log::info!("Restoring IPv4 gateway to {}...", original_gateway);
-    
+
     let _ = Command::new("ip")
         .args(["-4", "route", "replace", "default", "via", original_gateway])
         .output();
-    
+
     let _ = Command::new("ip")
         .args(["-4", "route", "del", &format!("{}/32", server_ip)])
         .output();
-    
+
     Ok(())
 }
 
 /// Restore original default IPv6 gateway
-pub fn restore_default_gateway_v6(original_gateway: Option<&str>, server_ip: Option<&str>) -> io::Result<()> {
+pub fn restore_default_gateway_v6(
+    original_gateway: Option<&str>,
+    server_ip: Option<&str>,
+) -> io::Result<()> {
     if let Some(gw) = original_gateway {
         log::info!("Restoring IPv6 gateway to {}...", gw);
-        
+
         let _ = Command::new("ip")
             .args(["-6", "route", "replace", "default", "via", gw])
             .output();
     }
-    
+
     if let Some(srv) = server_ip {
         let _ = Command::new("ip")
             .args(["-6", "route", "del", &format!("{}/128", srv)])
             .output();
     }
-    
+
     Ok(())
 }
 
@@ -425,7 +525,7 @@ pub fn get_default_gateway_v4() -> io::Result<String> {
     let output = Command::new("ip")
         .args(["-4", "route", "show", "default"])
         .output()?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_gateway(&stdout)
 }
@@ -435,7 +535,7 @@ pub fn get_default_gateway_v6() -> io::Result<String> {
     let output = Command::new("ip")
         .args(["-6", "route", "show", "default"])
         .output()?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_gateway(&stdout)
 }
@@ -451,8 +551,11 @@ fn parse_gateway(route_output: &str) -> io::Result<String> {
             return Ok(rest[..newline_idx].trim().to_string());
         }
     }
-    
-    Err(io::Error::new(io::ErrorKind::NotFound, "No default gateway found"))
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No default gateway found",
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -464,29 +567,33 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], search: &[String]) 
     if servers_v4.is_empty() && servers_v6.is_empty() {
         return Ok(());
     }
-    
-    log::info!("Setting DNS servers: v4={:?}, v6={:?}", servers_v4, servers_v6);
-    
+
+    log::info!(
+        "Setting DNS servers: v4={:?}, v6={:?}",
+        servers_v4,
+        servers_v6
+    );
+
     // Backup original resolv.conf
     let _ = std::fs::copy("/etc/resolv.conf", "/etc/resolv.conf.2cha-backup");
-    
+
     let mut content = String::new();
-    
+
     // Search domains
     if !search.is_empty() {
         content.push_str(&format!("search {}\n", search.join(" ")));
     }
-    
+
     // IPv4 servers
     for server in servers_v4 {
         content.push_str(&format!("nameserver {}\n", server));
     }
-    
+
     // IPv6 servers
     for server in servers_v6 {
         content.push_str(&format!("nameserver {}\n", server));
     }
-    
+
     std::fs::write("/etc/resolv.conf", content)?;
     log::info!("✓ DNS configured");
     Ok(())
@@ -583,7 +690,11 @@ impl ClientRoutingContext {
         if let Some(gw) = ipv6_gateway {
             if route_all_v6 {
                 self.original_gateway_v6 = get_default_gateway_v6().ok();
-                set_default_gateway_v6(gw, self.original_gateway_v6.as_deref(), self.server_ip_v6.as_deref())?;
+                set_default_gateway_v6(
+                    gw,
+                    self.original_gateway_v6.as_deref(),
+                    self.server_ip_v6.as_deref(),
+                )?;
             } else {
                 for route in routes_v6 {
                     add_route_v6(route, gw)?;
@@ -604,7 +715,8 @@ impl ClientRoutingContext {
     /// Cleanup routing
     pub fn cleanup(&self) -> io::Result<()> {
         // Restore IPv4 gateway
-        if let (Some(ref orig_gw), Some(ref srv)) = (&self.original_gateway_v4, &self.server_ip_v4) {
+        if let (Some(ref orig_gw), Some(ref srv)) = (&self.original_gateway_v4, &self.server_ip_v4)
+        {
             let _ = restore_default_gateway_v4(orig_gw, srv);
         }
 
@@ -612,7 +724,7 @@ impl ClientRoutingContext {
         if self.original_gateway_v6.is_some() || self.server_ip_v6.is_some() {
             let _ = restore_default_gateway_v6(
                 self.original_gateway_v6.as_deref(),
-                self.server_ip_v6.as_deref()
+                self.server_ip_v6.as_deref(),
             );
         }
 
@@ -640,47 +752,55 @@ impl ClientRoutingContext {
 /// Get current routing status
 pub fn get_routing_status(tun_name: &str) -> RoutingStatus {
     let mut status = RoutingStatus::default();
-    
+
     // Check if interface exists
     if let Ok(output) = Command::new("ip").args(["link", "show", tun_name]).output() {
         status.interface_exists = output.status.success();
     }
-    
+
     // Check IPv4 address
-    if let Ok(output) = Command::new("ip").args(["-4", "addr", "show", tun_name]).output() {
+    if let Ok(output) = Command::new("ip")
+        .args(["-4", "addr", "show", tun_name])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(line) = stdout.lines().find(|l| l.contains("inet ")) {
-            status.ipv4_address = line.split_whitespace()
-                .nth(1)
-                .map(|s| s.to_string());
+            status.ipv4_address = line.split_whitespace().nth(1).map(|s| s.to_string());
         }
     }
-    
+
     // Check IPv6 address
-    if let Ok(output) = Command::new("ip").args(["-6", "addr", "show", tun_name, "scope", "global"]).output() {
+    if let Ok(output) = Command::new("ip")
+        .args(["-6", "addr", "show", tun_name, "scope", "global"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(line) = stdout.lines().find(|l| l.contains("inet6 ")) {
-            status.ipv6_address = line.split_whitespace()
-                .nth(1)
-                .map(|s| s.to_string());
+            status.ipv6_address = line.split_whitespace().nth(1).map(|s| s.to_string());
         }
     }
-    
+
     // Check if default route goes through TUN
-    if let Ok(output) = Command::new("ip").args(["-4", "route", "show", "default"]).output() {
+    if let Ok(output) = Command::new("ip")
+        .args(["-4", "route", "show", "default"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         status.default_route_v4_via_tun = stdout.contains(tun_name);
     }
-    
-    if let Ok(output) = Command::new("ip").args(["-6", "route", "show", "default"]).output() {
+
+    if let Ok(output) = Command::new("ip")
+        .args(["-6", "route", "show", "default"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         status.default_route_v6_via_tun = stdout.contains(tun_name);
     }
-    
+
     // Check forwarding status
     status.ipv4_forwarding = is_ipv4_forward_enabled();
     status.ipv6_forwarding = is_ipv6_forward_enabled();
-    
+
     status
 }
 
