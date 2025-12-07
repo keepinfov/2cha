@@ -114,10 +114,65 @@ impl ClientConfig {
     }
 
     pub fn server_addr(&self) -> Result<SocketAddr, ConfigError> {
-        self.client
-            .server
-            .parse()
-            .map_err(|_| ConfigError::InvalidAddress(self.client.server.clone()))
+        // Try to parse as SocketAddr directly first
+        if let Ok(addr) = self.client.server.parse::<SocketAddr>() {
+            return Ok(addr);
+        }
+
+        // If dns_lookup is enabled, try to resolve domain name
+        if self.client.dns_lookup {
+            // Split host:port
+            let parts: Vec<&str> = self.client.server.rsplitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(ConfigError::InvalidAddress(
+                    format!("Invalid server format '{}', expected 'host:port'", self.client.server)
+                ));
+            }
+
+            let port_str = parts[0];
+            let host = parts[1];
+
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| ConfigError::InvalidAddress(
+                    format!("Invalid port '{}' in server address", port_str)
+                ))?;
+
+            // Perform DNS lookup
+            use std::net::ToSocketAddrs;
+            let server_with_port = format!("{}:{}", host, port);
+
+            let addrs = server_with_port
+                .to_socket_addrs()
+                .map_err(|e| ConfigError::InvalidAddress(
+                    format!("Failed to resolve '{}': {}", host, e)
+                ))?;
+
+            // Prefer IPv4 unless prefer_ipv6 is set
+            let mut ipv4_addr = None;
+            let mut ipv6_addr = None;
+
+            for addr in addrs {
+                if addr.is_ipv4() && ipv4_addr.is_none() {
+                    ipv4_addr = Some(addr);
+                } else if addr.is_ipv6() && ipv6_addr.is_none() {
+                    ipv6_addr = Some(addr);
+                }
+            }
+
+            if self.client.prefer_ipv6 {
+                ipv6_addr.or(ipv4_addr)
+            } else {
+                ipv4_addr.or(ipv6_addr)
+            }
+            .ok_or_else(|| ConfigError::InvalidAddress(
+                format!("No addresses resolved for '{}'", host)
+            ))
+        } else {
+            Err(ConfigError::InvalidAddress(
+                format!("Invalid socket address '{}' and DNS lookup is disabled", self.client.server)
+            ))
+        }
     }
 
     pub fn tun_ipv4(&self) -> Result<Option<Ipv4Addr>, ConfigError> {
@@ -157,8 +212,11 @@ pub fn example_client_config() -> &'static str {
 # Usage: sudo 2cha up -c client.toml
 
 [client]
+# Server address - can be IP:port (e.g., "1.2.3.4:51820") or domain:port (e.g., "vpn.example.com:51820")
 server = "vpn.example.com:51820"
+# Prefer IPv6 addresses when multiple IPs are resolved
 prefer_ipv6 = false
+# Enable DNS lookup for domain names (required if server is a domain, not an IP)
 dns_lookup = true
 
 [tun]
