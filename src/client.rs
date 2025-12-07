@@ -4,8 +4,6 @@
 //!
 //! Note: This module is only available on Unix platforms.
 
-#![cfg(unix)]
-
 use crate::{
     network::{is_would_block, EventLoop, PeerState, TunnelConfig, UdpTunnel, POLLIN},
     protocol::{PacketHeader, PacketType},

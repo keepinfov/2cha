@@ -4,16 +4,15 @@
 
 #![cfg(windows)]
 
-use crate::error::{NetworkError, Result};
 use crate::crypto::ChaCha20Poly1305;
+use crate::error::{NetworkError, Result};
 use crate::protocol::{PacketHeader, PacketType, ReplayWindow};
-use crate::{PROTOCOL_HEADER_SIZE, MAX_PACKET_SIZE};
+use crate::{MAX_PACKET_SIZE, PROTOCOL_HEADER_SIZE};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Networking::WinSock::{
-    SOCKET, FD_SET, TIMEVAL, WSADATA,
-    WSAStartup, WSACleanup, select,
+    select, WSACleanup, WSAStartup, FD_SET, SOCKET, TIMEVAL, WSADATA,
 };
 
 // =============================================================================
@@ -161,7 +160,7 @@ impl UdpTunnel {
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
         use std::os::windows::io::AsRawSocket;
         use windows::Win32::Networking::WinSock::{
-            setsockopt, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF, SOCKET,
+            setsockopt, SOCKET, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF,
         };
 
         let sock = SOCKET(socket.as_raw_socket() as usize);
@@ -203,7 +202,9 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        let sent = self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        let sent = self
+            .socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         peer.bytes_tx += sent as u64;
         peer.packets_tx += 1;
 
@@ -236,7 +237,8 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         log::trace!("Sent keepalive to {}", peer.addr);
         Ok(())
     }
@@ -253,7 +255,8 @@ impl UdpTunnel {
         self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
         self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
 
-        self.socket.send_to(&self.send_buffer[..total_len], peer.addr)?;
+        self.socket
+            .send_to(&self.send_buffer[..total_len], peer.addr)?;
         Ok(())
     }
 
@@ -308,14 +311,12 @@ impl EventLoop {
 
     /// Poll for events with timeout
     pub fn poll(&mut self, timeout_ms: u32) -> Result<EventResult> {
-        use windows::Win32::System::Threading::WaitForMultipleObjects;
         use windows::Win32::Foundation::WAIT_TIMEOUT;
+        use windows::Win32::System::Threading::WaitForMultipleObjects;
 
         // If we have handles (like TUN read event), use WaitForMultipleObjects
         if !self.handles.is_empty() {
-            let result = unsafe {
-                WaitForMultipleObjects(&self.handles, false, timeout_ms)
-            };
+            let result = unsafe { WaitForMultipleObjects(&self.handles, false, timeout_ms) };
 
             if result == WAIT_TIMEOUT {
                 return Ok(EventResult::Timeout);
@@ -343,9 +344,7 @@ impl EventLoop {
                 tv_usec: ((timeout_ms % 1000) * 1000) as i32,
             };
 
-            let result = unsafe {
-                select(0, Some(&mut read_fds), None, None, Some(&timeout))
-            };
+            let result = unsafe { select(0, Some(&mut read_fds), None, None, Some(&timeout)) };
 
             if result > 0 {
                 // Find which socket is ready
@@ -384,10 +383,10 @@ pub enum EventResult {
 #[inline]
 pub fn is_would_block(e: &crate::VpnError) -> bool {
     let s = e.to_string();
-    s.contains("WouldBlock") ||
-    s.contains("temporarily unavailable") ||
-    s.contains("Resource temporarily unavailable") ||
-    s.contains("10035") // WSAEWOULDBLOCK
+    s.contains("WouldBlock")
+        || s.contains("temporarily unavailable")
+        || s.contains("Resource temporarily unavailable")
+        || s.contains("10035") // WSAEWOULDBLOCK
 }
 
 #[cfg(test)]

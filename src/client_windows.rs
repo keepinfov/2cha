@@ -5,18 +5,21 @@
 #![cfg(windows)]
 
 use crate::{
-    tun_windows::TunDevice,
-    Result, ChaCha20Poly1305, ClientConfig, VpnError,
-    network_windows::{UdpTunnel, TunnelConfig, PeerState, EventLoop, EventResult, is_would_block, init_winsock},
-    protocol::{PacketType, PacketHeader},
+    network_windows::{
+        init_winsock, is_would_block, EventLoop, EventResult, PeerState, TunnelConfig, UdpTunnel,
+    },
+    protocol::{PacketHeader, PacketType},
     routing_windows::ClientRoutingContext,
-    PROTOCOL_HEADER_SIZE,
+    tun_windows::TunDevice,
+    ChaCha20Poly1305, ClientConfig, Result, VpnError, PROTOCOL_HEADER_SIZE,
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT};
 use windows::Win32::Foundation::BOOL;
+use windows::Win32::System::Console::{
+    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -24,20 +27,23 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     // Initialize Winsock
     init_winsock()?;
 
-    let cfg = ClientConfig::from_file(config_path)
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let cfg =
+        ClientConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    let server_addr = cfg.server_addr()
+    let server_addr = cfg
+        .server_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
 
     // Create TUN device
     let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
 
     // Configure IPv4
     let ipv4_gateway = if cfg.ipv4.enable {
-        if let Some(addr) = cfg.tun_ipv4().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv4()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
             let octets = addr.octets();
             Some(format!("{}.{}.{}.1", octets[0], octets[1], octets[2]))
@@ -50,11 +56,16 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     // Configure IPv6
     let ipv6_gateway = if cfg.ipv6.enable {
-        if let Some(addr) = cfg.tun_ipv6().map_err(|e| VpnError::Config(format!("{}", e)))? {
+        if let Some(addr) = cfg
+            .tun_ipv6()
+            .map_err(|e| VpnError::Config(format!("{}", e)))?
+        {
             tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
             let segments = addr.segments();
-            Some(format!("{:x}:{:x}:{:x}:{:x}::1",
-                segments[0], segments[1], segments[2], segments[3]))
+            Some(format!(
+                "{:x}:{:x}:{:x}:{:x}::1",
+                segments[0], segments[1], segments[2], segments[3]
+            ))
         } else {
             None
         }
@@ -112,21 +123,32 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     // Setup event loop with TUN read event and socket
     let mut event_loop = EventLoop::new();
     event_loop.add_handle(tun.get_read_wait_event());
-    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(tunnel.socket()));
+    event_loop.add_socket(std::os::windows::io::AsRawSocket::as_raw_socket(
+        tunnel.socket(),
+    ));
 
     // Initial keepalive
     tunnel.send_keepalive(&mut server_peer)?;
 
     if !quiet {
         println!();
-        println!("  \x1b[32m*\x1b[0m Connected to \x1b[36m{}\x1b[0m", server_addr);
+        println!(
+            "  \x1b[32m*\x1b[0m Connected to \x1b[36m{}\x1b[0m",
+            server_addr
+        );
         if let Some(ref gw) = ipv4_gateway {
-            println!("  IPv4: {} (gateway: {})",
-                tun.ipv4_addr().map(|a| a.to_string()).unwrap_or_default(), gw);
+            println!(
+                "  IPv4: {} (gateway: {})",
+                tun.ipv4_addr().map(|a| a.to_string()).unwrap_or_default(),
+                gw
+            );
         }
         if let Some(ref gw) = ipv6_gateway {
-            println!("  IPv6: {} (gateway: {})",
-                tun.ipv6_addr().map(|a| a.to_string()).unwrap_or_default(), gw);
+            println!(
+                "  IPv6: {} (gateway: {})",
+                tun.ipv6_addr().map(|a| a.to_string()).unwrap_or_default(),
+                gw
+            );
         }
         if cfg.ipv4.route_all || cfg.ipv6.route_all {
             println!("  Mode: \x1b[33mFull tunnel\x1b[0m");
@@ -230,7 +252,9 @@ fn handle_udp_read(
 
                     match header.packet_type {
                         PacketType::Data => {
-                            if let Ok(decrypted) = cipher.decrypt(&header.nonce, encrypted, &header_bytes) {
+                            if let Ok(decrypted) =
+                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
+                            {
                                 let _ = tun.write(&decrypted);
                             }
                         }

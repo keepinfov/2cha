@@ -5,8 +5,6 @@
 //!
 //! Note: This module is only available on Unix platforms (Linux, macOS, BSD).
 
-#![cfg(unix)]
-
 use crate::error::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

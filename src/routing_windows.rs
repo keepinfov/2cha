@@ -6,8 +6,8 @@
 #![cfg(windows)]
 
 use std::io::{self};
-use std::process::Command;
 use std::net::IpAddr;
+use std::process::Command;
 
 // =============================================================================
 // IP FORWARDING
@@ -28,8 +28,15 @@ pub fn enable_ipv4_forward() -> io::Result<()> {
         // Try registry method as fallback
         let _ = Command::new("reg")
             .args([
-                "add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f"
+                "add",
+                "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                "/v",
+                "IPEnableRouter",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "1",
+                "/f",
             ])
             .output();
     }
@@ -114,8 +121,13 @@ pub fn setup_masquerade_v4(external_iface: &str, _vpn_subnet: &str) -> io::Resul
     // Try to enable routing on the interface
     let output = Command::new("netsh")
         .args([
-            "routing", "ip", "nat", "add", "interface",
-            external_iface, "mode=full"
+            "routing",
+            "ip",
+            "nat",
+            "add",
+            "interface",
+            external_iface,
+            "mode=full",
         ])
         .output();
 
@@ -144,7 +156,14 @@ pub fn setup_masquerade_v6(external_iface: &str, _vpn_subnet: &str) -> io::Resul
 #[allow(dead_code)]
 pub fn remove_masquerade_v4(external_iface: &str, _vpn_subnet: &str) -> io::Result<()> {
     let _ = Command::new("netsh")
-        .args(["routing", "ip", "nat", "delete", "interface", external_iface])
+        .args([
+            "routing",
+            "ip",
+            "nat",
+            "delete",
+            "interface",
+            external_iface,
+        ])
         .output();
     Ok(())
 }
@@ -171,8 +190,13 @@ pub fn add_route_v4(destination: &str, gateway: &str) -> io::Result<()> {
         // Try netsh as fallback
         let output2 = Command::new("netsh")
             .args([
-                "interface", "ipv4", "add", "route",
-                destination, "nexthop=", gateway
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                destination,
+                "nexthop=",
+                gateway,
             ])
             .output()?;
 
@@ -190,8 +214,12 @@ pub fn add_route_v6(destination: &str, gateway: &str) -> io::Result<()> {
 
     let output = Command::new("netsh")
         .args([
-            "interface", "ipv6", "add", "route",
-            destination, &format!("nexthop={}", gateway)
+            "interface",
+            "ipv6",
+            "add",
+            "route",
+            destination,
+            &format!("nexthop={}", gateway),
         ])
         .output()?;
 
@@ -207,9 +235,7 @@ pub fn add_route_v6(destination: &str, gateway: &str) -> io::Result<()> {
 
 /// Remove IPv4 route
 pub fn del_route_v4(destination: &str) -> io::Result<()> {
-    let _ = Command::new("route")
-        .args(["delete", destination])
-        .output();
+    let _ = Command::new("route").args(["delete", destination]).output();
     Ok(())
 }
 
@@ -222,7 +248,11 @@ pub fn del_route_v6(destination: &str) -> io::Result<()> {
 }
 
 /// Set default IPv4 gateway through VPN
-pub fn set_default_gateway_v4(vpn_gateway: &str, _original_gateway: &str, server_ip: &str) -> io::Result<()> {
+pub fn set_default_gateway_v4(
+    vpn_gateway: &str,
+    _original_gateway: &str,
+    server_ip: &str,
+) -> io::Result<()> {
     log::info!("Setting IPv4 default gateway to {}...", vpn_gateway);
 
     // Add route to VPN server via original gateway
@@ -238,7 +268,15 @@ pub fn set_default_gateway_v4(vpn_gateway: &str, _original_gateway: &str, server
     if !output.status.success() {
         // Try adding instead of changing
         let _ = Command::new("route")
-            .args(["add", "0.0.0.0", "mask", "0.0.0.0", vpn_gateway, "metric", "1"])
+            .args([
+                "add",
+                "0.0.0.0",
+                "mask",
+                "0.0.0.0",
+                vpn_gateway,
+                "metric",
+                "1",
+            ])
             .output();
     }
 
@@ -247,24 +285,30 @@ pub fn set_default_gateway_v4(vpn_gateway: &str, _original_gateway: &str, server
 }
 
 /// Set default IPv6 gateway through VPN
-pub fn set_default_gateway_v6(vpn_gateway: &str, _original_gateway: Option<&str>, server_ip: Option<&str>) -> io::Result<()> {
+pub fn set_default_gateway_v6(
+    vpn_gateway: &str,
+    _original_gateway: Option<&str>,
+    server_ip: Option<&str>,
+) -> io::Result<()> {
     log::info!("Setting IPv6 default gateway to {}...", vpn_gateway);
 
     // Add route to VPN server
     if let Some(srv) = server_ip {
         let _ = Command::new("netsh")
-            .args([
-                "interface", "ipv6", "add", "route",
-                &format!("{}/128", srv)
-            ])
+            .args(["interface", "ipv6", "add", "route", &format!("{}/128", srv)])
             .output();
     }
 
     // Add default route through VPN
     let _ = Command::new("netsh")
         .args([
-            "interface", "ipv6", "add", "route",
-            "::/0", &format!("nexthop={}", vpn_gateway), "metric=1"
+            "interface",
+            "ipv6",
+            "add",
+            "route",
+            "::/0",
+            &format!("nexthop={}", vpn_gateway),
+            "metric=1",
         ])
         .output();
 
@@ -282,30 +326,32 @@ pub fn restore_default_gateway_v4(original_gateway: &str, server_ip: &str) -> io
         .output();
 
     // Remove route to VPN server
-    let _ = Command::new("route")
-        .args(["delete", server_ip])
-        .output();
+    let _ = Command::new("route").args(["delete", server_ip]).output();
 
     Ok(())
 }
 
 /// Restore original default IPv6 gateway
-pub fn restore_default_gateway_v6(original_gateway: Option<&str>, server_ip: Option<&str>) -> io::Result<()> {
+pub fn restore_default_gateway_v6(
+    original_gateway: Option<&str>,
+    server_ip: Option<&str>,
+) -> io::Result<()> {
     if let Some(gw) = original_gateway {
         log::info!("Restoring IPv6 gateway to {}...", gw);
 
         let _ = Command::new("netsh")
-            .args([
-                "interface", "ipv6", "delete", "route", "::/0"
-            ])
+            .args(["interface", "ipv6", "delete", "route", "::/0"])
             .output();
     }
 
     if let Some(srv) = server_ip {
         let _ = Command::new("netsh")
             .args([
-                "interface", "ipv6", "delete", "route",
-                &format!("{}/128", srv)
+                "interface",
+                "ipv6",
+                "delete",
+                "route",
+                &format!("{}/128", srv),
             ])
             .output();
     }
@@ -315,9 +361,7 @@ pub fn restore_default_gateway_v6(original_gateway: Option<&str>, server_ip: Opt
 
 /// Get current default IPv4 gateway
 pub fn get_default_gateway_v4() -> io::Result<String> {
-    let output = Command::new("route")
-        .args(["print", "0.0.0.0"])
-        .output()?;
+    let output = Command::new("route").args(["print", "0.0.0.0"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -331,7 +375,10 @@ pub fn get_default_gateway_v4() -> io::Result<String> {
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::NotFound, "No default gateway found"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No default gateway found",
+    ))
 }
 
 /// Get current default IPv6 gateway
@@ -354,7 +401,10 @@ pub fn get_default_gateway_v6() -> io::Result<String> {
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::NotFound, "No default IPv6 gateway found"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No default IPv6 gateway found",
+    ))
 }
 
 // =============================================================================
@@ -367,7 +417,11 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
         return Ok(());
     }
 
-    log::info!("Setting DNS servers: v4={:?}, v6={:?}", servers_v4, servers_v6);
+    log::info!(
+        "Setting DNS servers: v4={:?}, v6={:?}",
+        servers_v4,
+        servers_v6
+    );
 
     // Get the VPN interface name (typically the TUN adapter name)
     let interface = "2cha";
@@ -377,14 +431,17 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
         let name_arg = format!("name={}", interface);
         let args: Vec<&str> = if i == 0 {
             vec![
-                "interface", "ipv4", "set", "dnsservers",
-                &name_arg, "static", server, "primary"
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                &name_arg,
+                "static",
+                server,
+                "primary",
             ]
         } else {
-            vec![
-                "interface", "ipv4", "add", "dnsservers",
-                &name_arg, server
-            ]
+            vec!["interface", "ipv4", "add", "dnsservers", &name_arg, server]
         };
 
         let _ = Command::new("netsh").args(&args).output();
@@ -395,14 +452,17 @@ pub fn set_dns(servers_v4: &[String], servers_v6: &[String], _search: &[String])
         let name_arg = format!("name={}", interface);
         let args: Vec<&str> = if i == 0 {
             vec![
-                "interface", "ipv6", "set", "dnsservers",
-                &name_arg, "static", server, "primary"
+                "interface",
+                "ipv6",
+                "set",
+                "dnsservers",
+                &name_arg,
+                "static",
+                server,
+                "primary",
             ]
         } else {
-            vec![
-                "interface", "ipv6", "add", "dnsservers",
-                &name_arg, server
-            ]
+            vec!["interface", "ipv6", "add", "dnsservers", &name_arg, server]
         };
 
         let _ = Command::new("netsh").args(&args).output();
@@ -419,15 +479,23 @@ pub fn restore_dns() -> io::Result<()> {
 
     let _ = Command::new("netsh")
         .args([
-            "interface", "ipv4", "set", "dnsservers",
-            name_arg.as_str(), "dhcp"
+            "interface",
+            "ipv4",
+            "set",
+            "dnsservers",
+            name_arg.as_str(),
+            "dhcp",
         ])
         .output();
 
     let _ = Command::new("netsh")
         .args([
-            "interface", "ipv6", "set", "dnsservers",
-            name_arg.as_str(), "dhcp"
+            "interface",
+            "ipv6",
+            "set",
+            "dnsservers",
+            name_arg.as_str(),
+            "dhcp",
         ])
         .output();
 
@@ -515,7 +583,11 @@ impl ClientRoutingContext {
         if let Some(gw) = ipv6_gateway {
             if route_all_v6 {
                 self.original_gateway_v6 = get_default_gateway_v6().ok();
-                set_default_gateway_v6(gw, self.original_gateway_v6.as_deref(), self.server_ip_v6.as_deref())?;
+                set_default_gateway_v6(
+                    gw,
+                    self.original_gateway_v6.as_deref(),
+                    self.server_ip_v6.as_deref(),
+                )?;
             } else {
                 for route in routes_v6 {
                     add_route_v6(route, gw)?;
@@ -536,7 +608,8 @@ impl ClientRoutingContext {
     /// Cleanup routing
     pub fn cleanup(&self) -> io::Result<()> {
         // Restore IPv4 gateway
-        if let (Some(ref orig_gw), Some(ref srv)) = (&self.original_gateway_v4, &self.server_ip_v4) {
+        if let (Some(ref orig_gw), Some(ref srv)) = (&self.original_gateway_v4, &self.server_ip_v4)
+        {
             let _ = restore_default_gateway_v4(orig_gw, srv);
         }
 
@@ -544,7 +617,7 @@ impl ClientRoutingContext {
         if self.original_gateway_v6.is_some() || self.server_ip_v6.is_some() {
             let _ = restore_default_gateway_v6(
                 self.original_gateway_v6.as_deref(),
-                self.server_ip_v6.as_deref()
+                self.server_ip_v6.as_deref(),
             );
         }
 

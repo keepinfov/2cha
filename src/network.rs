@@ -4,8 +4,6 @@
 //!
 //! Note: This module is only available on Unix platforms due to poll/epoll usage.
 
-#![cfg(unix)]
-
 use crate::crypto::ChaCha20Poly1305;
 use crate::error::{NetworkError, Result};
 use crate::protocol::{PacketHeader, PacketType, ReplayWindow};

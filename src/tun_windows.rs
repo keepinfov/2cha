@@ -42,9 +42,7 @@ impl TunDevice {
         log::info!("Creating WinTun adapter: {}", name);
 
         // Load wintun.dll
-        let wintun = unsafe { wintun::load() }.map_err(|e| {
-            VpnError::Tun(TunError::OpenFailed)
-        })?;
+        let wintun = unsafe { wintun::load() }.map_err(|e| VpnError::Tun(TunError::OpenFailed))?;
 
         // Create or open the adapter
         let adapter = match Adapter::open(&wintun, name) {
@@ -112,9 +110,14 @@ impl TunDevice {
 
         let output = std::process::Command::new("netsh")
             .args([
-                "interface", "ip", "set", "address",
+                "interface",
+                "ip",
+                "set",
+                "address",
                 &format!("name={}", self.name),
-                "static", &addr.to_string(), &mask_str,
+                "static",
+                &addr.to_string(),
+                &mask_str,
             ])
             .output()?;
 
@@ -123,9 +126,14 @@ impl TunDevice {
             // Try alternative method
             let output2 = std::process::Command::new("netsh")
                 .args([
-                    "interface", "ipv4", "set", "address",
+                    "interface",
+                    "ipv4",
+                    "set",
+                    "address",
                     &format!("name={}", self.name),
-                    "static", &addr.to_string(), &mask_str,
+                    "static",
+                    &addr.to_string(),
+                    &mask_str,
                 ])
                 .output()?;
 
@@ -144,7 +152,10 @@ impl TunDevice {
 
         let output = std::process::Command::new("netsh")
             .args([
-                "interface", "ipv6", "add", "address",
+                "interface",
+                "ipv6",
+                "add",
+                "address",
                 &format!("interface={}", self.name),
                 &format!("address={}/{}", addr, prefix),
             ])
@@ -167,8 +178,13 @@ impl TunDevice {
 
         let output = std::process::Command::new("netsh")
             .args([
-                "interface", "ipv4", "set", "subinterface",
-                &self.name, &format!("mtu={}", mtu), "store=persistent",
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                &self.name,
+                &format!("mtu={}", mtu),
+                "store=persistent",
             ])
             .output()?;
 
@@ -246,7 +262,8 @@ impl TunDevice {
 
     /// Get read event handle for waiting
     pub fn get_read_wait_event(&self) -> windows::Win32::Foundation::HANDLE {
-        self.session.get_read_wait_event()
+        self.session
+            .get_read_wait_event()
             .map(|h| windows::Win32::Foundation::HANDLE(h as *mut std::ffi::c_void))
             .unwrap_or(windows::Win32::Foundation::HANDLE::default())
     }
