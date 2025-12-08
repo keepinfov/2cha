@@ -30,7 +30,7 @@
         # Common package attributes
         commonAttrs = {
           pname = "2cha";
-          version = "0.6.2-1";
+          version = "0.6.2-2";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 
