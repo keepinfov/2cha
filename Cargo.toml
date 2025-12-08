@@ -30,15 +30,15 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 # CLI/TUI
 clap = { version = "4.5", features = ["derive", "color", "wrap_help"] }
-console = "0.15"
-indicatif = "0.17"
+console = "0.16.1"
+indicatif = "0.18.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 daemonize = "0.5"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Console",

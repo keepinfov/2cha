@@ -41,10 +41,7 @@ fn create_spinner(msg: &str) -> ProgressBar {
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            println!(
-                "{} VPN already connected",
-                style("●").yellow().bold()
-            );
+            println!("{} VPN already connected", style("●").yellow().bold());
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -80,10 +77,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
             ));
         }
         if !quiet {
-            println!(
-                "  Use {} to check connection",
-                style("2cha status").cyan()
-            );
+            println!("  Use {} to check connection", style("2cha status").cyan());
         }
         daemonize()?;
     } else if let Some(ref sp) = spinner {
@@ -121,10 +115,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            println!(
-                "{} VPN already connected",
-                style("*").yellow().bold()
-            );
+            println!("{} VPN already connected", style("*").yellow().bold());
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -163,10 +154,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
                 style("wintun.dll").yellow(),
                 style("Administrator").yellow()
             );
-            println!(
-                "  Use {} to check connection",
-                style("2cha status").cyan()
-            );
+            println!("  Use {} to check connection", style("2cha status").cyan());
         }
         daemonize()?;
     } else {
@@ -229,10 +217,7 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
 
             if !is_running() {
-                spinner.finish_with_message(format!(
-                    "{} Disconnected",
-                    style("✓").green().bold()
-                ));
+                spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
             } else {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
@@ -265,10 +250,7 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
             std::fs::remove_file(PID_FILE).ok();
 
-            spinner.finish_with_message(format!(
-                "{} Disconnected",
-                style("✓").green().bold()
-            ));
+            spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
             return Ok(());
         }
     }
@@ -330,11 +312,7 @@ pub fn cmd_status() -> Result<()> {
 
     // IPv4
     if let Some(ref addr) = routing_status.ipv4_address {
-        println!(
-            "  {}       {}",
-            style("IPv4:").dim(),
-            style(addr).cyan()
-        );
+        println!("  {}       {}", style("IPv4:").dim(), style(addr).cyan());
     } else if connected {
         println!(
             "  {}       {}",
@@ -345,11 +323,7 @@ pub fn cmd_status() -> Result<()> {
 
     // IPv6
     if let Some(ref addr) = routing_status.ipv6_address {
-        println!(
-            "  {}       {}",
-            style("IPv6:").dim(),
-            style(addr).cyan()
-        );
+        println!("  {}       {}", style("IPv6:").dim(), style(addr).cyan());
     } else if connected {
         println!(
             "  {}       {}",
@@ -360,14 +334,14 @@ pub fn cmd_status() -> Result<()> {
 
     // Routing
     if routing_status.is_full_tunnel() {
-        let mode = if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun
-        {
-            "(v4+v6)"
-        } else if routing_status.default_route_v4_via_tun {
-            "(v4)"
-        } else {
-            "(v6)"
-        };
+        let mode =
+            if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+                "(v4+v6)"
+            } else if routing_status.default_route_v4_via_tun {
+                "(v4)"
+            } else {
+                "(v6)"
+            };
         println!(
             "  {}    {} {} {}",
             style("Routing:").dim(),
@@ -393,14 +367,13 @@ pub fn cmd_status() -> Result<()> {
 
     // Gateway
     if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
-        let mode =
-            if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
-                "(v4+v6)"
-            } else if routing_status.ipv4_forwarding {
-                "(v4)"
-            } else {
-                "(v6)"
-            };
+        let mode = if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
+            "(v4+v6)"
+        } else if routing_status.ipv4_forwarding {
+            "(v4)"
+        } else {
+            "(v6)"
+        };
         println!(
             "  {}    {} {} {}",
             style("Gateway:").dim(),
@@ -503,11 +476,7 @@ pub fn cmd_status() -> Result<()> {
 
     // IPv4
     if let Some(ref addr) = routing_status.ipv4_address {
-        println!(
-            "  {}       {}",
-            style("IPv4:").dim(),
-            style(addr).cyan()
-        );
+        println!("  {}       {}", style("IPv4:").dim(), style(addr).cyan());
     } else if connected {
         println!(
             "  {}       {}",
@@ -518,11 +487,7 @@ pub fn cmd_status() -> Result<()> {
 
     // IPv6
     if let Some(ref addr) = routing_status.ipv6_address {
-        println!(
-            "  {}       {}",
-            style("IPv6:").dim(),
-            style(addr).cyan()
-        );
+        println!("  {}       {}", style("IPv6:").dim(), style(addr).cyan());
     } else if connected {
         println!(
             "  {}       {}",
@@ -533,14 +498,14 @@ pub fn cmd_status() -> Result<()> {
 
     // Routing
     if routing_status.is_full_tunnel() {
-        let mode = if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun
-        {
-            "(v4+v6)"
-        } else if routing_status.default_route_v4_via_tun {
-            "(v4)"
-        } else {
-            "(v6)"
-        };
+        let mode =
+            if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+                "(v4+v6)"
+            } else if routing_status.default_route_v4_via_tun {
+                "(v4)"
+            } else {
+                "(v6)"
+            };
         println!(
             "  {}    {} {} {}",
             style("Routing:").dim(),
@@ -566,14 +531,13 @@ pub fn cmd_status() -> Result<()> {
 
     // Gateway
     if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
-        let mode =
-            if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
-                "(v4+v6)"
-            } else if routing_status.ipv4_forwarding {
-                "(v4)"
-            } else {
-                "(v6)"
-            };
+        let mode = if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
+            "(v4+v6)"
+        } else if routing_status.ipv4_forwarding {
+            "(v4)"
+        } else {
+            "(v6)"
+        };
         println!(
             "  {}    {} {} {}",
             style("Gateway:").dim(),
