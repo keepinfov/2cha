@@ -1,6 +1,6 @@
 [package]
 name = "twocha"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "2cha - High-performance VPN utility with IPv4/IPv6 support"
 license = "MIT"
@@ -22,6 +22,11 @@ log = "0.4"
 env_logger = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
+
+# Cryptography (RustCrypto - pure Rust, safe, audited)
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
 
 # CLI/TUI
 clap = { version = "4.5", features = ["derive", "color", "wrap_help"] }

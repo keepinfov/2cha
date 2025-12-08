@@ -33,7 +33,7 @@ pub mod vpn;
 // Re-export commonly used types
 pub use constants::*;
 pub use core::config::{CipherSuite, ClientConfig, ConfigError, ServerConfig};
-pub use core::crypto::{Aes256Gcm, ChaCha20, ChaCha20Poly1305, Cipher, Poly1305};
+pub use core::crypto::{Aes256Gcm, ChaCha20Poly1305, Cipher};
 pub use core::error::{Result, VpnError};
 pub use core::protocol::{Packet, PacketType};
 

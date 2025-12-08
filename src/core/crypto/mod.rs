@@ -1,20 +1,17 @@
 //! # Cryptographic Module
 //!
-//! High-performance AEAD implementations.
+//! Production-ready AEAD implementations using RustCrypto.
 //!
-//! NOTE: This is an educational implementation.
-//! For production, consider using ring or RustCrypto.
+//! This module provides secure, audited cryptographic primitives:
+//! - ChaCha20-Poly1305 (RFC 8439)
+//! - AES-256-GCM (NIST SP 800-38D)
 
 mod aead;
 mod aes_gcm;
-mod chacha20;
-mod poly1305;
 mod util;
 
 pub use aead::ChaCha20Poly1305;
 pub use aes_gcm::Aes256Gcm;
-pub use chacha20::ChaCha20;
-pub use poly1305::Poly1305;
 pub use util::{constant_time_compare, secure_zero};
 
 use crate::constants::CHACHA20_NONCE_SIZE;

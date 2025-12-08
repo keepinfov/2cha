@@ -34,6 +34,7 @@ pub enum CryptoError {
     InvalidKeyLength { expected: usize, got: usize },
     InvalidNonceLength { expected: usize, got: usize },
     AuthenticationFailed,
+    EncryptionFailed,
     NonceReuse,
     DataTooLarge,
 }
