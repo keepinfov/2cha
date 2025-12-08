@@ -279,15 +279,15 @@ pub fn cmd_status() -> Result<()> {
     // Status
     if connected {
         println!(
-            "  {}     {}",
+            "  {}     {} Connected",
             style("Status:").dim(),
-            format!("{} Connected", style("●").green().bold())
+            style("●").green().bold()
         );
     } else {
         println!(
-            "  {}     {}",
+            "  {}     {} Disconnected",
             style("Status:").dim(),
-            format!("{} Disconnected", style("○").red())
+            style("○").red()
         );
     }
 
