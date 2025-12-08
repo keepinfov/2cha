@@ -3,7 +3,8 @@
 //! Shared constants for the VPN protocol.
 
 /// Protocol version
-pub const PROTOCOL_VERSION: u8 = 2;
+/// Version 3: Upgraded to production RustCrypto implementations
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// ChaCha20 key size in bytes
 pub const CHACHA20_KEY_SIZE: usize = 32;

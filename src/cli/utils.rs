@@ -10,17 +10,11 @@ pub const PID_FILE: &str = "/tmp/2cha.pid";
 #[cfg(windows)]
 pub const PID_FILE: &str = "C:\\Windows\\Temp\\2cha.pid";
 
+/// Log file path for daemon mode
 #[cfg(unix)]
-pub const DEFAULT_CONFIG: &str = "/etc/2cha/client.toml";
-#[cfg(windows)]
-pub const DEFAULT_CONFIG: &str = "C:\\ProgramData\\2cha\\client.toml";
+pub const LOG_FILE: &str = "/tmp/2cha.log";
 
-#[cfg(unix)]
-pub const DEFAULT_SERVER_CONFIG: &str = "/etc/2cha/server.toml";
-#[cfg(windows)]
-pub const DEFAULT_SERVER_CONFIG: &str = "C:\\ProgramData\\2cha\\server.toml";
-
-/// Check if VPN process is running
+/// Check if VPN process is running (Unix)
 #[cfg(unix)]
 pub fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
@@ -33,7 +27,6 @@ pub fn is_running() -> bool {
                     return true;
                 }
                 // Check if error is EPERM (permission denied) - process exists but owned by another user
-                // Use cross-platform errno access
                 #[cfg(target_os = "linux")]
                 let errno = *libc::__errno_location();
                 #[cfg(target_os = "macos")]
@@ -66,6 +59,7 @@ pub fn can_signal_process() -> bool {
     false
 }
 
+/// Check if VPN process is running (Windows)
 #[cfg(windows)]
 pub fn is_running() -> bool {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
@@ -140,47 +134,6 @@ fn generate_fallback_key(key: &mut [u8; 32]) {
     }
 }
 
-/// Parse command-line arguments for config path and flags
-pub struct ParsedArgs {
-    pub config_path: String,
-    pub verbose: bool,
-    pub quiet: bool,
-    pub daemon: bool,
-}
-
-impl ParsedArgs {
-    pub fn parse(args: &[String], default_config: &str) -> Self {
-        let mut config_path = default_config.to_string();
-        let mut verbose = false;
-        let mut quiet = false;
-        let mut daemon = false;
-
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "-c" | "--config" => {
-                    i += 1;
-                    if i < args.len() {
-                        config_path = args[i].to_string();
-                    }
-                }
-                "-v" | "--verbose" => verbose = true,
-                "-q" | "--quiet" => quiet = true,
-                "-d" | "--daemon" => daemon = true,
-                _ => {}
-            }
-            i += 1;
-        }
-
-        Self {
-            config_path,
-            verbose,
-            quiet,
-            daemon,
-        }
-    }
-}
-
 /// Setup logging based on verbosity
 pub fn setup_logging(verbose: bool, quiet: bool) {
     let log_level = if verbose {
@@ -195,10 +148,6 @@ pub fn setup_logging(verbose: bool, quiet: bool) {
         .format_timestamp_millis()
         .init();
 }
-
-/// Log file path for daemon mode
-#[cfg(unix)]
-pub const LOG_FILE: &str = "/tmp/2cha.log";
 
 /// Daemonize the process (Unix)
 /// Uses the `daemonize` crate for robust daemon creation
@@ -237,8 +186,6 @@ pub fn daemonize() -> Result<()> {
 /// Note: config_path should be an absolute path (canonicalized before calling)
 #[cfg(windows)]
 pub fn daemonize() -> Result<()> {
-    // On Windows, we use a different approach
-    // We detach from the console and run in the background
     use std::os::windows::process::CommandExt;
 
     let exe = std::env::current_exe()

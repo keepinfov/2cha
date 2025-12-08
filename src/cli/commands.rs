@@ -5,70 +5,90 @@
 #[cfg(unix)]
 use crate::cli::utils::can_signal_process;
 #[cfg(unix)]
-use crate::cli::utils::format_bytes;
-#[cfg(unix)]
 use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
-    daemonize, generate_key, is_running, setup_logging, ParsedArgs, DEFAULT_CONFIG,
-    DEFAULT_SERVER_CONFIG, PID_FILE,
+    daemonize, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
 };
 use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
 use crate::vpn::{client, server};
+
+use console::{style, Term};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Duration;
 
 #[cfg(unix)]
 use crate::platform::unix::routing;
 #[cfg(windows)]
 use crate::platform::windows::routing;
 
-/// Connect to VPN server
-#[cfg(unix)]
-pub fn cmd_up(args: &[String]) -> Result<()> {
-    let parsed = ParsedArgs::parse(args, DEFAULT_CONFIG);
+/// Create a spinner with consistent styling
+fn create_spinner(msg: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message(msg.to_string());
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner
+}
 
+/// Connect to VPN server (Unix)
+#[cfg(unix)]
+pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
-        if !parsed.quiet {
-            println!("\x1b[33m●\x1b[0m VPN already connected");
-            println!("  Use '2cha status' or '2cha down'");
+        if !quiet {
+            println!("{} VPN already connected", style("●").yellow().bold());
+            println!(
+                "  Use {} or {}",
+                style("2cha status").cyan(),
+                style("2cha down").cyan()
+            );
         }
         return Ok(());
     }
 
     // Convert config path to absolute before daemonizing (daemon changes cwd to /)
-    let config_path = std::fs::canonicalize(&parsed.config_path)
+    let config_path = std::fs::canonicalize(config_path)
         .map_err(|e| {
             crate::core::error::VpnError::Config(format!(
                 "Config file '{}' not found: {}",
-                parsed.config_path, e
+                config_path, e
             ))
         })?
         .to_string_lossy()
         .to_string();
 
-    if !parsed.quiet {
-        print!("\x1b[36m⟳\x1b[0m Connecting...");
-        // Flush to ensure message is shown before forking
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-    }
+    let spinner = if !quiet {
+        Some(create_spinner("Connecting..."))
+    } else {
+        None
+    };
 
     // Daemonize if requested
-    if parsed.daemon {
-        if !parsed.quiet {
-            println!(" (background)");
-            println!("  Use '2cha status' to check connection");
-            println!("  Logs: {}", LOG_FILE);
+    if daemon {
+        if let Some(ref sp) = spinner {
+            sp.finish_with_message(format!(
+                "Connecting in background. Logs: {}",
+                style(LOG_FILE).dim()
+            ));
+        }
+        if !quiet {
+            println!("  Use {} to check connection", style("2cha status").cyan());
         }
         daemonize()?;
-    } else if !parsed.quiet {
-        println!();
+    } else if let Some(ref sp) = spinner {
+        sp.finish_and_clear();
     }
 
-    if parsed.verbose {
+    if verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
             .init();
-    } else if !parsed.quiet && !parsed.daemon {
+    } else if !quiet && !daemon {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
             .format_target(false)
             .format_timestamp(None)
@@ -76,68 +96,86 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     // PID file is managed by daemonize crate in daemon mode
-    if !parsed.daemon {
+    if !daemon {
         std::fs::write(PID_FILE, std::process::id().to_string()).ok();
     }
 
-    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
+    let result = client::run(&config_path, quiet || daemon);
 
     // Clean up PID file on exit (only in non-daemon mode, daemon crate handles it)
-    if !parsed.daemon {
+    if !daemon {
         std::fs::remove_file(PID_FILE).ok();
     }
 
     result
 }
 
+/// Connect to VPN server (Windows)
 #[cfg(windows)]
-pub fn cmd_up(args: &[String]) -> Result<()> {
-    let parsed = ParsedArgs::parse(args, DEFAULT_CONFIG);
-
+pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
-        if !parsed.quiet {
-            println!("\x1b[33m*\x1b[0m VPN already connected");
-            println!("  Use '2cha status' or '2cha down'");
+        if !quiet {
+            println!("{} VPN already connected", style("*").yellow().bold());
+            println!(
+                "  Use {} or {}",
+                style("2cha status").cyan(),
+                style("2cha down").cyan()
+            );
         }
         return Ok(());
     }
 
     // Convert config path to absolute before daemonizing
-    let config_path = std::fs::canonicalize(&parsed.config_path)
+    let config_path = std::fs::canonicalize(config_path)
         .map_err(|e| {
             crate::core::error::VpnError::Config(format!(
                 "Config file '{}' not found: {}",
-                parsed.config_path, e
+                config_path, e
             ))
         })?
         .to_string_lossy()
         .to_string();
 
-    if !parsed.quiet {
-        print!("\x1b[36m>\x1b[0m Connecting...");
-        // Flush to ensure message is shown before spawning daemon
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-    }
+    let spinner = if !quiet {
+        Some(create_spinner("Connecting..."))
+    } else {
+        None
+    };
 
     // Daemonize if requested
-    if parsed.daemon {
-        if !parsed.quiet {
-            println!(" (background)");
-            println!("  Note: Requires wintun.dll and Administrator privileges");
-            println!("  Use '2cha status' to check connection");
+    if daemon {
+        if let Some(ref sp) = spinner {
+            sp.finish_with_message("Connecting in background...");
+        }
+        if !quiet {
+            println!(
+                "  {} Requires {} and {}",
+                style("Note:").dim(),
+                style("wintun.dll").yellow(),
+                style("Administrator").yellow()
+            );
+            println!("  Use {} to check connection", style("2cha status").cyan());
         }
         daemonize()?;
-    } else if !parsed.quiet {
-        println!();
-        println!("  Note: Requires wintun.dll and Administrator privileges");
+    } else {
+        if let Some(ref sp) = spinner {
+            sp.finish_and_clear();
+        }
+        if !quiet {
+            println!(
+                "  {} Requires {} and {}",
+                style("Note:").dim(),
+                style("wintun.dll").yellow(),
+                style("Administrator").yellow()
+            );
+        }
     }
 
-    if parsed.verbose {
+    if verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
             .format_timestamp_millis()
             .init();
-    } else if !parsed.quiet {
+    } else if !quiet {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
             .format_target(false)
             .format_timestamp(None)
@@ -145,135 +183,207 @@ pub fn cmd_up(args: &[String]) -> Result<()> {
     }
 
     std::fs::write(PID_FILE, std::process::id().to_string()).ok();
-    let result = client::run(&config_path, parsed.quiet || parsed.daemon);
+    let result = client::run(&config_path, quiet || daemon);
     std::fs::remove_file(PID_FILE).ok();
 
     result
 }
 
-/// Disconnect from VPN
+/// Disconnect from VPN (Unix)
 #[cfg(unix)]
 pub fn cmd_down() -> Result<()> {
     if !is_running() {
-        println!("\x1b[90m○\x1b[0m VPN not connected");
+        println!("{} VPN not connected", style("○").dim());
         return Ok(());
     }
 
     // Check if we have permission to stop the VPN
     if !can_signal_process() {
-        println!("\x1b[31m✗\x1b[0m Permission denied");
-        println!("  The VPN is running as root. Use: sudo 2cha down");
+        println!("{} Permission denied", style("✗").red().bold());
+        println!(
+            "  The VPN is running as root. Use: {}",
+            style("sudo 2cha down").cyan()
+        );
         return Ok(());
     }
 
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            println!("\x1b[36m⟳\x1b[0m Disconnecting...");
+            let spinner = create_spinner("Disconnecting...");
+
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(500));
 
             if !is_running() {
-                println!("\x1b[32m✓\x1b[0m Disconnected");
+                spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
             } else {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
                 std::fs::remove_file(PID_FILE).ok();
-                println!("\x1b[32m✓\x1b[0m Force disconnected");
+                spinner.finish_with_message(format!(
+                    "{} Force disconnected",
+                    style("✓").green().bold()
+                ));
             }
             return Ok(());
         }
     }
 
-    println!("\x1b[90m○\x1b[0m VPN not connected");
+    println!("{} VPN not connected", style("○").dim());
     Ok(())
 }
 
+/// Disconnect from VPN (Windows)
 #[cfg(windows)]
 pub fn cmd_down() -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            println!("\x1b[36m⟳\x1b[0m Disconnecting...");
+            let spinner = create_spinner("Disconnecting...");
 
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F"])
                 .output();
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(500));
             std::fs::remove_file(PID_FILE).ok();
-            println!("\x1b[32m✓\x1b[0m Disconnected");
+
+            spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
             return Ok(());
         }
     }
 
-    println!("\x1b[90m○\x1b[0m VPN not connected");
+    println!("{} VPN not connected", style("o").dim());
     Ok(())
 }
 
-/// Show VPN status
+/// Show VPN status (Unix)
 #[cfg(unix)]
 pub fn cmd_status() -> Result<()> {
-    println!();
-    println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
-    println!("  ════════════════════════════════════════");
+    let term = Term::stdout();
+    let _ = term.write_line("");
+
+    // Header
+    println!(
+        "  {} {}",
+        style("2cha").cyan().bold(),
+        style("VPN Status").bold()
+    );
+    println!("  {}", style("═".repeat(40)).dim());
 
     let connected = is_running();
     let tun_name = "tun0";
 
+    // Status
     if connected {
-        println!("  Status:     \x1b[32m● Connected\x1b[0m");
+        println!(
+            "  {}     {} Connected",
+            style("Status:").dim(),
+            style("●").green().bold()
+        );
     } else {
-        println!("  Status:     \x1b[31m○ Disconnected\x1b[0m");
+        println!(
+            "  {}     {} Disconnected",
+            style("Status:").dim(),
+            style("○").red()
+        );
     }
 
     let routing_status = routing::get_routing_status(tun_name);
 
+    // Interface
     if routing_status.interface_exists {
-        println!("  Interface:  \x1b[32m●\x1b[0m {}", tun_name);
+        println!(
+            "  {}  {} {}",
+            style("Interface:").dim(),
+            style("●").green(),
+            style(tun_name).cyan()
+        );
     } else {
-        println!("  Interface:  \x1b[90m○\x1b[0m {}", tun_name);
+        println!(
+            "  {}  {} {}",
+            style("Interface:").dim(),
+            style("○").dim(),
+            tun_name
+        );
     }
 
+    // IPv4
     if let Some(ref addr) = routing_status.ipv4_address {
-        println!("  IPv4:       \x1b[36m{}\x1b[0m", addr);
+        println!("  {}       {}", style("IPv4:").dim(), style(addr).cyan());
     } else if connected {
-        println!("  IPv4:       \x1b[90mdisabled\x1b[0m");
+        println!(
+            "  {}       {}",
+            style("IPv4:").dim(),
+            style("disabled").dim()
+        );
     }
 
+    // IPv6
     if let Some(ref addr) = routing_status.ipv6_address {
-        println!("  IPv6:       \x1b[36m{}\x1b[0m", addr);
+        println!("  {}       {}", style("IPv6:").dim(), style(addr).cyan());
     } else if connected {
-        println!("  IPv6:       \x1b[90mdisabled\x1b[0m");
+        println!(
+            "  {}       {}",
+            style("IPv6:").dim(),
+            style("disabled").dim()
+        );
     }
 
+    // Routing
     if routing_status.is_full_tunnel() {
-        print!("  Routing:    \x1b[33m● Full tunnel\x1b[0m");
-        if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
-            println!(" (v4+v6)");
-        } else if routing_status.default_route_v4_via_tun {
-            println!(" (v4)");
-        } else {
-            println!(" (v6)");
-        }
+        let mode =
+            if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+                "(v4+v6)"
+            } else if routing_status.default_route_v4_via_tun {
+                "(v4)"
+            } else {
+                "(v6)"
+            };
+        println!(
+            "  {}    {} {} {}",
+            style("Routing:").dim(),
+            style("●").yellow(),
+            style("Full tunnel").yellow(),
+            style(mode).dim()
+        );
     } else if connected {
-        println!("  Routing:    \x1b[32m● Split tunnel\x1b[0m");
+        println!(
+            "  {}    {} {}",
+            style("Routing:").dim(),
+            style("●").green(),
+            style("Split tunnel").green()
+        );
     } else {
-        println!("  Routing:    \x1b[90m○ Normal\x1b[0m");
+        println!(
+            "  {}    {} {}",
+            style("Routing:").dim(),
+            style("○").dim(),
+            style("Normal").dim()
+        );
     }
 
+    // Gateway
     if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
-        print!("  Gateway:    \x1b[32m● Forwarding\x1b[0m");
-        if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
-            println!(" (v4+v6)");
+        let mode = if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
+            "(v4+v6)"
         } else if routing_status.ipv4_forwarding {
-            println!(" (v4)");
+            "(v4)"
         } else {
-            println!(" (v6)");
-        }
+            "(v6)"
+        };
+        println!(
+            "  {}    {} {} {}",
+            style("Gateway:").dim(),
+            style("●").green(),
+            style("Forwarding").green(),
+            style(mode).dim()
+        );
     }
 
+    // Traffic stats
     if routing_status.interface_exists {
         if let (Ok(rx), Ok(tx)) = (
             std::fs::read_to_string(format!("/sys/class/net/{}/statistics/rx_bytes", tun_name)),
@@ -282,13 +392,17 @@ pub fn cmd_status() -> Result<()> {
             let rx: u64 = rx.trim().parse().unwrap_or(0);
             let tx: u64 = tx.trim().parse().unwrap_or(0);
             println!(
-                "  Traffic:    ↓ {} / ↑ {}",
+                "  {}    {} {} / {} {}",
+                style("Traffic:").dim(),
+                style("↓").cyan(),
                 format_bytes(rx),
+                style("↑").magenta(),
                 format_bytes(tx)
             );
         }
     }
 
+    // Public IP
     if connected {
         if let Ok(output) = std::process::Command::new("curl")
             .args(["-s", "--max-time", "3", "-4", "ifconfig.me"])
@@ -296,7 +410,11 @@ pub fn cmd_status() -> Result<()> {
         {
             if output.status.success() {
                 let ip = String::from_utf8_lossy(&output.stdout);
-                println!("  Public IP:  \x1b[36m{}\x1b[0m", ip.trim());
+                println!(
+                    "  {}  {}",
+                    style("Public IP:").dim(),
+                    style(ip.trim()).cyan().bold()
+                );
             }
         }
     }
@@ -305,67 +423,131 @@ pub fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+/// Show VPN status (Windows)
 #[cfg(windows)]
 pub fn cmd_status() -> Result<()> {
-    println!();
-    println!("  \x1b[1;36m2cha VPN Status\x1b[0m");
-    println!("  ================================================");
+    let term = Term::stdout();
+    let _ = term.write_line("");
+
+    // Header
+    println!(
+        "  {} {}",
+        style("2cha").cyan().bold(),
+        style("VPN Status").bold()
+    );
+    println!("  {}", style("=".repeat(48)).dim());
 
     let connected = is_running();
     let tun_name = "2cha";
 
+    // Status
     if connected {
-        println!("  Status:     \x1b[32m* Connected\x1b[0m");
+        println!(
+            "  {}     {} Connected",
+            style("Status:").dim(),
+            style("*").green().bold()
+        );
     } else {
-        println!("  Status:     \x1b[31mo Disconnected\x1b[0m");
+        println!(
+            "  {}     {} Disconnected",
+            style("Status:").dim(),
+            style("o").red()
+        );
     }
 
     let routing_status = routing::get_routing_status(tun_name);
 
+    // Interface
     if routing_status.interface_exists {
-        println!("  Interface:  \x1b[32m*\x1b[0m {}", tun_name);
+        println!(
+            "  {}  {} {}",
+            style("Interface:").dim(),
+            style("*").green(),
+            style(tun_name).cyan()
+        );
     } else {
-        println!("  Interface:  \x1b[90mo\x1b[0m {}", tun_name);
+        println!(
+            "  {}  {} {}",
+            style("Interface:").dim(),
+            style("o").dim(),
+            tun_name
+        );
     }
 
+    // IPv4
     if let Some(ref addr) = routing_status.ipv4_address {
-        println!("  IPv4:       \x1b[36m{}\x1b[0m", addr);
+        println!("  {}       {}", style("IPv4:").dim(), style(addr).cyan());
     } else if connected {
-        println!("  IPv4:       \x1b[90mdisabled\x1b[0m");
+        println!(
+            "  {}       {}",
+            style("IPv4:").dim(),
+            style("disabled").dim()
+        );
     }
 
+    // IPv6
     if let Some(ref addr) = routing_status.ipv6_address {
-        println!("  IPv6:       \x1b[36m{}\x1b[0m", addr);
+        println!("  {}       {}", style("IPv6:").dim(), style(addr).cyan());
     } else if connected {
-        println!("  IPv6:       \x1b[90mdisabled\x1b[0m");
+        println!(
+            "  {}       {}",
+            style("IPv6:").dim(),
+            style("disabled").dim()
+        );
     }
 
+    // Routing
     if routing_status.is_full_tunnel() {
-        print!("  Routing:    \x1b[33m* Full tunnel\x1b[0m");
-        if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
-            println!(" (v4+v6)");
-        } else if routing_status.default_route_v4_via_tun {
-            println!(" (v4)");
-        } else {
-            println!(" (v6)");
-        }
+        let mode =
+            if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+                "(v4+v6)"
+            } else if routing_status.default_route_v4_via_tun {
+                "(v4)"
+            } else {
+                "(v6)"
+            };
+        println!(
+            "  {}    {} {} {}",
+            style("Routing:").dim(),
+            style("*").yellow(),
+            style("Full tunnel").yellow(),
+            style(mode).dim()
+        );
     } else if connected {
-        println!("  Routing:    \x1b[32m* Split tunnel\x1b[0m");
+        println!(
+            "  {}    {} {}",
+            style("Routing:").dim(),
+            style("*").green(),
+            style("Split tunnel").green()
+        );
     } else {
-        println!("  Routing:    \x1b[90mo Normal\x1b[0m");
+        println!(
+            "  {}    {} {}",
+            style("Routing:").dim(),
+            style("o").dim(),
+            style("Normal").dim()
+        );
     }
 
+    // Gateway
     if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
-        print!("  Gateway:    \x1b[32m* Forwarding\x1b[0m");
-        if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
-            println!(" (v4+v6)");
+        let mode = if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
+            "(v4+v6)"
         } else if routing_status.ipv4_forwarding {
-            println!(" (v4)");
+            "(v4)"
         } else {
-            println!(" (v6)");
-        }
+            "(v6)"
+        };
+        println!(
+            "  {}    {} {} {}",
+            style("Gateway:").dim(),
+            style("*").green(),
+            style("Forwarding").green(),
+            style(mode).dim()
+        );
     }
 
+    // Public IP
     if connected {
         if let Ok(output) = std::process::Command::new("curl")
             .args(["-s", "--max-time", "3", "-4", "ifconfig.me"])
@@ -373,40 +555,46 @@ pub fn cmd_status() -> Result<()> {
         {
             if output.status.success() {
                 let ip = String::from_utf8_lossy(&output.stdout);
-                println!("  Public IP:  \x1b[36m{}\x1b[0m", ip.trim());
+                println!(
+                    "  {}  {}",
+                    style("Public IP:").dim(),
+                    style(ip.trim()).cyan().bold()
+                );
             }
         }
     }
 
-    println!("  Platform:   Windows");
+    println!(
+        "  {}   {}",
+        style("Platform:").dim(),
+        style("Windows").blue()
+    );
     println!();
     Ok(())
 }
 
 /// Toggle VPN connection
-pub fn cmd_toggle(args: &[String]) -> Result<()> {
+pub fn cmd_toggle(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         cmd_down()
     } else {
-        cmd_up(args)
+        cmd_up(config_path, daemon, verbose, quiet)
     }
 }
 
 /// Run VPN server
-pub fn cmd_server(args: &[String]) -> Result<()> {
-    let parsed = ParsedArgs::parse(args, DEFAULT_SERVER_CONFIG);
-
+pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     // Daemonize if requested
-    if parsed.daemon {
+    if daemon {
         daemonize()?;
     }
 
-    setup_logging(parsed.verbose, parsed.quiet);
+    setup_logging(verbose, quiet);
 
     #[cfg(windows)]
     log::info!("Note: Requires wintun.dll and Administrator privileges");
 
-    server::run(&parsed.config_path)
+    server::run(config_path)
 }
 
 /// Generate encryption key
@@ -421,14 +609,21 @@ pub fn cmd_genkey() -> Result<()> {
 }
 
 /// Create config template
-pub fn cmd_init(args: &[String]) -> Result<()> {
-    let mode = args.first().map(|s| s.as_str()).unwrap_or("client");
-
+pub fn cmd_init(mode: &str) -> Result<()> {
     match mode {
         "client" | "c" => print!("{}", example_client_config()),
         "server" | "s" => print!("{}", example_server_config()),
         _ => {
-            eprintln!("Usage: 2cha init <client|server>");
+            eprintln!(
+                "{} Invalid mode: {}",
+                style("✗").red().bold(),
+                style(mode).yellow()
+            );
+            eprintln!(
+                "  Use {} or {}",
+                style("client").green(),
+                style("server").green()
+            );
             std::process::exit(1);
         }
     }
