@@ -1,6 +1,6 @@
-# shell.nix - for non-flake users
-# Use `nix-shell` to enter the development environment
-# For flake users: `nix develop` is recommended instead
+# default.nix - for non-flake users
+# Use `nix-build` to build the package
+# For flake users: `nix build` is recommended instead
 
 (import
   (
@@ -11,4 +11,4 @@
     }
   )
   { src = ./.; }
-).shellNix
+).defaultNix
