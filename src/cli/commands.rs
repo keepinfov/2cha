@@ -584,6 +584,17 @@ pub fn cmd_toggle(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
 
 /// Run VPN server
 pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
+    // Convert config path to absolute before daemonizing
+    let config_path = std::fs::canonicalize(config_path)
+        .map_err(|e| {
+            crate::core::error::VpnError::Config(format!(
+                "Config file '{}' not found: {}",
+                config_path, e
+            ))
+        })?
+        .to_string_lossy()
+        .to_string();
+
     // Daemonize if requested
     if daemon {
         daemonize()?;
@@ -594,7 +605,7 @@ pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
     #[cfg(windows)]
     log::info!("Note: Requires wintun.dll and Administrator privileges");
 
-    server::run(config_path)
+    server::run(&config_path)
 }
 
 /// Generate encryption key
