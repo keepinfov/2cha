@@ -2,10 +2,11 @@
 //!
 //! Command-line interface for the VPN utility.
 
+mod app;
 mod commands;
 mod utils;
 
-pub use commands::{cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up};
+pub use app::{exit_with_error, run};
 
 use crate::constants::PROTOCOL_VERSION;
 use console::style;
