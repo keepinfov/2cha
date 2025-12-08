@@ -605,7 +605,7 @@ pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
     #[cfg(windows)]
     log::info!("Note: Requires wintun.dll and Administrator privileges");
 
-    server::run(config_path)
+    server::run(&config_path)
 }
 
 /// Generate encryption key
