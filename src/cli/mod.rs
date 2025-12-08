@@ -11,7 +11,7 @@ pub use app::{exit_with_error, run};
 use crate::constants::PROTOCOL_VERSION;
 use console::style;
 
-const VERSION: &str = "0.6.1";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Print ASCII banner with styled output
 pub fn print_banner() {
