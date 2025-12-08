@@ -22,29 +22,33 @@ Minimalist VPN tool with IPv4/IPv6 dual-stack support, powered by ChaCha20-Poly1
 ## Quick Start
 
 ```bash
+# Clone
+git clone https://github.com/keepinfov/2cha
+cd 2cha
+
 # Build
-cargo build --release
+cargo install --path .
 
 # Generate key (save this!)
-./2cha genkey > vpn.key
+2cha genkey > vpn.key
 
 # Create configs
-./2cha init server > server.toml
-./2cha init client > client.toml
+2cha init server > server.toml
+2cha init client > client.toml
 
 # Edit configs, add key, then:
 
 # On server
-sudo ./2cha server -c server.toml
+sudo 2cha server -c server.toml
 
 # On client
-sudo ./2cha up -c client.toml
+sudo 2cha up -c client.toml
 
 # Check status
-./2cha status
+2cha status
 
 # Disconnect
-sudo ./2cha down
+sudo 2cha down
 ```
 
 ## Static Build (Portable Binary)
@@ -202,10 +206,22 @@ cpu_affinity = [0, 1]         # Pin to CPUs
 ```
 
 ## NixOS
-
+You can build it using
 ```bash
+# dynamic version 
+nix build github:keepinfov/2cha
+
+# static version (musl, supports aarch64 and x86_64) 
+nix build github:keepinfov/2cha#static
+
+# or if you wanna build by your own
+git clone https://github.com/keepinfov/2cha
 nix develop
 cargo build --release
+```
+or you can just run it using
+```bash
+nix run github:keepinfov/2cha
 ```
 
 ## License
