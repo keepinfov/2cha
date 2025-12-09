@@ -270,10 +270,10 @@ pub fn elevate_with_sudo() -> Result<()> {
 
     // Print prompt for password
     print!(
-        "{} This command requires root privileges.\n",
+        " {}This command requires root privileges.\n",
         style("⚡").yellow().bold()
     );
-    print!("{}", style("[sudo] password: ").bold());
+    print!("   {}", style("[sudo] password: ").bold());
     std::io::stdout().flush().ok();
 
     // Read password securely (hidden input)
@@ -291,7 +291,7 @@ pub fn elevate_with_sudo() -> Result<()> {
     let mut validate_child = match validate {
         Ok(child) => child,
         Err(e) => {
-            println!("\n{} sudo not available: {}", style("✗").red().bold(), e);
+            println!("\n {}sudo not available: {}", style("❌").red().bold(), e);
             return Err(VpnError::Config("sudo not available".into()));
         }
     };
@@ -303,7 +303,7 @@ pub fn elevate_with_sudo() -> Result<()> {
 
     let validate_status = validate_child.wait();
     if validate_status.map(|s| !s.success()).unwrap_or(true) {
-        println!("{} Authentication failed", style("✗").red().bold());
+        println!(" {}Authentication failed", style("❌").red().bold());
         return Err(VpnError::Config("sudo authentication failed".into()));
     }
 
@@ -334,7 +334,7 @@ pub fn elevate_with_sudo() -> Result<()> {
 #[cfg(windows)]
 pub fn elevate_with_sudo() -> Result<()> {
     println!(
-        "{} This command requires Administrator privileges.",
+        " {}This command requires Administrator privileges.",
         style("⚡").yellow().bold()
     );
     println!(
