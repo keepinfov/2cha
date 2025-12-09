@@ -13,6 +13,7 @@ use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
 use crate::vpn::{client, server};
 
+use super::output;
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
@@ -41,7 +42,7 @@ fn create_spinner(msg: &str) -> ProgressBar {
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            println!("{} VPN already connected", style("●").yellow().bold());
+            output::print_connected("VPN already connected");
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -118,7 +119,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            println!("{} VPN already connected", style("*").yellow().bold());
+            output::print_connected("VPN already connected");
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -199,7 +200,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 #[cfg(unix)]
 pub fn cmd_down() -> Result<()> {
     if !is_running() {
-        println!("{} VPN not connected", style("○").dim());
+        output::print_disconnected("VPN not connected");
         return Ok(());
     }
 
@@ -218,22 +219,19 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
 
             if !is_running() {
-                spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
+                spinner.finish_with_message(output::format_success("Disconnected"));
             } else {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
                 std::fs::remove_file(PID_FILE).ok();
-                spinner.finish_with_message(format!(
-                    "{} Force disconnected",
-                    style("✓").green().bold()
-                ));
+                spinner.finish_with_message(output::format_success("Force disconnected"));
             }
             return Ok(());
         }
     }
 
-    println!("{} VPN not connected", style("○").dim());
+    output::print_disconnected("VPN not connected");
     Ok(())
 }
 
@@ -251,12 +249,12 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
             std::fs::remove_file(PID_FILE).ok();
 
-            spinner.finish_with_message(format!("{} Disconnected", style("✓").green().bold()));
+            spinner.finish_with_message(output::format_success("Disconnected"));
             return Ok(());
         }
     }
 
-    println!("{} VPN not connected", style("o").dim());
+    output::print_disconnected("VPN not connected");
     Ok(())
 }
 
@@ -630,8 +628,8 @@ pub fn cmd_init(mode: &str) -> Result<()> {
         "server" | "s" => print!("{}", example_server_config()),
         _ => {
             eprintln!(
-                "{} Invalid mode: {}",
-                style("✗").red().bold(),
+                " {} Invalid mode: {}",
+                output::icon_error(),
                 style(mode).yellow()
             );
             eprintln!(
