@@ -3,9 +3,9 @@
 //! CLI definition and command dispatch using clap.
 
 use clap::{Parser, Subcommand};
-use console::style;
 
 use super::commands::{cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up};
+use super::output;
 use super::print_banner;
 use crate::core::error::Result;
 
@@ -17,11 +17,12 @@ use crate::core::error::Result;
     about = "High-performance VPN utility with IPv4/IPv6 support",
     long_about = None,
     after_help = "Examples:\n  \
-        sudo 2cha up -c client.toml\n  \
-        sudo 2cha server -c server.toml\n  \
+        2cha up -c client.toml\n  \
+        2cha server -c server.toml\n  \
         2cha genkey > vpn.key\n  \
         2cha init client > client.toml\n  \
-        2cha status",
+        2cha status\n\n\
+        Note: Commands requiring root will automatically prompt for sudo password.",
     styles = get_styles(),
 )]
 struct Cli {
@@ -194,6 +195,6 @@ pub fn run() -> Result<()> {
 
 /// Print error and exit
 pub fn exit_with_error(e: impl std::fmt::Display) -> ! {
-    eprintln!("{} Error: {}", style("✗").red().bold(), e);
+    output::print_error(e);
     std::process::exit(1);
 }
