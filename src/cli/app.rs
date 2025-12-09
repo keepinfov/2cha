@@ -3,9 +3,9 @@
 //! CLI definition and command dispatch using clap.
 
 use clap::{Parser, Subcommand};
-use console::style;
 
 use super::commands::{cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up};
+use super::output;
 use super::print_banner;
 use crate::core::error::Result;
 
@@ -194,6 +194,6 @@ pub fn run() -> Result<()> {
 
 /// Print error and exit
 pub fn exit_with_error(e: impl std::fmt::Display) -> ! {
-    eprintln!(" {}Error: {}", style("❌").red().bold(), e);
+    output::print_error(e);
     std::process::exit(1);
 }

@@ -4,6 +4,7 @@
 
 mod app;
 mod commands;
+mod output;
 mod utils;
 
 pub use app::{exit_with_error, run};
