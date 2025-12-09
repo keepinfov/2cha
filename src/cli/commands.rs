@@ -7,7 +7,7 @@ use crate::cli::utils::can_signal_process;
 #[cfg(unix)]
 use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
-    daemonize, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
+    daemonize, ensure_root, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
 };
 use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
@@ -50,6 +50,9 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
         }
         return Ok(());
     }
+
+    // Ensure we have root privileges (will prompt for sudo password if needed)
+    ensure_root()?;
 
     // Convert config path to absolute before daemonizing (daemon changes cwd to /)
     let config_path = std::fs::canonicalize(config_path)
@@ -125,6 +128,9 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
         return Ok(());
     }
 
+    // Ensure we have Administrator privileges
+    ensure_root()?;
+
     // Convert config path to absolute before daemonizing
     let config_path = std::fs::canonicalize(config_path)
         .map_err(|e| {
@@ -197,14 +203,9 @@ pub fn cmd_down() -> Result<()> {
         return Ok(());
     }
 
-    // Check if we have permission to stop the VPN
+    // Check if we have permission to stop the VPN, elevate if needed
     if !can_signal_process() {
-        println!("{} Permission denied", style("✗").red().bold());
-        println!(
-            "  The VPN is running as root. Use: {}",
-            style("sudo 2cha down").cyan()
-        );
-        return Ok(());
+        ensure_root()?;
     }
 
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
@@ -584,6 +585,9 @@ pub fn cmd_toggle(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
 
 /// Run VPN server
 pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
+    // Ensure we have root privileges (will prompt for sudo password if needed)
+    ensure_root()?;
+
     // Convert config path to absolute before daemonizing
     let config_path = std::fs::canonicalize(config_path)
         .map_err(|e| {

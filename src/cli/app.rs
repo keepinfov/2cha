@@ -17,11 +17,12 @@ use crate::core::error::Result;
     about = "High-performance VPN utility with IPv4/IPv6 support",
     long_about = None,
     after_help = "Examples:\n  \
-        sudo 2cha up -c client.toml\n  \
-        sudo 2cha server -c server.toml\n  \
+        2cha up -c client.toml\n  \
+        2cha server -c server.toml\n  \
         2cha genkey > vpn.key\n  \
         2cha init client > client.toml\n  \
-        2cha status",
+        2cha status\n\n\
+        Note: Commands requiring root will automatically prompt for sudo password.",
     styles = get_styles(),
 )]
 struct Cli {
