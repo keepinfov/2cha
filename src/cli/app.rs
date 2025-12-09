@@ -194,6 +194,6 @@ pub fn run() -> Result<()> {
 
 /// Print error and exit
 pub fn exit_with_error(e: impl std::fmt::Display) -> ! {
-    eprintln!("{} Error: {}", style("✗").red().bold(), e);
+    eprintln!(" {}Error: {}", style("❌").red().bold(), e);
     std::process::exit(1);
 }
