@@ -1,6 +1,6 @@
 [package]
 name = "twocha"
-version = "0.6.2-2"
+version = "0.6.3"
 edition = "2021"
 description = "2cha - High-performance VPN utility with IPv4/IPv6 support"
 license = "MIT"
@@ -32,6 +32,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 clap = { version = "4.5", features = ["derive", "color", "wrap_help"] }
 console = "0.16.1"
 indicatif = "0.18.3"
+rpassword = "7.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

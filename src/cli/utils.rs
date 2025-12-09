@@ -3,6 +3,8 @@
 //! Helper functions for CLI operations.
 
 use crate::core::error::{Result, VpnError};
+use console::style;
+use std::io::Write;
 
 /// Path constants
 #[cfg(unix)]
@@ -230,4 +232,126 @@ pub fn daemonize() -> Result<()> {
 
     // Exit the parent process
     std::process::exit(0);
+}
+
+/// Check if running as root/superuser (Unix)
+#[cfg(unix)]
+pub fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Check if running as Administrator (Windows)
+#[cfg(windows)]
+pub fn is_root() -> bool {
+    // On Windows, we check by attempting to open a privileged resource
+    // For simplicity, we'll check if we can write to a system location
+    use std::fs::OpenOptions;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open("C:\\Windows\\Temp\\2cha_admin_check.tmp")
+        .map(|_| {
+            let _ = std::fs::remove_file("C:\\Windows\\Temp\\2cha_admin_check.tmp");
+            true
+        })
+        .unwrap_or(false)
+}
+
+/// Prompt for sudo password and re-execute current command with elevated privileges (Unix)
+/// Returns Ok(()) if elevation succeeded (and the process exits), or Err if it failed
+#[cfg(unix)]
+pub fn elevate_with_sudo() -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()
+        .map_err(|e| VpnError::Config(format!("Failed to get executable path: {}", e)))?;
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Print prompt for password
+    println!(
+        " {}This command requires root privileges.",
+        style("⚡").yellow().bold()
+    );
+    print!("   {}", style("[sudo] password: ").bold());
+    std::io::stdout().flush().ok();
+
+    // Read password securely (hidden input)
+    let password = rpassword::read_password()
+        .map_err(|e| VpnError::Config(format!("Failed to read password: {}", e)))?;
+
+    // Try to validate sudo credentials first with -v (validate)
+    let validate = Command::new("sudo")
+        .args(["-S", "-v"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut validate_child = match validate {
+        Ok(child) => child,
+        Err(e) => {
+            println!("\n {}sudo not available: {}", style("❌").red().bold(), e);
+            return Err(VpnError::Config("sudo not available".into()));
+        }
+    };
+
+    // Write password to sudo's stdin
+    if let Some(ref mut stdin) = validate_child.stdin {
+        writeln!(stdin, "{}", password).ok();
+    }
+
+    let validate_status = validate_child.wait();
+    if validate_status.map(|s| !s.success()).unwrap_or(true) {
+        println!(" {}Authentication failed", style("❌").red().bold());
+        return Err(VpnError::Config("sudo authentication failed".into()));
+    }
+
+    // Now run the actual command with cached credentials
+    // Use -n (non-interactive) since credentials should be cached
+    let mut child = Command::new("sudo")
+        .args(["-S", "--"])
+        .arg(&exe)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| VpnError::Config(format!("Failed to execute sudo: {}", e)))?;
+
+    // Write password again (in case cache expired)
+    if let Some(ref mut stdin) = child.stdin {
+        writeln!(stdin, "{}", password).ok();
+    }
+
+    // Wait for the elevated process and exit with its status
+    let status = child
+        .wait()
+        .map_err(|e| VpnError::Config(format!("Failed to wait for sudo process: {}", e)))?;
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Prompt for elevation on Windows (shows message to run as Administrator)
+#[cfg(windows)]
+pub fn elevate_with_sudo() -> Result<()> {
+    println!(
+        " {}This command requires Administrator privileges.",
+        style("⚡").yellow().bold()
+    );
+    println!(
+        "  Please run this command from an {} prompt.",
+        style("Administrator").cyan().bold()
+    );
+    println!();
+    println!("  Right-click Command Prompt or PowerShell and select");
+    println!("  \"{}\"", style("Run as administrator").green());
+    std::process::exit(1);
+}
+
+/// Check if elevation is needed and prompt for sudo password if so
+/// This is a convenience function that combines is_root() and elevate_with_sudo()
+pub fn ensure_root() -> Result<()> {
+    if !is_root() {
+        elevate_with_sudo()?;
+    }
+    Ok(())
 }

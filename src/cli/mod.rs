@@ -4,6 +4,8 @@
 
 mod app;
 mod commands;
+#[allow(dead_code)]
+mod output;
 mod utils;
 
 pub use app::{exit_with_error, run};
