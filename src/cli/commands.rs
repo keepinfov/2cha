@@ -2,16 +2,15 @@
 //!
 //! Command implementations for the VPN CLI.
 
+use crate::cli::output::{
+    format_success, icon_error, print_connected, print_disconnected, print_permission_denied, Icons,
+};
 #[cfg(unix)]
 use crate::cli::utils::can_signal_process;
 #[cfg(unix)]
 use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
     daemonize, ensure_root, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
-};
-use crate::cli::output::{
-    format_success, icon_error, print_connected, print_disconnected, print_permission_denied,
-    Icons,
 };
 use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
@@ -631,11 +630,7 @@ pub fn cmd_init(mode: &str) -> Result<()> {
         "client" | "c" => print!("{}", example_client_config()),
         "server" | "s" => print!("{}", example_server_config()),
         _ => {
-            eprintln!(
-                "{} Invalid mode: {}",
-                icon_error(),
-                style(mode).yellow()
-            );
+            eprintln!("{} Invalid mode: {}", icon_error(), style(mode).yellow());
             eprintln!(
                 "  Use {} or {}",
                 style("client").green(),
