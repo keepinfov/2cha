@@ -2,9 +2,7 @@
 //!
 //! Command implementations for the VPN CLI.
 
-use crate::cli::output::{
-    format_success, icon_error, print_connected, print_disconnected, print_permission_denied, Icons,
-};
+use crate::cli::output::{format_success, icon_error, print_connected, print_disconnected, Icons};
 #[cfg(unix)]
 use crate::cli::utils::can_signal_process;
 #[cfg(unix)]
@@ -16,7 +14,6 @@ use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
 use crate::vpn::{client, server};
 
-use super::output;
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;

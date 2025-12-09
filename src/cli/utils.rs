@@ -269,8 +269,8 @@ pub fn elevate_with_sudo() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Print prompt for password
-    print!(
-        " {}This command requires root privileges.\n",
+    println!(
+        " {}This command requires root privileges.",
         style("⚡").yellow().bold()
     );
     print!("   {}", style("[sudo] password: ").bold());

@@ -4,6 +4,7 @@
 
 mod app;
 mod commands;
+#[allow(dead_code)]
 mod output;
 mod utils;
 
