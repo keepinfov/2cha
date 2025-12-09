@@ -9,6 +9,10 @@ use crate::cli::utils::LOG_FILE;
 use crate::cli::utils::{
     daemonize, ensure_root, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
 };
+use crate::cli::output::{
+    format_success, icon_error, print_connected, print_disconnected, print_permission_denied,
+    Icons,
+};
 use crate::core::config::{example_client_config, example_server_config};
 use crate::core::error::Result;
 use crate::vpn::{client, server};
@@ -42,7 +46,7 @@ fn create_spinner(msg: &str) -> ProgressBar {
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            output::print_connected("VPN already connected");
+            print_connected("VPN already connected");
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -119,7 +123,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Result<()> {
     if is_running() {
         if !quiet {
-            output::print_connected("VPN already connected");
+            print_connected("VPN already connected");
             println!(
                 "  Use {} or {}",
                 style("2cha status").cyan(),
@@ -200,7 +204,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 #[cfg(unix)]
 pub fn cmd_down() -> Result<()> {
     if !is_running() {
-        output::print_disconnected("VPN not connected");
+        print_disconnected("VPN not connected");
         return Ok(());
     }
 
@@ -219,19 +223,19 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
 
             if !is_running() {
-                spinner.finish_with_message(output::format_success("Disconnected"));
+                spinner.finish_with_message(format_success("Disconnected"));
             } else {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
                 std::fs::remove_file(PID_FILE).ok();
-                spinner.finish_with_message(output::format_success("Force disconnected"));
+                spinner.finish_with_message(format_success("Force disconnected"));
             }
             return Ok(());
         }
     }
 
-    output::print_disconnected("VPN not connected");
+    print_disconnected("VPN not connected");
     Ok(())
 }
 
@@ -249,12 +253,12 @@ pub fn cmd_down() -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
             std::fs::remove_file(PID_FILE).ok();
 
-            spinner.finish_with_message(output::format_success("Disconnected"));
+            spinner.finish_with_message(format_success("Disconnected"));
             return Ok(());
         }
     }
 
-    output::print_disconnected("VPN not connected");
+    print_disconnected("VPN not connected");
     Ok(())
 }
 
@@ -280,13 +284,13 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}     {} Connected",
             style("Status:").dim(),
-            style("●").green().bold()
+            style(Icons::CONNECTED).green().bold()
         );
     } else {
         println!(
             "  {}     {} Disconnected",
             style("Status:").dim(),
-            style("○").red()
+            style(Icons::DISCONNECTED).red()
         );
     }
 
@@ -297,14 +301,14 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}  {} {}",
             style("Interface:").dim(),
-            style("●").green(),
+            style(Icons::CONNECTED).green(),
             style(tun_name).cyan()
         );
     } else {
         println!(
             "  {}  {} {}",
             style("Interface:").dim(),
-            style("○").dim(),
+            style(Icons::DISCONNECTED).dim(),
             tun_name
         );
     }
@@ -344,7 +348,7 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {} {}",
             style("Routing:").dim(),
-            style("●").yellow(),
+            style(Icons::CONNECTED).yellow(),
             style("Full tunnel").yellow(),
             style(mode).dim()
         );
@@ -352,14 +356,14 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {}",
             style("Routing:").dim(),
-            style("●").green(),
+            style(Icons::CONNECTED).green(),
             style("Split tunnel").green()
         );
     } else {
         println!(
             "  {}    {} {}",
             style("Routing:").dim(),
-            style("○").dim(),
+            style(Icons::DISCONNECTED).dim(),
             style("Normal").dim()
         );
     }
@@ -376,7 +380,7 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {} {}",
             style("Gateway:").dim(),
-            style("●").green(),
+            style(Icons::CONNECTED).green(),
             style("Forwarding").green(),
             style(mode).dim()
         );
@@ -444,13 +448,13 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}     {} Connected",
             style("Status:").dim(),
-            style("*").green().bold()
+            style(Icons::CONNECTED).green().bold()
         );
     } else {
         println!(
             "  {}     {} Disconnected",
             style("Status:").dim(),
-            style("o").red()
+            style(Icons::DISCONNECTED).red()
         );
     }
 
@@ -461,14 +465,14 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}  {} {}",
             style("Interface:").dim(),
-            style("*").green(),
+            style(Icons::CONNECTED).green(),
             style(tun_name).cyan()
         );
     } else {
         println!(
             "  {}  {} {}",
             style("Interface:").dim(),
-            style("o").dim(),
+            style(Icons::DISCONNECTED).dim(),
             tun_name
         );
     }
@@ -508,7 +512,7 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {} {}",
             style("Routing:").dim(),
-            style("*").yellow(),
+            style(Icons::CONNECTED).yellow(),
             style("Full tunnel").yellow(),
             style(mode).dim()
         );
@@ -516,14 +520,14 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {}",
             style("Routing:").dim(),
-            style("*").green(),
+            style(Icons::CONNECTED).green(),
             style("Split tunnel").green()
         );
     } else {
         println!(
             "  {}    {} {}",
             style("Routing:").dim(),
-            style("o").dim(),
+            style(Icons::DISCONNECTED).dim(),
             style("Normal").dim()
         );
     }
@@ -540,7 +544,7 @@ pub fn cmd_status() -> Result<()> {
         println!(
             "  {}    {} {} {}",
             style("Gateway:").dim(),
-            style("*").green(),
+            style(Icons::CONNECTED).green(),
             style("Forwarding").green(),
             style(mode).dim()
         );
@@ -628,8 +632,8 @@ pub fn cmd_init(mode: &str) -> Result<()> {
         "server" | "s" => print!("{}", example_server_config()),
         _ => {
             eprintln!(
-                " {} Invalid mode: {}",
-                output::icon_error(),
+                "{} Invalid mode: {}",
+                icon_error(),
                 style(mode).yellow()
             );
             eprintln!(
