@@ -11,17 +11,17 @@ impl Icons {
     #[cfg(unix)]
     pub const SUCCESS: &'static str = "✅";
     #[cfg(windows)]
-    pub const SUCCESS: &'static str = "[OK]";
+    pub const SUCCESS: &'static str = "[OK] ";
 
     #[cfg(unix)]
     pub const ERROR: &'static str = "❌";
     #[cfg(windows)]
-    pub const ERROR: &'static str = "[ERR]";
+    pub const ERROR: &'static str = "[ERR] ";
 
     #[cfg(unix)]
     pub const WARNING: &'static str = "⚡";
     #[cfg(windows)]
-    pub const WARNING: &'static str = "[!]";
+    pub const WARNING: &'static str = "[!] ";
 
     #[cfg(unix)]
     pub const CONNECTED: &'static str = "●";
@@ -61,17 +61,17 @@ pub fn icon_disconnected() -> StyledObject<&'static str> {
 
 /// Print a success message
 pub fn print_success(msg: &str) {
-    println!(" {} {}", icon_success(), msg);
+    println!(" {}{}", icon_success(), msg);
 }
 
 /// Print an error message to stderr
 pub fn print_error(msg: impl std::fmt::Display) {
-    eprintln!(" {} Error: {}", icon_error(), msg);
+    eprintln!(" {}Error: {}", icon_error(), msg);
 }
 
 /// Print a warning message
 pub fn print_warning(msg: &str) {
-    println!(" {} {}", icon_warning(), msg);
+    println!(" {}{}", icon_warning(), msg);
 }
 
 /// Print status: connected
