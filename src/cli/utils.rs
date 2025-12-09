@@ -291,11 +291,7 @@ pub fn elevate_with_sudo() -> Result<()> {
     let mut validate_child = match validate {
         Ok(child) => child,
         Err(e) => {
-            println!(
-                "\n{} sudo not available: {}",
-                style("✗").red().bold(),
-                e
-            );
+            println!("\n{} sudo not available: {}", style("✗").red().bold(), e);
             return Err(VpnError::Config("sudo not available".into()));
         }
     };
