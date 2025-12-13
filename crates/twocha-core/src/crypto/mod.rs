@@ -1,0 +1,88 @@
+//! # Cryptographic Module
+//!
+//! Production-ready AEAD implementations using RustCrypto.
+//!
+//! This module provides secure, audited cryptographic primitives:
+//! - ChaCha20-Poly1305 (RFC 8439)
+//! - AES-256-GCM (NIST SP 800-38D)
+
+mod aead;
+mod aes_gcm;
+mod util;
+
+pub use aead::ChaCha20Poly1305;
+pub use aes_gcm::Aes256Gcm;
+pub use util::{constant_time_compare, secure_zero};
+
+use crate::config::CipherSuite;
+use twocha_protocol::{Result, CHACHA20_NONCE_SIZE};
+
+/// Unified AEAD cipher interface
+pub trait Cipher: Send + Sync {
+    fn encrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>>;
+    fn decrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>>;
+    fn name(&self) -> &'static str;
+}
+
+impl Cipher for ChaCha20Poly1305 {
+    fn encrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        ChaCha20Poly1305::encrypt(self, nonce, plaintext, aad)
+    }
+    fn decrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        ChaCha20Poly1305::decrypt(self, nonce, ciphertext, aad)
+    }
+    fn name(&self) -> &'static str {
+        "ChaCha20-Poly1305"
+    }
+}
+
+impl Cipher for Aes256Gcm {
+    fn encrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        Aes256Gcm::encrypt(self, nonce, plaintext, aad)
+    }
+    fn decrypt(
+        &self,
+        nonce: &[u8; CHACHA20_NONCE_SIZE],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        Aes256Gcm::decrypt(self, nonce, ciphertext, aad)
+    }
+    fn name(&self) -> &'static str {
+        "AES-256-GCM"
+    }
+}
+
+/// Create cipher from config
+#[allow(dead_code)]
+pub fn create_cipher(cipher_type: CipherSuite, key: &[u8; 32]) -> Box<dyn Cipher> {
+    match cipher_type {
+        CipherSuite::ChaCha20Poly1305 => Box::new(ChaCha20Poly1305::new(key)),
+        CipherSuite::Aes256Gcm => Box::new(Aes256Gcm::new(key)),
+    }
+}
