@@ -1,0 +1,22 @@
+[package]
+name = "twocha-core"
+description = "2cha VPN core functionality - configuration and cryptography"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "twocha_core"
+
+[dependencies]
+twocha-protocol.workspace = true
+
+serde.workspace = true
+toml.workspace = true
+
+# Cryptography (RustCrypto - pure Rust, safe, audited)
+chacha20poly1305.workspace = true
+aes-gcm.workspace = true
+zeroize.workspace = true
