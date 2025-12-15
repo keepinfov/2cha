@@ -1,5 +1,5 @@
 ```
-  ██████╗  ██████╗██╗  ██╗ █████╗ 
+  ██████╗  ██████╗██╗  ██╗ █████╗
   ╚════██╗██╔════╝██║  ██║██╔══██╗
    █████╔╝██║     ███████║███████║
   ██╔═══╝ ██║     ██╔══██║██╔══██║
@@ -9,7 +9,25 @@
 
 # 2cha - High-Performance VPN Utility
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
+
 Minimalist VPN tool with IPv4/IPv6 dual-stack support, powered by ChaCha20-Poly1305 encryption.
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Building](#building)
+  - [Standard Build](#standard-build)
+  - [Static Build](#static-build-portable-binary)
+  - [Cross-Compilation](#cross-compilation)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [Routing Modes](#routing-modes)
+- [Performance Tuning](#performance-tuning)
+- [Nix/NixOS](#nixnixos)
+- [License](#license)
 
 ## Features
 
@@ -51,22 +69,55 @@ sudo 2cha up -c client.toml
 sudo 2cha down
 ```
 
-## Static Build (Portable Binary)
+## Building
+
+### Standard Build
 
 ```bash
-# Install musl target
-rustup target add x86_64-unknown-linux-musl
+cargo build --release
+```
 
-# Build static binary
+### Static Build (Portable Binary)
+
+Create a fully static binary with musl:
+
+```bash
+# x86_64 (64-bit Intel/AMD)
+rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 
-# Or use build script
-./build.sh static
-
-# For ARM64 (Raspberry Pi, etc.)
+# ARM64 (Raspberry Pi 4, modern ARM servers)
 rustup target add aarch64-unknown-linux-musl
-./build.sh static-arm
+cargo build --release --target aarch64-unknown-linux-musl
+
+# ARMv7 (Raspberry Pi 3, older ARM devices)
+rustup target add armv7-unknown-linux-musleabihf
+cargo build --release --target armv7-unknown-linux-musleabihf
 ```
+
+### Cross-Compilation
+
+For easier cross-compilation, use [cross](https://github.com/cross-rs/cross):
+
+```bash
+# Install cross
+cargo install cross
+
+# Build for different architectures
+cross build --release --target aarch64-unknown-linux-musl
+cross build --release --target armv7-unknown-linux-musleabihf
+cross build --release --target x86_64-unknown-linux-musl
+
+# 32-bit x86
+cross build --release --target i686-unknown-linux-musl
+```
+
+**Supported targets:**
+- `x86_64-unknown-linux-gnu` / `x86_64-unknown-linux-musl` (64-bit x86)
+- `i686-unknown-linux-gnu` / `i686-unknown-linux-musl` (32-bit x86)
+- `aarch64-unknown-linux-gnu` / `aarch64-unknown-linux-musl` (64-bit ARM)
+- `armv7-unknown-linux-gnueabihf` / `armv7-unknown-linux-musleabihf` (ARMv7)
+- `arm-unknown-linux-gnueabihf` / `arm-unknown-linux-musleabihf` (ARM)
 
 ## Configuration
 
@@ -205,23 +256,51 @@ multi_queue = true            # Multi-queue TUN
 cpu_affinity = [0, 1]         # Pin to CPUs
 ```
 
-## NixOS
-You can build it using
+## Nix/NixOS
+
+### Using Flakes
+
+Build and run directly from GitHub:
 ```bash
-# dynamic version 
+# Run without installing
+nix run github:keepinfov/2cha -- --help
+
+# Build dynamic version
 nix build github:keepinfov/2cha
 
-# static version (musl, supports aarch64 and x86_64) 
+# Build static version (musl, supports x86_64 and aarch64)
 nix build github:keepinfov/2cha#static
 
-# or if you wanna build by your own
-git clone https://github.com/keepinfov/2cha
-nix develop
-cargo build --release
+# Install to profile
+nix profile install github:keepinfov/2cha
 ```
-or you can just run it using
+
+### Local Development
+
 ```bash
-nix run github:keepinfov/2cha
+# Clone repository
+git clone https://github.com/keepinfov/2cha
+cd 2cha
+
+# Enter development shell (includes Rust, cargo-watch, etc.)
+nix develop
+
+# Build with cargo
+cargo build --release
+
+# Or build with Nix
+nix build          # Dynamic binary
+nix build .#static # Static musl binary
+```
+
+### For Non-Flake Users
+
+```bash
+# Build with nix-build
+nix-build
+
+# Development shell
+nix-shell
 ```
 
 ## License
