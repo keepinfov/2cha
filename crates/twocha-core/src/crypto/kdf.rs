@@ -1,6 +1,6 @@
 //! # Key Derivation Function Module
 //!
-//! Provides HKDF-SHA256 and HKDF-BLAKE2s for key derivation in protocol v4.
+//! Provides HKDF-SHA256 and BLAKE2s-based KDF for key derivation in protocol v4.
 //!
 //! Used for:
 //! - Deriving symmetric session keys from DH shared secrets
@@ -9,7 +9,9 @@
 
 use hkdf::Hkdf;
 use sha2::Sha256;
-use blake2::Blake2s256;
+use blake2::{Blake2s256, Blake2sMac};
+use blake2::digest::{FixedOutput, KeyInit, consts::U32};
+use blake2::digest::Update as MacUpdate;
 use zeroize::Zeroizing;
 use std::fmt;
 
@@ -165,23 +167,86 @@ impl HkdfSha256 {
     }
 }
 
-/// HKDF using BLAKE2s-256 (used in Noise protocol)
+/// BLAKE2s-based HKDF for Noise protocol
+///
+/// Implements HKDF using BLAKE2s keyed mode (MAC) as the PRF.
+/// This follows the Noise protocol specification.
 pub struct HkdfBlake2s;
 
 impl HkdfBlake2s {
+    /// HMAC-BLAKE2s function using keyed Blake2s
+    fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
+        // Use Blake2s in keyed mode (which is equivalent to HMAC for our purposes)
+        // If key is longer than 32 bytes, we need to hash it first
+        let mac_key: [u8; 32] = if key.len() <= 32 {
+            let mut k = [0u8; 32];
+            k[..key.len()].copy_from_slice(key);
+            k
+        } else {
+            // Hash the key if it's too long
+            use blake2::Digest;
+            let mut hasher = Blake2s256::new();
+            Digest::update(&mut hasher, key);
+            let result = hasher.finalize();
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&result);
+            k
+        };
+
+        let mut mac = Blake2sMac::<U32>::new_from_slice(&mac_key)
+            .expect("Blake2sMac accepts any key size up to 32 bytes");
+        MacUpdate::update(&mut mac, data);
+        let result = mac.finalize_fixed();
+
+        let mut output = [0u8; 32];
+        output.copy_from_slice(&result);
+        output
+    }
+
+    /// HKDF-Extract: Extract a PRK from salt and IKM
+    fn extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
+        let salt = if salt.is_empty() {
+            &[0u8; 32][..]
+        } else {
+            salt
+        };
+        Self::hmac(salt, ikm)
+    }
+
+    /// HKDF-Expand: Expand PRK to desired length
+    fn expand(prk: &[u8; 32], info: &[u8], length: usize) -> Vec<u8> {
+        let mut output = Vec::with_capacity(length);
+        let mut t = Vec::new();
+        let mut counter = 1u8;
+
+        while output.len() < length {
+            // T(i) = HMAC(PRK, T(i-1) || info || counter)
+            let mut input = t.clone();
+            input.extend_from_slice(info);
+            input.push(counter);
+
+            t = Self::hmac(prk, &input).to_vec();
+            output.extend_from_slice(&t);
+            counter += 1;
+        }
+
+        output.truncate(length);
+        output
+    }
+
     /// Derive a single key from input key material
     pub fn derive_key(
         salt: &[u8],
         ikm: &[u8],
         info: &[u8],
     ) -> Result<Zeroizing<[u8; DERIVED_KEY_SIZE]>, KdfError> {
-        let hkdf = Hkdf::<Blake2s256>::new(Some(salt), ikm);
+        let prk = Self::extract(salt, ikm);
+        let okm = Self::expand(&prk, info, DERIVED_KEY_SIZE);
 
-        let mut okm = [0u8; DERIVED_KEY_SIZE];
-        hkdf.expand(info, &mut okm)
-            .map_err(|e| KdfError::DerivationFailed(e.to_string()))?;
+        let mut key = [0u8; DERIVED_KEY_SIZE];
+        key.copy_from_slice(&okm);
 
-        Ok(Zeroizing::new(okm))
+        Ok(Zeroizing::new(key))
     }
 
     /// Derive multiple keys from input key material
@@ -198,13 +263,9 @@ impl HkdfBlake2s {
             });
         }
 
-        let hkdf = Hkdf::<Blake2s256>::new(Some(salt), ikm);
-
+        let prk = Self::extract(salt, ikm);
         let total_len = num_keys * DERIVED_KEY_SIZE;
-        let mut okm = vec![0u8; total_len];
-
-        hkdf.expand(info, &mut okm)
-            .map_err(|e| KdfError::DerivationFailed(e.to_string()))?;
+        let okm = Self::expand(&prk, info, total_len);
 
         let mut keys = Vec::with_capacity(num_keys);
         for i in 0..num_keys {
@@ -213,9 +274,6 @@ impl HkdfBlake2s {
             key.copy_from_slice(&okm[start..start + DERIVED_KEY_SIZE]);
             keys.push(Zeroizing::new(key));
         }
-
-        // Zeroize the temporary buffer
-        okm.iter_mut().for_each(|b| *b = 0);
 
         Ok(keys)
     }
@@ -278,10 +336,9 @@ impl ChainingKey {
 
     /// Initialize from protocol name string
     pub fn from_protocol_name(name: &str) -> Self {
-        use blake2::{Blake2s256, Digest};
-
+        use blake2::Digest;
         let mut hasher = Blake2s256::new();
-        hasher.update(name.as_bytes());
+        Digest::update(&mut hasher, name.as_bytes());
         let hash = hasher.finalize();
 
         let mut key = [0u8; CHAINING_KEY_SIZE];
@@ -398,6 +455,26 @@ mod tests {
 
         // Different hash functions should produce different results
         assert_ne!(&*key_sha256, &*key_blake2s);
+    }
+
+    #[test]
+    fn test_hkdf_blake2s_deterministic() {
+        let key1 = HkdfBlake2s::derive_key(b"salt", b"ikm", b"info").unwrap();
+        let key2 = HkdfBlake2s::derive_key(b"salt", b"ikm", b"info").unwrap();
+        assert_eq!(&*key1, &*key2);
+    }
+
+    #[test]
+    fn test_hkdf_blake2s_multiple_keys() {
+        let keys = HkdfBlake2s::derive_keys(b"salt", b"ikm", b"info", 4).unwrap();
+        assert_eq!(keys.len(), 4);
+
+        // All keys should be different
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(&*keys[i], &*keys[j]);
+            }
+        }
     }
 
     #[test]

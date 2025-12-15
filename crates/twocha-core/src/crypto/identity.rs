@@ -159,7 +159,7 @@ impl Drop for Ed25519KeyPair {
 impl fmt::Debug for Ed25519KeyPair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ed25519KeyPair")
-            .field("public_key", &hex::encode(self.public_key()))
+            .field("public_key", &hex::encode(&self.public_key()))
             .finish_non_exhaustive()
     }
 }
@@ -235,7 +235,7 @@ impl Ed25519PublicKey {
 impl fmt::Debug for Ed25519PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ed25519PublicKey")
-            .field("key", &hex::encode(self.to_bytes()))
+            .field("key", &hex::encode(&self.to_bytes()))
             .finish()
     }
 }

@@ -7,7 +7,7 @@
 //! - Session key derivation
 //! - Perfect Forward Secrecy (PFS)
 
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use rand_core::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 use std::fmt;
