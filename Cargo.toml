@@ -31,6 +31,26 @@ chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 
+# Asymmetric cryptography (v4 protocol)
+ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
+curve25519-dalek = { version = "4.1", features = ["zeroize"] }
+
+# Key derivation and hashing
+hkdf = "0.12"
+sha2 = "0.10"
+blake2 = "0.10"
+
+# Random number generation
+rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+
+# CRC for checksums
+crc32fast = "1.4"
+
+# Base64 encoding for keys
+base64 = "0.22"
+
 # CLI/TUI
 clap = { version = "4.5", features = ["derive", "color", "wrap_help"] }
 console = "0.16.1"

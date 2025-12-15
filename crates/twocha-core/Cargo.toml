@@ -20,3 +20,23 @@ toml.workspace = true
 chacha20poly1305.workspace = true
 aes-gcm.workspace = true
 zeroize.workspace = true
+
+# Asymmetric cryptography (v4 protocol)
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+curve25519-dalek.workspace = true
+
+# Key derivation and hashing
+hkdf.workspace = true
+sha2.workspace = true
+blake2.workspace = true
+
+# Random number generation
+rand_core.workspace = true
+rand.workspace = true
+
+# CRC for checksums
+crc32fast.workspace = true
+
+# Base64 encoding
+base64.workspace = true
