@@ -596,13 +596,128 @@ pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
 }
 
 /// Generate encryption key
-pub fn cmd_genkey() -> Result<()> {
-    let key = generate_key()?;
+pub fn cmd_genkey(key_type: crate::cli::app::KeyTypeArg, output: Option<&str>) -> Result<()> {
+    use crate::cli::app::KeyTypeArg;
+    use twocha_core::crypto::KeyFile;
 
-    for byte in &key {
-        print!("{:02x}", byte);
+    match key_type {
+        KeyTypeArg::Ed25519 => {
+            // Generate Ed25519 key file
+            let keyfile = KeyFile::generate_ed25519()
+                .map_err(|e| VpnError::Config(format!("Failed to generate key: {}", e)))?;
+
+            if let Some(path) = output {
+                // Write to file
+                keyfile.write_to_file(path)
+                    .map_err(|e| VpnError::Config(format!("Failed to write key file: {}", e)))?;
+
+                eprintln!("{}", format_success(&format!("Generated Ed25519 key: {}", style(path).green())));
+                eprintln!("  Public key: {}", style(keyfile.public_key_base64()).cyan());
+            } else {
+                // Write binary to stdout (for piping to file)
+                use std::io::Write;
+                let bytes = keyfile.to_bytes();
+                std::io::stdout().write_all(&bytes)
+                    .map_err(|e| VpnError::Io(e))?;
+            }
+        }
+        KeyTypeArg::Symmetric => {
+            // Generate legacy symmetric key
+            let key = generate_key()?;
+
+            if let Some(path) = output {
+                // Write as key file
+                let keyfile = KeyFile::new_symmetric(&key);
+                keyfile.write_to_file(path)
+                    .map_err(|e| VpnError::Config(format!("Failed to write key file: {}", e)))?;
+
+                eprintln!("{}", format_success(&format!("Generated symmetric key: {}", style(path).green())));
+                eprintln!("  {} Legacy key format (protocol v3)", style("Warning:").yellow());
+            } else {
+                // Print hex to stdout (legacy behavior)
+                for byte in &key {
+                    print!("{:02x}", byte);
+                }
+                println!();
+            }
+        }
     }
-    println!();
+
+    Ok(())
+}
+
+/// Extract public key from key file
+pub fn cmd_pubkey(key_file: &str, format: crate::cli::app::OutputFormat) -> Result<()> {
+    use crate::cli::app::OutputFormat;
+    use twocha_core::crypto::{KeyFile, KeyType};
+
+    let keyfile = KeyFile::read_from_file(key_file)
+        .map_err(|e| VpnError::Config(format!("Failed to read key file: {}", e)))?;
+
+    if keyfile.key_type() == KeyType::Symmetric {
+        eprintln!("{} Symmetric keys don't have a public key", icon_error());
+        eprintln!("  This is a legacy protocol v3 key");
+        std::process::exit(1);
+    }
+
+    let output = match format {
+        OutputFormat::Base64 => keyfile.public_key_base64(),
+        OutputFormat::Hex => {
+            keyfile.public_key().iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        }
+    };
+
+    println!("{}", output);
+    Ok(())
+}
+
+/// Show key file information
+pub fn cmd_keyinfo(key_file: &str) -> Result<()> {
+    use twocha_core::crypto::{KeyFile, KeyFileInfo, KeyType};
+    use std::time::{UNIX_EPOCH, Duration};
+
+    let keyfile = KeyFile::read_from_file(key_file)
+        .map_err(|e| VpnError::Config(format!("Failed to read key file: {}", e)))?;
+
+    let info = KeyFileInfo::from_keyfile(&keyfile);
+
+    // Format creation time
+    let created = UNIX_EPOCH + Duration::from_secs(info.created_at);
+    let created_str = match created.elapsed() {
+        Ok(elapsed) => {
+            let secs = elapsed.as_secs();
+            if secs < 60 {
+                format!("{} seconds ago", secs)
+            } else if secs < 3600 {
+                format!("{} minutes ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{} hours ago", secs / 3600)
+            } else {
+                format!("{} days ago", secs / 86400)
+            }
+        }
+        Err(_) => "in the future".to_string(),
+    };
+
+    println!("{}", style("Key Information").bold());
+    println!("  {}: {}", style("File").dim(), key_file);
+    println!("  {}: {}", style("Type").dim(), info.key_type);
+    println!("  {}: {} ({})", style("Created").dim(), info.created_at, created_str);
+
+    match keyfile.key_type() {
+        KeyType::Ed25519 => {
+            println!("  {}: {}", style("Public Key (base64)").dim(), info.public_key_base64);
+            println!("  {}: {}", style("Public Key (hex)").dim(), info.public_key_hex);
+            println!("\n  {} Protocol v4 (asymmetric cryptography)", style("Protocol:").cyan());
+        }
+        KeyType::Symmetric => {
+            println!("\n  {} Protocol v3 (symmetric key)", style("Protocol:").yellow());
+            println!("  {} Consider upgrading to Ed25519 keys", style("Warning:").yellow());
+        }
+    }
+
     Ok(())
 }
 
