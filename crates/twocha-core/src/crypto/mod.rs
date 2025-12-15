@@ -24,6 +24,7 @@ mod util;
 pub mod identity;
 pub mod key_exchange;
 pub mod kdf;
+pub mod keyfile;
 
 pub use aead::ChaCha20Poly1305;
 pub use aes_gcm::Aes256Gcm;
@@ -35,6 +36,7 @@ pub use key_exchange::{
     X25519StaticKeyPair, X25519EphemeralKeyPair, X25519PublicKey, KeyExchangeError,
 };
 pub use kdf::{HkdfSha256, HkdfBlake2s, ChainingKey, KdfError};
+pub use keyfile::{KeyFile, KeyFileInfo, KeyType, KeyFileError};
 
 use crate::config::CipherSuite;
 use twocha_protocol::{Result, CHACHA20_NONCE_SIZE};
