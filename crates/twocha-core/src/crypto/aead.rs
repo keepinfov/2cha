@@ -7,25 +7,21 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305 as ChaChaCipher, Nonce,
 };
-use zeroize::ZeroizeOnDrop;
 
 use twocha_protocol::{
     CryptoError, Result, CHACHA20_KEY_SIZE, CHACHA20_NONCE_SIZE, POLY1305_TAG_SIZE,
 };
 
 /// ChaCha20-Poly1305 AEAD cipher (RustCrypto implementation)
-#[derive(ZeroizeOnDrop)]
 pub struct ChaCha20Poly1305 {
-    #[zeroize(skip)]
     cipher: ChaChaCipher,
-    key: [u8; CHACHA20_KEY_SIZE],
 }
 
 impl ChaCha20Poly1305 {
     /// Create new ChaCha20-Poly1305 instance
     pub fn new(key: &[u8; CHACHA20_KEY_SIZE]) -> Self {
         let cipher = ChaChaCipher::new_from_slice(key).expect("valid key size");
-        ChaCha20Poly1305 { cipher, key: *key }
+        ChaCha20Poly1305 { cipher }
     }
 
     /// Encrypt with authentication

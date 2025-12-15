@@ -7,7 +7,6 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm as AesGcmCipher, Nonce,
 };
-use zeroize::ZeroizeOnDrop;
 
 use twocha_protocol::{CryptoError, Result, CHACHA20_NONCE_SIZE}; // 12 bytes, same for GCM
 
@@ -15,18 +14,15 @@ const AES_GCM_TAG_SIZE: usize = 16;
 const AES_256_KEY_SIZE: usize = 32;
 
 /// AES-256-GCM AEAD cipher (RustCrypto implementation)
-#[derive(ZeroizeOnDrop)]
 pub struct Aes256Gcm {
-    #[zeroize(skip)]
     cipher: AesGcmCipher,
-    key: [u8; AES_256_KEY_SIZE],
 }
 
 impl Aes256Gcm {
     /// Create new AES-256-GCM instance
     pub fn new(key: &[u8; AES_256_KEY_SIZE]) -> Self {
         let cipher = AesGcmCipher::new_from_slice(key).expect("valid key size");
-        Aes256Gcm { cipher, key: *key }
+        Aes256Gcm { cipher }
     }
 
     /// Encrypt with authentication
