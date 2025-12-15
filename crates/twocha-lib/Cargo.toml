@@ -1,0 +1,23 @@
+[package]
+name = "twocha-lib"
+description = "2cha VPN library - platform abstraction and VPN handlers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "twocha_lib"
+
+[dependencies]
+twocha-protocol.workspace = true
+twocha-core.workspace = true
+
+log.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ctrlc.workspace = true

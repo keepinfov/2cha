@@ -1,0 +1,279 @@
+# 2cha VPN Protocol Specification v3
+# This file documents the wire protocol used by 2cha VPN
+
+[metadata]
+name = "2cha VPN Protocol"
+version = 3
+description = "Lightweight VPN protocol using ChaCha20-Poly1305 AEAD encryption"
+changelog = "Version 3: Upgraded to production RustCrypto implementations"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Protocol Constants
+# ─────────────────────────────────────────────────────────────────────────────
+[constants]
+protocol_version = 3
+protocol_header_size = 24      # bytes
+max_packet_size = 1500         # bytes (MTU)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cryptography Specifications
+# ─────────────────────────────────────────────────────────────────────────────
+[crypto]
+cipher = "ChaCha20-Poly1305"
+key_size = 32                  # bytes (256 bits)
+nonce_size = 12                # bytes (96 bits)
+auth_tag_size = 16             # bytes (128 bits)
+
+[crypto.chacha20]
+algorithm = "ChaCha20"
+key_size = 32                  # bytes
+nonce_size = 12                # bytes
+rounds = 20
+
+[crypto.poly1305]
+algorithm = "Poly1305"
+tag_size = 16                  # bytes
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Packet Types
+# ─────────────────────────────────────────────────────────────────────────────
+[packet_types]
+
+[packet_types.handshake_init]
+type_id = 1
+name = "HandshakeInit"
+description = "Initial handshake packet from client to server"
+has_payload = true
+payload_description = "Client identification and capability information"
+
+[packet_types.handshake_response]
+type_id = 2
+name = "HandshakeResponse"
+description = "Handshake response from server to client"
+has_payload = true
+payload_description = "Server acknowledgment and configuration"
+
+[packet_types.data]
+type_id = 3
+name = "Data"
+description = "Encrypted IP packet payload"
+has_payload = true
+payload_description = "Encrypted IPv4 or IPv6 packet data"
+
+[packet_types.keepalive]
+type_id = 4
+name = "Keepalive"
+description = "Keep connection alive, prevent NAT timeout"
+has_payload = false
+payload_description = "Empty payload"
+
+[packet_types.disconnect]
+type_id = 5
+name = "Disconnect"
+description = "Graceful connection termination"
+has_payload = false
+payload_description = "Optional disconnect reason"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Packet Header Structure (24 bytes)
+# ─────────────────────────────────────────────────────────────────────────────
+[packet_header]
+total_size = 24                # bytes
+description = """
+Packet header layout:
+┌────────┬────────┬────────────┬──────────────────────────┐
+│ Version│  Type  │  Counter   │         Nonce            │
+│ (1)    │  (1)   │   (4)      │         (12)             │
+└────────┴────────┴────────────┴──────────────────────────┘
+│ Reserved (6)                                            │
+└─────────────────────────────────────────────────────────┘
+"""
+
+[packet_header.fields]
+
+[packet_header.fields.version]
+offset = 0
+size = 1                       # bytes
+type = "u8"
+description = "Protocol version (must be 3)"
+value = 3
+
+[packet_header.fields.packet_type]
+offset = 1
+size = 1                       # bytes
+type = "u8"
+description = "Packet type identifier (1-5)"
+valid_range = [1, 5]
+
+[packet_header.fields.counter]
+offset = 2
+size = 4                       # bytes
+type = "u32"
+endianness = "little"
+description = "Packet counter for replay protection and nonce generation"
+
+[packet_header.fields.nonce]
+offset = 6
+size = 12                      # bytes
+type = "bytes"
+description = "ChaCha20 nonce: counter (4 bytes) + random (8 bytes)"
+generation = "counter (LE) || random_bytes(8)"
+
+[packet_header.fields.reserved]
+offset = 18
+size = 6                       # bytes
+type = "bytes"
+description = "Reserved for future use (must be zero)"
+value = [0, 0, 0, 0, 0, 0]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security Features
+# ─────────────────────────────────────────────────────────────────────────────
+[security]
+
+[security.replay_protection]
+enabled = true
+algorithm = "sliding_window"
+window_size = 64               # packets
+description = "64-bit bitmap sliding window for anti-replay protection"
+
+[security.replay_protection.rules]
+counter_zero = "reject"        # Counter 0 is always rejected
+duplicate = "reject"           # Duplicate counters are rejected
+too_old = "reject"             # Packets outside window are rejected
+out_of_order = "accept"        # Out-of-order packets within window are accepted
+
+[security.aead]
+algorithm = "ChaCha20-Poly1305"
+authenticated_data = "packet_header"
+encrypted_data = "payload"
+description = "AEAD encryption authenticates header and encrypts payload"
+
+[security.nonce_generation]
+method = "counter_plus_random"
+counter_bytes = 4              # First 4 bytes of nonce
+random_bytes = 8               # Last 8 bytes of nonce
+entropy_source = "/dev/urandom"
+fallback = "timestamp_nanos"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Protocol Flow
+# ─────────────────────────────────────────────────────────────────────────────
+[protocol_flow]
+
+[protocol_flow.handshake]
+description = "Connection establishment between client and server"
+steps = [
+    "Client sends HandshakeInit with identification",
+    "Server validates and responds with HandshakeResponse",
+    "Session established, data transfer begins"
+]
+
+[protocol_flow.data_transfer]
+description = "Normal encrypted data packet exchange"
+steps = [
+    "TUN device receives IP packet",
+    "Packet is encrypted with ChaCha20-Poly1305",
+    "Header + encrypted payload sent over UDP",
+    "Receiver validates, decrypts, and injects to TUN"
+]
+
+[protocol_flow.keepalive]
+description = "Periodic keepalive to maintain NAT mappings"
+interval = 25                  # seconds (default)
+steps = [
+    "Send Keepalive packet every N seconds",
+    "Prevents NAT timeout",
+    "No response required"
+]
+
+[protocol_flow.disconnect]
+description = "Graceful connection termination"
+steps = [
+    "Either side sends Disconnect packet",
+    "Receiver cleans up session state",
+    "Connection closed"
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Error Handling
+# ─────────────────────────────────────────────────────────────────────────────
+[error_handling]
+
+[error_handling.version_mismatch]
+action = "reject_packet"
+log_level = "warn"
+description = "Packet with wrong protocol version is rejected"
+
+[error_handling.invalid_packet_type]
+action = "reject_packet"
+log_level = "warn"
+description = "Unknown packet type identifier is rejected"
+
+[error_handling.authentication_failed]
+action = "reject_packet"
+log_level = "warn"
+description = "Poly1305 authentication tag verification failed"
+
+[error_handling.replay_detected]
+action = "reject_packet"
+log_level = "debug"
+description = "Duplicate or too-old packet counter detected"
+
+[error_handling.packet_too_small]
+action = "reject_packet"
+log_level = "warn"
+description = "Packet smaller than minimum header size"
+
+[error_handling.packet_too_large]
+action = "reject_packet"
+log_level = "warn"
+description = "Packet larger than maximum MTU"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Implementation Notes
+# ─────────────────────────────────────────────────────────────────────────────
+[implementation]
+
+[implementation.performance]
+zero_copy = true
+description = "Header serialization supports zero-copy into existing buffers"
+
+[implementation.compatibility]
+min_mtu = 1280                 # bytes (IPv6 minimum)
+max_mtu = 1500                 # bytes (standard Ethernet)
+recommended_mtu = 1420         # bytes (accounts for protocol overhead)
+
+[implementation.transport]
+protocol = "UDP"
+description = "Protocol runs over UDP for low latency and NAT traversal"
+
+[implementation.dependencies]
+crypto_library = "RustCrypto"
+chacha20_crate = "chacha20"
+poly1305_crate = "poly1305"
+description = "Uses production-grade RustCrypto implementations"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Version History
+# ─────────────────────────────────────────────────────────────────────────────
+[version_history]
+
+[version_history.v3]
+released = true
+description = "Upgraded to production RustCrypto implementations"
+changes = [
+    "Replaced custom crypto with RustCrypto",
+    "Improved security and code quality",
+    "Production-ready AEAD implementation"
+]
+
+[version_history.v2]
+released = true
+description = "Previous version with custom crypto"
+deprecated = true
+
+[version_history.v1]
+released = true
+description = "Initial protocol version"
+deprecated = true
