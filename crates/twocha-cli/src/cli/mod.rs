@@ -10,8 +10,8 @@ mod utils;
 
 pub use app::{exit_with_error, run};
 
-use twocha_protocol::PROTOCOL_VERSION;
 use console::style;
+use twocha_protocol::PROTOCOL_VERSION;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

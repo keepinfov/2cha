@@ -2,9 +2,9 @@
 //!
 //! Helper functions for CLI operations.
 
-use twocha_protocol::{Result, VpnError};
 use console::style;
 use std::io::Write;
+use twocha_protocol::{Result, VpnError};
 
 /// Path constants
 #[cfg(unix)]

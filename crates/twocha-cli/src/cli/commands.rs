@@ -11,8 +11,8 @@ use crate::cli::utils::{
     daemonize, ensure_root, format_bytes, generate_key, is_running, setup_logging, PID_FILE,
 };
 use twocha_core::{example_client_config, example_server_config};
-use twocha_protocol::{Result, VpnError};
 use twocha_lib::vpn::{client, server};
+use twocha_protocol::{Result, VpnError};
 
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -57,12 +57,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 
     // Convert config path to absolute before daemonizing (daemon changes cwd to /)
     let config_path = std::fs::canonicalize(config_path)
-        .map_err(|e| {
-            VpnError::Config(format!(
-                "Config file '{}' not found: {}",
-                config_path, e
-            ))
-        })?
+        .map_err(|e| VpnError::Config(format!("Config file '{}' not found: {}", config_path, e)))?
         .to_string_lossy()
         .to_string();
 
@@ -134,12 +129,7 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
 
     // Convert config path to absolute before daemonizing
     let config_path = std::fs::canonicalize(config_path)
-        .map_err(|e| {
-            VpnError::Config(format!(
-                "Config file '{}' not found: {}",
-                config_path, e
-            ))
-        })?
+        .map_err(|e| VpnError::Config(format!("Config file '{}' not found: {}", config_path, e)))?
         .to_string_lossy()
         .to_string();
 
@@ -588,12 +578,7 @@ pub fn cmd_server(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -
 
     // Convert config path to absolute before daemonizing
     let config_path = std::fs::canonicalize(config_path)
-        .map_err(|e| {
-            VpnError::Config(format!(
-                "Config file '{}' not found: {}",
-                config_path, e
-            ))
-        })?
+        .map_err(|e| VpnError::Config(format!("Config file '{}' not found: {}", config_path, e)))?
         .to_string_lossy()
         .to_string();
 

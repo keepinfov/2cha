@@ -5,8 +5,8 @@
 
 #![cfg(windows)]
 
-use twocha_protocol::Result;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use twocha_protocol::Result;
 
 /// IP version detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

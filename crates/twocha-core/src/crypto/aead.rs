@@ -9,7 +9,9 @@ use chacha20poly1305::{
 };
 use zeroize::ZeroizeOnDrop;
 
-use twocha_protocol::{CryptoError, Result, CHACHA20_KEY_SIZE, CHACHA20_NONCE_SIZE, POLY1305_TAG_SIZE};
+use twocha_protocol::{
+    CryptoError, Result, CHACHA20_KEY_SIZE, CHACHA20_NONCE_SIZE, POLY1305_TAG_SIZE,
+};
 
 /// ChaCha20-Poly1305 AEAD cipher (RustCrypto implementation)
 #[derive(ZeroizeOnDrop)]

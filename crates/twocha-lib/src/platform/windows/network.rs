@@ -4,13 +4,13 @@
 
 #![cfg(windows)]
 
+use std::net::{SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 use twocha_core::ChaCha20Poly1305;
 use twocha_protocol::{
     NetworkError, PacketHeader, PacketType, ReplayWindow, Result, MAX_PACKET_SIZE,
     PROTOCOL_HEADER_SIZE,
 };
-use std::net::{SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
 
 /// Tunnel configuration
 #[derive(Debug, Clone)]

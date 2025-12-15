@@ -16,4 +16,6 @@ pub use config::{
     GatewaySection, Ipv4ClientSection, Ipv4ServerSection, Ipv6ClientSection, Ipv6ServerSection,
     LoggingSection, PerformanceSection, ServerConfig, TimeoutsSection, TunSection,
 };
-pub use crypto::{constant_time_compare, create_cipher, secure_zero, Aes256Gcm, ChaCha20Poly1305, Cipher};
+pub use crypto::{
+    constant_time_compare, create_cipher, secure_zero, Aes256Gcm, ChaCha20Poly1305, Cipher,
+};

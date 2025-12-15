@@ -2,12 +2,12 @@
 //!
 //! High-performance TUN device with IPv4/IPv6 support.
 
-use twocha_core::prefix_to_netmask_v4;
-use twocha_protocol::{Result, TunError, VpnError};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::{AsRawFd, RawFd};
+use twocha_core::prefix_to_netmask_v4;
+use twocha_protocol::{Result, TunError, VpnError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONSTANTS
