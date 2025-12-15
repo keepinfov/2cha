@@ -30,7 +30,7 @@
         # Common package attributes
         commonAttrs = {
           pname = "2cha";
-          version = "0.6.3";
+          version = "0.7.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 
@@ -50,11 +50,16 @@
         });
 
         # Static musl build
+        muslTarget = {
+          "x86_64-linux" = "x86_64-unknown-linux-musl";
+          "aarch64-linux" = "aarch64-unknown-linux-musl";
+        }.${system} or (throw "Unsupported system for static build: ${system}");
+
         twochaStatic = pkgs.pkgsStatic.rustPlatform.buildRustPackage (commonAttrs // {
           pname = "2cha-static";
           nativeBuildInputs = with pkgs.pkgsStatic; [ pkg-config ];
 
-          CARGO_BUILD_TARGET = "${system}-unknown-linux-musl";
+          CARGO_BUILD_TARGET = muslTarget;
           CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
 
           meta = commonAttrs.meta // {
