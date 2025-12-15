@@ -38,18 +38,88 @@ pub struct TunSection {
 }
 
 /// Cryptographic configuration
+///
+/// Supports both protocol v4 (asymmetric) and v3 (symmetric) keys:
+///
+/// Protocol v4 (recommended):
+/// ```toml
+/// [crypto]
+/// private_key_file = "/etc/2cha/server.key"  # .2cha-key file
+/// server_public_key = "base64-encoded-key"   # Client only: server's public key
+/// ```
+///
+/// Protocol v3 (legacy):
+/// ```toml
+/// [crypto]
+/// key = "hex-encoded-symmetric-key"
+/// # or
+/// key_file = "/path/to/key.txt"  # Plain text file with hex key
+/// ```
 #[derive(Debug, Deserialize)]
 pub struct CryptoSection {
     #[serde(default)]
     pub cipher: CipherSuite,
+
+    // Protocol v4 (asymmetric) - recommended
+    /// Path to .2cha-key file containing Ed25519 key pair
+    #[serde(default)]
+    pub private_key_file: Option<String>,
+    /// Server's public key (base64, for client configs only)
+    #[serde(default)]
+    pub server_public_key: Option<String>,
+
+    // Protocol v3 (symmetric) - legacy
+    /// Symmetric key as hex string (deprecated)
     #[serde(default)]
     pub key: Option<String>,
+    /// Path to file containing hex-encoded symmetric key (deprecated)
     #[serde(default)]
     pub key_file: Option<String>,
 }
 
+/// Key configuration result
+#[derive(Debug)]
+pub enum KeyConfig {
+    /// Ed25519 key pair from .2cha-key file
+    Ed25519 {
+        /// Path to the key file
+        key_file_path: String,
+    },
+    /// Symmetric key (legacy protocol v3)
+    Symmetric {
+        /// 32-byte symmetric key
+        key: [u8; 32],
+    },
+}
+
 impl CryptoSection {
+    /// Determine the key configuration type
+    pub fn get_key_config(&self) -> Result<KeyConfig, ConfigError> {
+        // Protocol v4: Check for .2cha-key file first
+        if let Some(ref path) = self.private_key_file {
+            // Verify file exists
+            if !std::path::Path::new(path).exists() {
+                return Err(ConfigError::IoError(format!(
+                    "Key file not found: {}", path
+                )));
+            }
+            return Ok(KeyConfig::Ed25519 {
+                key_file_path: path.clone(),
+            });
+        }
+
+        // Protocol v3: Legacy symmetric key
+        let key = self.get_symmetric_key()?;
+        Ok(KeyConfig::Symmetric { key })
+    }
+
+    /// Get symmetric key (legacy method for backward compatibility)
     pub fn get_key(&self) -> Result<[u8; 32], ConfigError> {
+        self.get_symmetric_key()
+    }
+
+    /// Get symmetric key from config
+    fn get_symmetric_key(&self) -> Result<[u8; 32], ConfigError> {
         if let Some(ref path) = self.key_file {
             let content = fs::read_to_string(path)
                 .map_err(|e| ConfigError::IoError(format!("Cannot read key file: {}", e)))?;
@@ -62,6 +132,30 @@ impl CryptoSection {
             return hex_to_key(&hex);
         }
         Err(ConfigError::MissingKey)
+    }
+
+    /// Get server's public key (for client configs)
+    pub fn get_server_public_key(&self) -> Result<Option<[u8; 32]>, ConfigError> {
+        match &self.server_public_key {
+            Some(b64) => {
+                let bytes = base64_decode(b64)?;
+                if bytes.len() != 32 {
+                    return Err(ConfigError::InvalidKey(format!(
+                        "Server public key must be 32 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                Ok(Some(key))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if using protocol v4 (asymmetric keys)
+    pub fn is_v4(&self) -> bool {
+        self.private_key_file.is_some()
     }
 }
 
@@ -234,6 +328,14 @@ pub fn hex_to_key(hex: &str) -> Result<[u8; 32], ConfigError> {
             .map_err(|_| ConfigError::InvalidKey("Invalid hex character".to_string()))?;
     }
     Ok(key)
+}
+
+/// Decode base64 string to bytes
+pub fn base64_decode(b64: &str) -> Result<Vec<u8>, ConfigError> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| ConfigError::InvalidKey(format!("Invalid base64: {}", e)))
 }
 
 pub fn prefix_to_netmask_v4(prefix: u8) -> [u8; 4] {
