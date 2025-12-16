@@ -16,6 +16,7 @@ pub mod handshake;
 pub mod noise;
 pub mod mac;
 pub mod packet_v4;
+pub mod session;
 
 pub use constants::*;
 pub use error::{CryptoError, NetworkError, ProtocolError, Result, TunError, VpnError};
@@ -37,4 +38,7 @@ pub use mac::{
 pub use packet_v4::{
     DataPacket, DataPacketHeader, PacketTypeV4, identify_packet_type,
     PACKET_TYPE_DATA, MIN_DATA_PACKET_SIZE, MAX_PAYLOAD_SIZE,
+};
+pub use session::{
+    NoiseInitiator, NoiseResponder, Session, random_session_index,
 };
