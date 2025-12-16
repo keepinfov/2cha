@@ -14,6 +14,7 @@ mod packet;
 mod replay;
 pub mod handshake;
 pub mod noise;
+pub mod mac;
 
 pub use constants::*;
 pub use error::{CryptoError, NetworkError, ProtocolError, Result, TunError, VpnError};
@@ -26,4 +27,9 @@ pub use handshake::{
 pub use noise::{
     HandshakeState, SymmetricState, TransportKey, NoiseError,
     NOISE_PROTOCOL_NAME, NOISE_CONSTRUCTION, NOISE_IDENTIFIER, HASH_SIZE, KEY_SIZE,
+};
+pub use mac::{
+    MacCalculator, CookieGenerator, CookieReply,
+    LABEL_MAC1, LABEL_COOKIE, COOKIE_SIZE, COOKIE_SECRET_SIZE,
+    COOKIE_VALIDITY_SECS, COOKIE_REPLY_SIZE,
 };
