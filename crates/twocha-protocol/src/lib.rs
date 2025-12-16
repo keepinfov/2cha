@@ -15,6 +15,7 @@ mod replay;
 pub mod handshake;
 pub mod noise;
 pub mod mac;
+pub mod packet_v4;
 
 pub use constants::*;
 pub use error::{CryptoError, NetworkError, ProtocolError, Result, TunError, VpnError};
@@ -32,4 +33,8 @@ pub use mac::{
     MacCalculator, CookieGenerator, CookieReply,
     LABEL_MAC1, LABEL_COOKIE, COOKIE_SIZE, COOKIE_SECRET_SIZE,
     COOKIE_VALIDITY_SECS, COOKIE_REPLY_SIZE,
+};
+pub use packet_v4::{
+    DataPacket, DataPacketHeader, PacketTypeV4, identify_packet_type,
+    PACKET_TYPE_DATA, MIN_DATA_PACKET_SIZE, MAX_PAYLOAD_SIZE,
 };
