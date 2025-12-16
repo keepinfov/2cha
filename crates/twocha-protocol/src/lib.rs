@@ -13,6 +13,7 @@ mod error;
 mod packet;
 mod replay;
 pub mod handshake;
+pub mod noise;
 
 pub use constants::*;
 pub use error::{CryptoError, NetworkError, ProtocolError, Result, TunError, VpnError};
@@ -21,4 +22,8 @@ pub use replay::ReplayWindow;
 pub use handshake::{
     HandshakeInit, HandshakeResponse, HandshakeType, Tai64n,
     ENCRYPTED_STATIC_SIZE, ENCRYPTED_TIMESTAMP_SIZE, ENCRYPTED_EMPTY_SIZE, TAI64N_SIZE,
+};
+pub use noise::{
+    HandshakeState, SymmetricState, TransportKey, NoiseError,
+    NOISE_PROTOCOL_NAME, NOISE_CONSTRUCTION, NOISE_IDENTIFIER, HASH_SIZE, KEY_SIZE,
 };
