@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 
-Minimalist VPN tool with IPv4/IPv6 dual-stack support, powered by ChaCha20-Poly1305 encryption.
+Minimalist anti-censorship VPN with IPv4/IPv6 dual-stack support. Protocol v4: Noise_IK handshake (X25519 + ChaCha20-Poly1305, forward secrecy, per-client keys) wrapped in QUIC mimicry to resist DPI classification.
 
 ## Table of Contents
 
@@ -24,6 +24,7 @@ Minimalist VPN tool with IPv4/IPv6 dual-stack support, powered by ChaCha20-Poly1
   - [Cross-Compilation](#cross-compilation)
 - [Configuration](#configuration)
 - [Commands](#commands)
+- [Protocol](#protocol)
 - [Routing Modes](#routing-modes)
 - [Performance Tuning](#performance-tuning)
 - [Nix/NixOS](#nixnixos)
@@ -31,11 +32,14 @@ Minimalist VPN tool with IPv4/IPv6 dual-stack support, powered by ChaCha20-Poly1
 
 ## Features
 
+- **DPI Resistance** - Traffic is indistinguishable from QUIC: no constant protocol bytes on the wire, randomized padding, jittered keepalives
+- **Modern Crypto** - Noise_IK handshake (X25519), ChaCha20-Poly1305 or AES-256-GCM, forward secrecy, automatic rekeying every 2 minutes
+- **Per-Client Keys** - Server authenticates clients against a public-key whitelist; no shared PSK
+- **Anti-DoS** - Server silently drops unauthenticated packets (no amplification); cookie challenges under load
 - **IPv4/IPv6 Dual-Stack** - Full support for both protocols
-- **High Performance** - Optimized crypto and I/O
-- **Static Binary** - Compile with musl for portable binaries
+- **Roaming** - Sessions survive client IP changes
 - **Flexible Routing** - Full tunnel or split tunnel modes
-- **Modern Crypto** - ChaCha20-Poly1305 or AES-256-GCM
+- **Static Binary** - Compile with musl for portable binaries
 
 ## Quick Start
 
@@ -45,16 +49,23 @@ git clone https://github.com/keepinfov/2cha
 cd 2cha
 
 # Build
-cargo install --path .
+cargo install --path crates/twocha-cli
 
-# Generate key (save this!)
-2cha genkey > vpn.key
+# Generate keypairs (private key file is created with 0600 permissions,
+# the public key is printed to stdout)
+2cha genkey server.key   # on the server
+2cha genkey client.key   # on each client
+
+# Exchange PUBLIC keys:
+#   - put each client's public key into the server's [[peers]] list
+#   - put the server's public key into the client's server_public_key
+2cha pubkey client.key
 
 # Create configs
 2cha init server > server.toml
 2cha init client > client.toml
 
-# Edit configs, add key, then:
+# Edit configs (key paths + public keys), then:
 
 # On server
 sudo 2cha server -c server.toml
@@ -133,7 +144,8 @@ mtu = 1420
 
 [crypto]
 cipher = "chacha20-poly1305"
-key = "your_64_char_hex_key"
+private_key_file = "/etc/2cha/client.key"        # raw 32 bytes, must be 0600
+server_public_key = "SERVER_PUBLIC_KEY_BASE64"   # from: 2cha pubkey server.key
 
 # IPv4 settings
 [ipv4]
@@ -167,7 +179,12 @@ name = "tun0"
 mtu = 1420
 
 [crypto]
-key = "same_key_as_clients"
+private_key_file = "/etc/2cha/server.key"   # raw 32 bytes, must be 0600
+
+# Authorized clients (public-key whitelist)
+[[peers]]
+public_key = "CLIENT_PUBLIC_KEY_BASE64"     # from: 2cha pubkey client.key
+name = "laptop"
 
 [ipv4]
 enable = true
@@ -196,7 +213,8 @@ external_interface = "eth0"
 | `status` | Show connection status |
 | `toggle` | Toggle connection on/off |
 | `server` | Run as VPN server |
-| `genkey` | Generate encryption key |
+| `genkey <file>` | Generate X25519 keypair (private key → file, public key → stdout) |
+| `pubkey <file>` | Print the public key for a private key file |
 | `init` | Create config template |
 
 ## Options
@@ -207,6 +225,15 @@ external_interface = "eth0"
 -v, --verbose         Detailed output
 -q, --quiet           Minimal output
 ```
+
+## Protocol
+
+Protocol v4 is documented in [docs/protocol-v4.md](docs/protocol-v4.md). In short:
+
+- **Handshake**: Noise_IK (X25519 + ChaCha20-Poly1305 + BLAKE2s). The client knows the server's public key in advance; the server authenticates clients against its `[[peers]]` whitelist. Every session gets fresh ephemeral keys (forward secrecy).
+- **Anti-DoS**: every handshake message carries a MAC (keyed BLAKE2s over the receiver's public key) verified before any expensive crypto; packets failing it are dropped with zero bytes in response. Under load the server demands a stateless cookie round-trip.
+- **Wire format**: all packets are framed as plausible QUIC v1 (RFC 9000) — handshakes look like Initial/Handshake long-header packets padded to ≥1200 bytes, data looks like short-header packets. No version, type, or counter fields appear in plaintext.
+- **Sessions**: deterministic 64-bit nonces, sliding-window replay protection, rekey after 2 minutes, keepalives with randomized size and ±30% interval jitter.
 
 ## Routing Modes
 

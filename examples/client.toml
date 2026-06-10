@@ -1,9 +1,18 @@
-# 2cha VPN Client Configuration v0.3
+# 2cha VPN Client Configuration v1.0
 # Usage: sudo 2cha up -c client.toml
 
 [client]
+# Server address - can be IP:port (e.g., "1.2.3.4:51820") or domain:port (e.g., "vpn.example.com:51820")
 server = "vpn.example.com:51820"
-prefer_ipv6 = false           # Prefer IPv6 connection to server
+# Prefer IPv6 addresses when multiple IPs are resolved
+prefer_ipv6 = false
+# DNS lookup mode:
+#   auto   - Try IP parsing first, then DNS if needed (default, recommended)
+#   always - Always perform DNS lookup, even for IPs
+#   never  - Never perform DNS lookup, IP addresses only
+#   true   - Same as "always" (backward compatibility)
+#   false  - Same as "never" (backward compatibility)
+dns_lookup = "auto"
 
 [tun]
 name = "tun0"
@@ -11,9 +20,11 @@ mtu = 1420
 queue_len = 500
 
 [crypto]
-cipher = "chacha20-poly1305"  # Must match server!
-# key = "SAME_KEY_AS_SERVER"
-# key_file = "/etc/2cha/client.key"
+cipher = "chacha20-poly1305"
+# Generate with: 2cha genkey /etc/2cha/client.key
+private_key_file = "/etc/2cha/client.key"
+# Server's public key. Get it with: 2cha pubkey server.key (on the server)
+server_public_key = "SERVER_PUBLIC_KEY_BASE64"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IPv4 Configuration
@@ -22,9 +33,9 @@ cipher = "chacha20-poly1305"  # Must match server!
 enable = true
 address = "10.0.0.2"
 prefix = 24
-route_all = false             # Route ALL IPv4 traffic through VPN
-routes = []                   # Specific routes, e.g., ["10.0.0.0/24", "192.168.100.0/24"]
-exclude_ips = []              # Always bypass VPN, e.g., ["192.168.1.0/24"]
+route_all = false
+routes = []
+exclude_ips = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IPv6 Configuration
@@ -33,17 +44,17 @@ exclude_ips = []              # Always bypass VPN, e.g., ["192.168.1.0/24"]
 enable = false
 address = "fd00:2cha::2"
 prefix = 64
-route_all = false             # Route ALL IPv6 traffic through VPN
-routes = []                   # Specific IPv6 routes
-exclude_ips = []              # Always bypass VPN
+route_all = false
+routes = []
+exclude_ips = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DNS Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 [dns]
-servers_v4 = []               # e.g., ["1.1.1.1", "8.8.8.8"]
-servers_v6 = []               # e.g., ["2606:4700:4700::1111"]
-search = []                   # Search domains
+servers_v4 = []
+servers_v6 = []
+search = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tuning
@@ -54,9 +65,6 @@ socket_send_buffer = 2097152
 batch_size = 32
 multi_queue = false
 cpu_affinity = []
-
-[timeouts]
-keepalive = 25
 
 [logging]
 level = "info"
