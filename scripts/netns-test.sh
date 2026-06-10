@@ -125,10 +125,21 @@ EOF
 
 # --- optional wire capture ---------------------------------------------------
 if [ -n "$CAPTURE" ]; then
-    ip netns exec "$NS_S" tcpdump -i "$VETH_S" -w "$CAPTURE" "udp port $PORT" \
-        >/dev/null 2>&1 &
-    DUMP_PID=$!
-    sleep 0.5
+    if ! command -v tcpdump >/dev/null 2>&1; then
+        echo "WARN: tcpdump not found in PATH, skipping capture" >&2
+        echo "      (NixOS hint: sudo --preserve-env=PATH, with tcpdump in a nix shell)" >&2
+        CAPTURE=""
+    else
+        ip netns exec "$NS_S" tcpdump -i "$VETH_S" -w "$CAPTURE" "udp port $PORT" \
+            >"$WORK/tcpdump.log" 2>&1 &
+        DUMP_PID=$!
+        sleep 0.5
+        if ! kill -0 "$DUMP_PID" 2>/dev/null; then
+            echo "WARN: tcpdump failed to start, skipping capture" >&2
+            cat "$WORK/tcpdump.log" >&2
+            CAPTURE=""
+        fi
+    fi
 fi
 
 # --- run ---------------------------------------------------------------------
@@ -177,9 +188,18 @@ fi
 
 if [ -n "$CAPTURE" ]; then
     sleep 1
-    echo "== capture written to $CAPTURE"
-    echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
-    echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e data | xxd -r -p)"
+    # SIGINT makes tcpdump flush and close the file cleanly
+    kill -INT "$DUMP_PID" 2>/dev/null
+    wait "$DUMP_PID" 2>/dev/null
+    DUMP_PID=""
+    if [ -s "$CAPTURE" ]; then
+        echo "== capture written to $CAPTURE"
+        echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
+        echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e data | xxd -r -p)"
+    else
+        echo "WARN: capture file is missing or empty: $CAPTURE" >&2
+        cat "$WORK/tcpdump.log" >&2
+    fi
 fi
 
 echo "OK"
