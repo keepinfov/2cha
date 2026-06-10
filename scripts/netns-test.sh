@@ -195,7 +195,7 @@ if [ -n "$CAPTURE" ]; then
     if [ -s "$CAPTURE" ]; then
         echo "== capture written to $CAPTURE"
         echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
-        echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e data | xxd -r -p)"
+        echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e udp.payload | tr -d '\\n:,' | xxd -r -p)"
     else
         echo "WARN: capture file is missing or empty: $CAPTURE" >&2
         cat "$WORK/tcpdump.log" >&2
