@@ -14,6 +14,9 @@ pub struct ServerConfig {
     pub server: ServerSection,
     pub tun: TunSection,
     pub crypto: CryptoSection,
+    /// Authorized peers (whitelist). Handshakes from unknown keys are dropped.
+    #[serde(default)]
+    pub peers: Vec<PeerSection>,
     #[serde(default)]
     pub ipv4: Ipv4ServerSection,
     #[serde(default)]
@@ -26,6 +29,16 @@ pub struct ServerConfig {
     pub timeouts: TimeoutsSection,
     #[serde(default)]
     pub logging: LoggingSection,
+}
+
+/// An authorized peer entry
+#[derive(Debug, Deserialize)]
+pub struct PeerSection {
+    /// Base64-encoded X25519 public key
+    pub public_key: String,
+    /// Optional human-readable label for logs
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,24 +125,46 @@ impl ServerConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-
-        // Resolve relative key_file path to absolute based on config file's directory
-        if let Some(ref key_file) = config.crypto.key_file {
-            let key_path = Path::new(key_file);
-            if key_path.is_relative() {
-                if let Some(config_dir) = path.parent() {
-                    let absolute_key_path = config_dir.join(key_path);
-                    if let Ok(canonical) = fs::canonicalize(&absolute_key_path) {
-                        config.crypto.key_file = Some(canonical.to_string_lossy().to_string());
-                    } else {
-                        config.crypto.key_file =
-                            Some(absolute_key_path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-
+        resolve_key_path(&mut config.crypto.private_key_file, path);
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Early validation: fail at load time, not deep in the runtime
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.listen_addr()?;
+        self.listen_addr_v6()?;
+        self.tun_ipv4()?;
+        self.tun_ipv6()?;
+        if self.server.max_clients == 0 {
+            return Err(ConfigError::Invalid("max_clients must be > 0".into()));
+        }
+        if self.ipv4.prefix > 32 {
+            return Err(ConfigError::Invalid("ipv4.prefix must be 0..=32".into()));
+        }
+        if self.ipv6.prefix > 128 {
+            return Err(ConfigError::Invalid("ipv6.prefix must be 0..=128".into()));
+        }
+        if self.peers.is_empty() {
+            return Err(ConfigError::Invalid(
+                "no [[peers]] configured; add at least one client public_key".into(),
+            ));
+        }
+        self.peer_keys()?;
+        Ok(())
+    }
+
+    /// Decoded whitelist of authorized peer public keys
+    pub fn peer_keys(&self) -> Result<Vec<[u8; 32]>, ConfigError> {
+        self.peers
+            .iter()
+            .map(|p| decode_config_public_key(&p.public_key))
+            .collect()
+    }
+
+    /// Load the server identity key
+    pub fn identity(&self) -> Result<crate::crypto::Identity, ConfigError> {
+        self.crypto.identity()
     }
 
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
@@ -172,15 +207,95 @@ impl ServerConfig {
             _ => Ok(None),
         }
     }
+}
 
-    pub fn key(&self) -> Result<[u8; 32], ConfigError> {
-        self.crypto.get_key()
+/// Add or update a `[[peers]]` entry in a config file, preserving
+/// comments and formatting. Written atomically (tmp file + rename).
+pub fn upsert_peer_in_file(
+    path: &Path,
+    public_key: &str,
+    name: Option<&str>,
+) -> Result<(), ConfigError> {
+    decode_config_public_key(public_key)?;
+    edit_config(path, |doc| {
+        let peers = peers_array(doc)?;
+        for peer in peers.iter_mut() {
+            if peer.get("public_key").and_then(|v| v.as_str()) == Some(public_key) {
+                if let Some(name) = name {
+                    peer["name"] = toml_edit::value(name);
+                }
+                return Ok(());
+            }
+        }
+        let mut table = toml_edit::Table::new();
+        table["public_key"] = toml_edit::value(public_key);
+        if let Some(name) = name {
+            table["name"] = toml_edit::value(name);
+        }
+        peers.push(table);
+        Ok(())
+    })
+}
+
+/// Remove a `[[peers]]` entry from a config file.
+/// Returns whether the key was present.
+pub fn remove_peer_from_file(path: &Path, public_key: &str) -> Result<bool, ConfigError> {
+    let mut removed = false;
+    edit_config(path, |doc| {
+        let peers = peers_array(doc)?;
+        let before = peers.len();
+        peers.retain(|peer| peer.get("public_key").and_then(|v| v.as_str()) != Some(public_key));
+        removed = peers.len() != before;
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
+fn peers_array(
+    doc: &mut toml_edit::DocumentMut,
+) -> Result<&mut toml_edit::ArrayOfTables, ConfigError> {
+    doc.entry("peers")
+        .or_insert(toml_edit::Item::ArrayOfTables(
+            toml_edit::ArrayOfTables::new(),
+        ))
+        .as_array_of_tables_mut()
+        .ok_or_else(|| ConfigError::Invalid("'peers' is not an array of tables".into()))
+}
+
+fn edit_config(
+    path: &Path,
+    mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), ConfigError>,
+) -> Result<(), ConfigError> {
+    let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| ConfigError::ParseError(format!("{}", e)))?;
+    mutate(&mut doc)?;
+
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, doc.to_string()).map_err(|e| ConfigError::IoError(e.to_string()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        ConfigError::IoError(e.to_string())
+    })?;
+    Ok(())
+}
+
+/// Resolve a relative key path against the config file's directory
+pub(super) fn resolve_key_path(key_file: &mut String, config_path: &Path) {
+    let key_path = Path::new(key_file.as_str());
+    if key_path.is_relative() {
+        if let Some(config_dir) = config_path.parent() {
+            let absolute = config_dir.join(key_path);
+            let resolved = fs::canonicalize(&absolute).unwrap_or(absolute);
+            *key_file = resolved.to_string_lossy().to_string();
+        }
     }
 }
 
 /// Generate example server config
 pub fn example_server_config() -> &'static str {
-    r#"# 2cha VPN Server Configuration v0.6
+    r#"# 2cha VPN Server Configuration v1.0
 # Usage: sudo 2cha server -c server.toml
 
 [server]
@@ -195,8 +310,13 @@ queue_len = 500
 
 [crypto]
 cipher = "chacha20-poly1305"
-# key = "YOUR_64_HEX_CHAR_KEY"
-# key_file = "/etc/2cha/server.key"
+# Generate with: 2cha genkey /etc/2cha/server.key
+private_key_file = "/etc/2cha/server.key"
+
+# Authorized clients. Get a client's key with: 2cha pubkey client.key
+[[peers]]
+public_key = "CLIENT_PUBLIC_KEY_BASE64"
+name = "laptop"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IPv4 Configuration
@@ -241,12 +361,70 @@ multi_queue = false
 cpu_affinity = []
 
 [timeouts]
-keepalive = 25
+# Drop a client session after this many seconds without traffic
 session = 180
-handshake = 10
 
 [logging]
 level = "info"
 # file = "/var/log/2cha.log"
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY_A: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+    const KEY_B: &str = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=";
+
+    fn tmp_config() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "2cha-cfg-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.toml");
+        std::fs::write(
+            &path,
+            "# keep this comment\n[server]\nlisten = \"0.0.0.0:51820\"\n\n[tun]\n\n[crypto]\nprivate_key_file = \"server.key\"\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn test_upsert_and_remove_peer() {
+        let path = tmp_config();
+
+        upsert_peer_in_file(&path, KEY_A, Some("laptop")).unwrap();
+        upsert_peer_in_file(&path, KEY_B, None).unwrap();
+        // updating an existing peer must not duplicate it
+        upsert_peer_in_file(&path, KEY_A, Some("renamed")).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("# keep this comment"),
+            "comments preserved"
+        );
+
+        let cfg = ServerConfig::parse(&content).unwrap();
+        assert_eq!(cfg.peers.len(), 2);
+        assert_eq!(cfg.peers[0].name.as_deref(), Some("renamed"));
+
+        assert!(remove_peer_from_file(&path, KEY_B).unwrap());
+        assert!(!remove_peer_from_file(&path, KEY_B).unwrap());
+
+        let cfg = ServerConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.peers.len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_upsert_rejects_bad_key() {
+        let path = tmp_config();
+        assert!(upsert_peer_in_file(&path, "not-base64!!", None).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 }

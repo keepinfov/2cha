@@ -19,6 +19,7 @@ twocha-lib = { path = "../twocha-lib" }
 # CLI dependencies
 clap = { workspace = true }
 console = { workspace = true }
+dialoguer = { workspace = true }
 env_logger = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }

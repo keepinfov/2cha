@@ -1,26 +1,115 @@
 //! # Server Handler
 //!
-//! VPN server connection handling.
+//! Drives the v4 protocol engine with real I/O: accepts Noise_IK handshakes
+//! from whitelisted peers, maintains CID-keyed sessions with roaming, and
+//! never responds to unauthenticated traffic.
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, routing, tun::IpVersion, EventLoop, PeerState, TunDevice, TunnelConfig,
-    UdpTunnel, POLLIN,
+    is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
 
-#[cfg(windows)]
-use crate::platform::windows::{
-    is_would_block, routing, tun::IpVersion, PeerState, TunDevice, TunnelConfig, UdpTunnel,
-};
+use crate::vpn::common;
+#[cfg(unix)]
+use crate::vpn::server::control::{ControlListener, CtlRequest};
+#[cfg(unix)]
+use std::path::Path;
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
-use twocha_core::{ChaCha20Poly1305, ServerConfig};
-use twocha_protocol::{PacketHeader, PacketType, Result, VpnError, PROTOCOL_HEADER_SIZE};
+#[cfg(unix)]
+use twocha_core::v4::{
+    session::keepalive_jitter, InitOutcome, RateLimiter, ServerHandshakeEngine, Session,
+};
+#[cfg(unix)]
+use twocha_core::ServerConfig;
+#[cfg(unix)]
+use twocha_protocol::wire::{self, WireMsg, CID_LEN};
+use twocha_protocol::Result;
+#[cfg(unix)]
+use twocha_protocol::VpnError;
 
-static RUNNING: AtomicBool = AtomicBool::new(true);
+/// Rotate the cookie secret this often (bounds cookie usefulness)
+#[cfg(unix)]
+const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
+#[cfg(unix)]
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+struct SessionEntry {
+    session: Session,
+    peer_public: [u8; 32],
+    endpoint: SocketAddr,
+    next_keepalive: Instant,
+}
+
+#[cfg(unix)]
+struct ServerState {
+    engine: ServerHandshakeEngine,
+    limiter: RateLimiter,
+    allowed: HashSet<[u8; 32]>,
+    /// Optional labels for log/list output, keyed by peer public key
+    peer_names: HashMap<[u8; 32], String>,
+    max_clients: usize,
+    /// Established sessions keyed by our receive-CID
+    sessions: HashMap<[u8; CID_LEN], SessionEntry>,
+    /// Current session per peer static key (new handshake replaces old)
+    cid_by_peer: HashMap<[u8; 32], [u8; CID_LEN]>,
+    /// Learned inner tunnel IP -> session (for TUN->UDP routing)
+    cid_by_inner_ip: HashMap<IpAddr, [u8; CID_LEN]>,
+    idle_timeout: Duration,
+}
+
+#[cfg(unix)]
+impl ServerState {
+    fn install_session(&mut self, session: Session, peer_public: [u8; 32], endpoint: SocketAddr) {
+        let cid = session.local_cid;
+        if let Some(old_cid) = self.cid_by_peer.insert(peer_public, cid) {
+            self.sessions.remove(&old_cid);
+            self.cid_by_inner_ip.retain(|_, c| *c != old_cid);
+        }
+        self.sessions.insert(
+            cid,
+            SessionEntry {
+                session,
+                peer_public,
+                endpoint,
+                next_keepalive: Instant::now() + keepalive_jitter(),
+            },
+        );
+        log::info!(
+            "session established with {} (peers online: {})",
+            endpoint,
+            self.sessions.len()
+        );
+    }
+
+    fn cleanup(&mut self) {
+        let idle = self.idle_timeout;
+        let mut dead: Vec<[u8; CID_LEN]> = Vec::new();
+        for (cid, entry) in &self.sessions {
+            let expired = entry.session.expired()
+                && entry.session.last_recv.elapsed() > Duration::from_secs(10);
+            let idled = entry.session.last_recv.elapsed() > idle;
+            if expired || idled {
+                dead.push(*cid);
+            }
+        }
+        for cid in dead {
+            if let Some(entry) = self.sessions.remove(&cid) {
+                log::info!("session with {} closed (expired/idle)", entry.endpoint);
+                if self.cid_by_peer.get(&entry.peer_public) == Some(&cid) {
+                    self.cid_by_peer.remove(&entry.peer_public);
+                }
+            }
+            self.cid_by_inner_ip.retain(|_, c| *c != cid);
+        }
+    }
+}
 
 /// Run the VPN server
 #[cfg(unix)]
@@ -31,9 +120,15 @@ pub fn run(config_path: &str) -> Result<()> {
     let listen_addr = cfg
         .listen_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let identity = cfg
+        .identity()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
+    let peer_keys = cfg
+        .peer_keys()
+        .map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    log::info!("Starting 2cha server v0.6...");
+    log::info!("Starting 2cha server (protocol v4)...");
+    log::info!("Server public key: {}", identity.public_base64());
 
     // Create TUN device
     let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
@@ -97,61 +192,106 @@ pub fn run(config_path: &str) -> Result<()> {
     let tunnel_config = TunnelConfig {
         local_addr: listen_addr,
         read_timeout: Some(Duration::from_millis(10)),
-        keepalive_interval: Duration::from_secs(cfg.timeouts.keepalive),
-        session_timeout: Duration::from_secs(cfg.timeouts.session),
         recv_buffer_size: cfg.performance.socket_recv_buffer,
         send_buffer_size: cfg.performance.socket_send_buffer,
         ..Default::default()
     };
 
-    let mut tunnel = UdpTunnel::new(tunnel_config, &key)?;
+    let tunnel = UdpTunnel::new(tunnel_config)?;
     tunnel.set_nonblocking(true)?;
 
     log::info!("Listening on {}", listen_addr);
 
-    setup_signal_handler();
+    common::reset_running();
+    common::setup_signal_handler();
 
     let mut event_loop = EventLoop::new();
     event_loop.add_fd(tun.fd(), POLLIN);
     event_loop.add_fd(tunnel.fd(), POLLIN);
 
-    let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
-    let cipher = ChaCha20Poly1305::new(&key);
-    let session_timeout = Duration::from_secs(cfg.timeouts.session);
-    let max_clients = cfg.server.max_clients;
+    // Runtime peer management socket (the server still runs without it)
+    let control = match ControlListener::bind() {
+        Ok(ctl) => {
+            event_loop.add_fd(ctl.fd(), POLLIN);
+            Some(ctl)
+        }
+        Err(e) => {
+            log::warn!("peer management disabled: {}", e);
+            None
+        }
+    };
+
+    let peer_names: HashMap<[u8; 32], String> = peer_keys
+        .iter()
+        .zip(&cfg.peers)
+        .filter_map(|(pk, peer)| peer.name.clone().map(|n| (*pk, n)))
+        .collect();
+
+    let mut state = ServerState {
+        engine: ServerHandshakeEngine::new(cfg.crypto.cipher, &identity),
+        limiter: RateLimiter::new(),
+        allowed: peer_keys.into_iter().collect(),
+        peer_names,
+        max_clients: cfg.server.max_clients,
+        sessions: HashMap::new(),
+        cid_by_peer: HashMap::new(),
+        cid_by_inner_ip: HashMap::new(),
+        idle_timeout: Duration::from_secs(cfg.timeouts.session),
+    };
 
     let mut last_cleanup = Instant::now();
-    let cleanup_interval = Duration::from_secs(30);
+    let mut last_cookie_rotate = Instant::now();
     let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut udp_batch = BatchBuffer::new(cfg.performance.batch_size);
+    let mut send_queue: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(udp_batch.capacity());
 
-    log::info!("Server ready. Max clients: {}", max_clients);
+    log::info!(
+        "Server ready. Authorized peers: {}, max clients: {}",
+        state.allowed.len(),
+        state.max_clients
+    );
 
-    while RUNNING.load(Ordering::SeqCst) {
+    while common::running() {
         let events = event_loop.poll(100)?;
 
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun.fd() {
-                    handle_tun_read(&mut tun, &mut tun_buffer, &mut tunnel, &mut peers)?;
+                    handle_tun_read(
+                        &mut tun,
+                        &mut tun_buffer,
+                        &tunnel,
+                        &mut state,
+                        &mut send_queue,
+                    )?;
                 } else if fd == tunnel.fd() {
-                    handle_udp_read(&mut tunnel, &mut tun, &mut peers, &cipher, max_clients)?;
+                    handle_udp_read(&tunnel, &mut tun, &mut state, &mut udp_batch)?;
+                } else if let Some(ref ctl) = control {
+                    if fd == ctl.fd() {
+                        ctl.process(|req| handle_control(req, &mut state, config_path));
+                    }
                 }
             }
         }
 
-        // Cleanup expired peers
-        if last_cleanup.elapsed() > cleanup_interval {
-            let expired: Vec<_> = peers
-                .iter()
-                .filter(|(_, p)| p.is_expired(session_timeout))
-                .map(|(a, _)| *a)
-                .collect();
+        let now = Instant::now();
+        if last_cookie_rotate.elapsed() > COOKIE_ROTATE_INTERVAL {
+            state.engine.rotate_cookie_secret();
+            last_cookie_rotate = now;
+        }
+        if last_cleanup.elapsed() > CLEANUP_INTERVAL {
+            state.cleanup();
+            last_cleanup = now;
+        }
 
-            for addr in expired {
-                log::info!("Client {} timed out", addr);
-                peers.remove(&addr);
+        // Keepalives keep NAT bindings open and break the silence pattern
+        for entry in state.sessions.values_mut() {
+            if now >= entry.next_keepalive {
+                if let Ok(datagram) = entry.session.seal_data(&[]) {
+                    let _ = tunnel.send_to(&datagram, entry.endpoint);
+                }
+                entry.next_keepalive = now + keepalive_jitter();
             }
-            last_cleanup = Instant::now();
         }
     }
 
@@ -163,19 +303,31 @@ pub fn run(config_path: &str) -> Result<()> {
 fn handle_tun_read(
     tun: &mut TunDevice,
     buffer: &mut [u8],
-    tunnel: &mut UdpTunnel,
-    peers: &mut HashMap<SocketAddr, PeerState>,
+    tunnel: &UdpTunnel,
+    state: &mut ServerState,
+    send_queue: &mut Vec<(Vec<u8>, SocketAddr)>,
 ) -> Result<()> {
+    send_queue.clear();
+    let flush_at = send_queue.capacity().max(1);
     loop {
         match tun.read(buffer) {
             Ok(n) if n > 0 => {
                 let packet = &buffer[..n];
-                let ip_version = IpVersion::from_packet(packet);
-                log::trace!("TUN read: {} bytes, {:?}", n, ip_version);
-
-                // Send to all peers
-                for peer in peers.values_mut() {
-                    let _ = tunnel.send_encrypted(peer, packet);
+                let Some(dst) = common::inner_dst_ip(packet) else {
+                    continue;
+                };
+                let Some(cid) = state.cid_by_inner_ip.get(&dst) else {
+                    log::trace!("no session for inner destination {}", dst);
+                    continue;
+                };
+                if let Some(entry) = state.sessions.get_mut(cid) {
+                    if let Ok(datagram) = entry.session.seal_data(packet) {
+                        send_queue.push((datagram, entry.endpoint));
+                        if send_queue.len() >= flush_at {
+                            let _ = tunnel.send_batch(send_queue);
+                            send_queue.clear();
+                        }
+                    }
                 }
             }
             Ok(_) => break,
@@ -183,69 +335,31 @@ fn handle_tun_read(
             Err(_) => break,
         }
     }
+    if !send_queue.is_empty() {
+        let _ = tunnel.send_batch(send_queue);
+        send_queue.clear();
+    }
     Ok(())
 }
 
 #[cfg(unix)]
 fn handle_udp_read(
-    tunnel: &mut UdpTunnel,
+    tunnel: &UdpTunnel,
     tun: &mut TunDevice,
-    peers: &mut HashMap<SocketAddr, PeerState>,
-    cipher: &ChaCha20Poly1305,
-    max_clients: usize,
+    state: &mut ServerState,
+    batch: &mut BatchBuffer,
 ) -> Result<()> {
     loop {
-        match tunnel.recv_from_any() {
-            Ok(Some((src, data))) => {
-                // Get or create peer
-                let peer = if let Some(p) = peers.get_mut(&src) {
-                    p
-                } else {
-                    if peers.len() >= max_clients {
-                        log::warn!("Max clients reached, rejecting {}", src);
+        match tunnel.recv_batch(batch) {
+            Ok(0) => break,
+            Ok(n) => {
+                for i in 0..n {
+                    let Some((src, data)) = batch.get(i) else {
                         continue;
-                    }
-                    log::info!("New client: {}", src);
-                    peers.entry(src).or_insert_with(|| PeerState::new(src))
-                };
-
-                peer.touch();
-                peer.bytes_rx += data.len() as u64;
-                peer.packets_rx += 1;
-
-                if data.len() < PROTOCOL_HEADER_SIZE {
-                    continue;
-                }
-
-                if let Ok(header) = PacketHeader::deserialize(&data) {
-                    if !peer.replay_window.check_and_update(header.counter as u64) {
-                        log::warn!("Replay attack from {}", src);
-                        continue;
-                    }
-
-                    let header_bytes = header.serialize();
-                    let encrypted = &data[PROTOCOL_HEADER_SIZE..];
-
-                    match header.packet_type {
-                        PacketType::Data => {
-                            if let Ok(decrypted) =
-                                cipher.decrypt(&header.nonce, encrypted, &header_bytes)
-                            {
-                                let _ = tun.write(&decrypted);
-                            }
-                        }
-                        PacketType::Keepalive => {
-                            log::trace!("Keepalive from {}", src);
-                        }
-                        PacketType::Disconnect => {
-                            log::info!("Client {} disconnected", src);
-                            peers.remove(&src);
-                        }
-                        _ => {}
-                    }
+                    };
+                    handle_datagram(tunnel, tun, state, src, data);
                 }
             }
-            Ok(None) => break,
             Err(e) if is_would_block(&e) => break,
             Err(_) => break,
         }
@@ -253,235 +367,170 @@ fn handle_udp_read(
     Ok(())
 }
 
+/// Apply a control-socket request to the live server state.
+/// Changes are persisted to the config file so they survive restarts.
 #[cfg(unix)]
-fn setup_signal_handler() {
-    unsafe {
-        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn signal_handler(_: libc::c_int) {
-    RUNNING.store(false, Ordering::SeqCst);
-}
-
-/// Run the VPN server (Windows)
-#[cfg(windows)]
-pub fn run(config_path: &str) -> Result<()> {
-    let cfg =
-        ServerConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
-
-    let listen_addr = cfg
-        .listen_addr()
-        .map_err(|e| VpnError::Config(format!("{}", e)))?;
-    let key = cfg.key().map_err(|e| VpnError::Config(format!("{}", e)))?;
-
-    log::info!("Starting 2cha server v0.6...");
-
-    // Create TUN device
-    let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
-
-    // Configure IPv4
-    if cfg.ipv4.enable {
-        if let Some(addr) = cfg
-            .tun_ipv4()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
-            tun.set_ipv4_address(addr, cfg.ipv4.prefix)?;
-            log::info!("IPv4: {}/{}", addr, cfg.ipv4.prefix);
-        }
-    }
-
-    // Configure IPv6
-    if cfg.ipv6.enable {
-        if let Some(addr) = cfg
-            .tun_ipv6()
-            .map_err(|e| VpnError::Config(format!("{}", e)))?
-        {
-            tun.set_ipv6_address(addr, cfg.ipv6.prefix)?;
-            log::info!("IPv6: {}/{}", addr, cfg.ipv6.prefix);
-        }
-    }
-
-    tun.set_mtu(cfg.tun.mtu)?;
-    tun.bring_up()?;
-    tun.set_nonblocking(true)?;
-
-    // Setup gateway/routing
-    if cfg.gateway.ip_forward {
-        if let Some(ref iface) = cfg.gateway.external_interface {
-            if cfg.ipv4.enable {
-                let subnet = format!(
-                    "{}/{}",
-                    cfg.ipv4.address.as_deref().unwrap_or("10.0.0.0"),
-                    cfg.ipv4.prefix
-                );
-                if let Err(e) = routing::setup_server_gateway_v4(iface, &subnet) {
-                    log::error!("Failed to setup IPv4 gateway: {}", e);
-                }
+fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -> String {
+    match req {
+        CtlRequest::PeerAdd { key, name } => {
+            let pk = match twocha_core::decode_public_key(&key) {
+                Ok(pk) => pk,
+                Err(e) => return format!("err {}", e),
+            };
+            let added = state.allowed.insert(pk);
+            if let Some(ref n) = name {
+                state.peer_names.insert(pk, n.clone());
+            }
+            let verb = if added { "added" } else { "updated" };
+            log::info!(
+                "control: {} peer {} ({})",
+                verb,
+                key,
+                name.as_deref().unwrap_or("-")
+            );
+            match twocha_core::upsert_peer_in_file(Path::new(config_path), &key, name.as_deref()) {
+                Ok(()) => format!("ok {} {}", verb, key),
+                Err(e) => format!("ok {} {} (warning: not persisted: {})", verb, key, e),
             }
         }
+        CtlRequest::PeerRemove { key } => {
+            let pk = match twocha_core::decode_public_key(&key) {
+                Ok(pk) => pk,
+                Err(e) => return format!("err {}", e),
+            };
+            let existed = state.allowed.remove(&pk);
+            state.peer_names.remove(&pk);
+            // Revocation must drop the active session immediately
+            if let Some(cid) = state.cid_by_peer.remove(&pk) {
+                if let Some(entry) = state.sessions.remove(&cid) {
+                    log::info!("session with {} closed (peer removed)", entry.endpoint);
+                }
+                state.cid_by_inner_ip.retain(|_, c| *c != cid);
+            }
+            log::info!("control: removed peer {}", key);
+            let persist = twocha_core::remove_peer_from_file(Path::new(config_path), &key);
+            let mut reply = format!("ok removed {}", key);
+            if !existed {
+                reply.push_str(" (warning: key was not in the whitelist)");
+            }
+            if let Err(e) = persist {
+                reply.push_str(&format!(" (warning: not persisted: {})", e));
+            }
+            reply
+        }
+        CtlRequest::PeerList => {
+            let mut out = format!("ok {} peers", state.allowed.len());
+            let mut keys: Vec<&[u8; 32]> = state.allowed.iter().collect();
+            keys.sort();
+            for pk in keys {
+                let b64 = twocha_core::encode_public_key(pk);
+                let name = state.peer_names.get(pk).map(String::as_str).unwrap_or("-");
+                match state
+                    .cid_by_peer
+                    .get(pk)
+                    .and_then(|cid| state.sessions.get(cid))
+                {
+                    Some(entry) => {
+                        out.push_str(&format!(
+                            "\npeer {} {} online endpoint={} last_recv_secs={}",
+                            b64,
+                            name,
+                            entry.endpoint,
+                            entry.session.last_recv.elapsed().as_secs()
+                        ));
+                    }
+                    None => out.push_str(&format!("\npeer {} {} offline", b64, name)),
+                }
+            }
+            out
+        }
     }
+}
 
-    // Create UDP tunnel
-    let tunnel_config = TunnelConfig {
-        local_addr: listen_addr,
-        read_timeout: Some(Duration::from_millis(100)),
-        keepalive_interval: Duration::from_secs(cfg.timeouts.keepalive),
-        session_timeout: Duration::from_secs(cfg.timeouts.session),
-        recv_buffer_size: cfg.performance.socket_recv_buffer,
-        send_buffer_size: cfg.performance.socket_send_buffer,
-        ..Default::default()
+/// Process one inbound datagram. All failure paths are silent drops.
+#[cfg(unix)]
+fn handle_datagram(
+    tunnel: &UdpTunnel,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    src: SocketAddr,
+    data: &[u8],
+) {
+    let msg = match wire::parse(data) {
+        Ok(msg) => msg,
+        Err(_) => return,
     };
 
-    let mut tunnel = UdpTunnel::new(tunnel_config, &key)?;
-    tunnel.set_nonblocking(false)?; // Use blocking with timeout on Windows
-
-    log::info!("Listening on {}", listen_addr);
-
-    setup_signal_handler_windows();
-
-    let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
-    let cipher = ChaCha20Poly1305::new(&key);
-    let session_timeout = Duration::from_secs(cfg.timeouts.session);
-    let max_clients = cfg.server.max_clients;
-
-    let mut last_cleanup = Instant::now();
-    let cleanup_interval = Duration::from_secs(30);
-    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
-
-    log::info!("Server ready. Max clients: {}", max_clients);
-
-    while RUNNING.load(Ordering::SeqCst) {
-        // Handle TUN reads
-        handle_tun_read_windows(&mut tun, &mut tun_buffer, &mut tunnel, &mut peers)?;
-
-        // Handle UDP reads
-        handle_udp_read_windows(&mut tunnel, &mut tun, &mut peers, &cipher, max_clients)?;
-
-        // Cleanup expired peers
-        if last_cleanup.elapsed() > cleanup_interval {
-            let expired: Vec<_> = peers
-                .iter()
-                .filter(|(_, p)| p.is_expired(session_timeout))
-                .map(|(a, _)| *a)
-                .collect();
-
-            for addr in expired {
-                log::info!("Client {} timed out", addr);
-                peers.remove(&addr);
+    match msg {
+        WireMsg::Init { .. } => {
+            // Per-IP budget exceeded: drop before any crypto
+            if !state.limiter.allow(src.ip()) {
+                return;
             }
-            last_cleanup = Instant::now();
-        }
-    }
-
-    log::info!("Server shutdown");
-    Ok(())
-}
-
-#[cfg(windows)]
-fn handle_tun_read_windows(
-    tun: &mut TunDevice,
-    buffer: &mut [u8],
-    tunnel: &mut UdpTunnel,
-    peers: &mut HashMap<SocketAddr, PeerState>,
-) -> Result<()> {
-    match tun.read(buffer) {
-        Ok(n) if n > 0 => {
-            let packet = &buffer[..n];
-            let ip_version = IpVersion::from_packet(packet);
-            log::trace!("TUN read: {} bytes, {:?}", n, ip_version);
-
-            // Send to all peers
-            for peer in peers.values_mut() {
-                let _ = tunnel.send_encrypted(peer, packet);
-            }
-        }
-        Ok(_) => {}
-        Err(e) if is_would_block(&e) => {}
-        Err(_) => {}
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn handle_udp_read_windows(
-    tunnel: &mut UdpTunnel,
-    tun: &mut TunDevice,
-    peers: &mut HashMap<SocketAddr, PeerState>,
-    cipher: &ChaCha20Poly1305,
-    max_clients: usize,
-) -> Result<()> {
-    match tunnel.recv_from_any() {
-        Ok(Some((src, data))) => {
-            // Get or create peer
-            let peer = if let Some(p) = peers.get_mut(&src) {
-                p
-            } else {
-                if peers.len() >= max_clients {
-                    log::warn!("Max clients reached, rejecting {}", src);
-                    return Ok(());
+            let under_load = state.limiter.under_load();
+            let allowed = &state.allowed;
+            let outcome = state
+                .engine
+                .handle_init(data, &src, under_load, |pk| allowed.contains(pk));
+            match outcome {
+                InitOutcome::Established {
+                    datagram,
+                    session,
+                    peer_public,
+                } => {
+                    let is_new_peer = !state.cid_by_peer.contains_key(&peer_public);
+                    if is_new_peer && state.cid_by_peer.len() >= state.max_clients {
+                        log::warn!("max_clients reached, dropping handshake from {}", src);
+                        return;
+                    }
+                    let _ = tunnel.send_to(&datagram, src);
+                    state.install_session(session, peer_public, src);
                 }
-                log::info!("New client: {}", src);
-                peers.entry(src).or_insert_with(|| PeerState::new(src))
+                InitOutcome::CookieReply(reply) => {
+                    let _ = tunnel.send_to(&reply, src);
+                }
+                InitOutcome::Drop => {}
+            }
+        }
+        WireMsg::Data {
+            receiver_cid,
+            masked_counter,
+            ciphertext,
+        } => {
+            let Some(entry) = state.sessions.get_mut(&receiver_cid) else {
+                return;
             };
-
-            peer.touch();
-            peer.bytes_rx += data.len() as u64;
-            peer.packets_rx += 1;
-
-            if data.len() < PROTOCOL_HEADER_SIZE {
-                return Ok(());
+            let payload = match entry.session.open_data(masked_counter, ciphertext) {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            // Roaming: authenticated packet from a new address moves the peer
+            if entry.endpoint != src {
+                log::info!("peer roamed {} -> {}", entry.endpoint, src);
+                entry.endpoint = src;
             }
-
-            if let Ok(header) = PacketHeader::deserialize(&data) {
-                if !peer.replay_window.check_and_update(header.counter as u64) {
-                    log::warn!("Replay attack from {}", src);
-                    return Ok(());
-                }
-
-                let header_bytes = header.serialize();
-                let encrypted = &data[PROTOCOL_HEADER_SIZE..];
-
-                match header.packet_type {
-                    PacketType::Data => {
-                        if let Ok(decrypted) =
-                            cipher.decrypt(&header.nonce, encrypted, &header_bytes)
-                        {
-                            let _ = tun.write(&decrypted);
-                        }
-                    }
-                    PacketType::Keepalive => {
-                        log::trace!("Keepalive from {}", src);
-                    }
-                    PacketType::Disconnect => {
-                        log::info!("Client {} disconnected", src);
-                        peers.remove(&src);
-                    }
-                    _ => {}
-                }
+            if payload.is_empty() {
+                return; // keepalive
             }
+            if let Some(inner_src) = common::inner_src_ip(&payload) {
+                state.cid_by_inner_ip.insert(inner_src, receiver_cid);
+            }
+            let _ = tun.write(&payload);
         }
-        Ok(None) => {}
-        Err(e) if is_would_block(&e) => {}
-        Err(_) => {}
+        // Server never consumes handshake responses or cookies
+        WireMsg::Resp { .. } | WireMsg::Cookie { .. } => {}
     }
-    Ok(())
 }
 
+/// Run the VPN server (Windows): not supported by protocol v4 yet
 #[cfg(windows)]
-fn setup_signal_handler_windows() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = ctrlc::set_handler(move || {
-            RUNNING.store(false, Ordering::SeqCst);
-        });
-    });
+pub fn run(_config_path: &str) -> Result<()> {
+    Err(twocha_protocol::VpnError::Config(
+        "Windows support for protocol v4 is not implemented yet".into(),
+    ))
 }
 
 /// Stop the server
 pub fn stop() {
-    RUNNING.store(false, Ordering::SeqCst);
+    common::stop();
 }

@@ -6,20 +6,79 @@ use console::style;
 use std::io::Write;
 use twocha_protocol::{Result, VpnError};
 
-/// Path constants
-#[cfg(unix)]
-pub const PID_FILE: &str = "/tmp/2cha.pid";
 #[cfg(windows)]
 pub const PID_FILE: &str = "C:\\Windows\\Temp\\2cha.pid";
 
-/// Log file path for daemon mode
+/// PID file location for writing. The VPN itself always runs as root, so
+/// this is normally `/run/2cha.pid`; the fallbacks cover exotic setups.
 #[cfg(unix)]
-pub const LOG_FILE: &str = "/tmp/2cha.log";
+pub fn pid_file() -> String {
+    for candidate in pid_candidates() {
+        if let Some(parent) = std::path::Path::new(&candidate).parent() {
+            if parent.is_dir()
+                && !parent
+                    .metadata()
+                    .map(|m| m.permissions().readonly())
+                    .unwrap_or(true)
+            {
+                return candidate;
+            }
+        }
+    }
+    "/tmp/2cha.pid".to_string()
+}
+
+/// Locate an existing PID file (readers must not depend on their own uid)
+#[cfg(unix)]
+pub fn find_pid_file() -> Option<String> {
+    pid_candidates()
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+}
+
+#[cfg(unix)]
+fn pid_candidates() -> Vec<String> {
+    let mut v = vec!["/run/2cha.pid".to_string()];
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            v.push(format!("{}/2cha.pid", dir));
+        }
+    }
+    v.push("/tmp/2cha.pid".to_string());
+    v
+}
+
+#[cfg(windows)]
+pub fn pid_file() -> String {
+    PID_FILE.to_string()
+}
+
+#[cfg(windows)]
+pub fn find_pid_file() -> Option<String> {
+    std::path::Path::new(PID_FILE)
+        .exists()
+        .then(|| PID_FILE.to_string())
+}
+
+/// Log file for daemon mode: /var/log for root, runtime dir otherwise
+#[cfg(unix)]
+pub fn log_file() -> String {
+    if is_root() {
+        "/var/log/2cha.log".to_string()
+    } else if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        format!("{}/2cha.log", dir)
+    } else {
+        "/tmp/2cha.log".to_string()
+    }
+}
 
 /// Check if VPN process is running (Unix)
 #[cfg(unix)]
 pub fn is_running() -> bool {
-    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+    let Some(pid_path) = find_pid_file() else {
+        return false;
+    };
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
                 // kill(pid, 0) returns 0 if we can signal the process
@@ -48,7 +107,10 @@ pub fn is_running() -> bool {
 /// Check if current user can signal the VPN process (has permission to stop it)
 #[cfg(unix)]
 pub fn can_signal_process() -> bool {
-    if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
+    let Some(pid_path) = find_pid_file() else {
+        return false;
+    };
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
                 // Try to send signal 0 (no actual signal, just permission check)
@@ -95,47 +157,6 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Generate cryptographic key
-pub fn generate_key() -> Result<[u8; 32]> {
-    let mut key = [0u8; 32];
-
-    #[cfg(unix)]
-    {
-        if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-            use std::io::Read;
-            file.read_exact(&mut key).map_err(VpnError::Io)?;
-        } else {
-            generate_fallback_key(&mut key);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        use std::io::Read;
-        if let Ok(mut file) = std::fs::File::open("C:\\Windows\\System32\\urandom") {
-            let _ = file.read_exact(&mut key);
-        } else {
-            generate_fallback_key(&mut key);
-        }
-    }
-
-    Ok(key)
-}
-
-fn generate_fallback_key(key: &mut [u8; 32]) {
-    eprintln!("Warning: Using fallback random source");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let pid = std::process::id() as u128;
-
-    for (i, byte) in key.iter_mut().enumerate() {
-        let val = now.wrapping_add(pid).wrapping_mul(i as u128 + 1);
-        *byte = ((val >> ((i % 16) * 8)) & 0xff) as u8;
-    }
-}
-
 /// Setup logging based on verbosity
 pub fn setup_logging(verbose: bool, quiet: bool) {
     let log_level = if verbose {
@@ -158,26 +179,28 @@ pub fn daemonize() -> Result<()> {
     use daemonize::Daemonize;
     use std::fs::OpenOptions;
 
+    let log_path = log_file();
+
     // Create/open log file for daemon output (append mode)
-    let log_file = OpenOptions::new()
+    let log_out = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(LOG_FILE)
+        .open(&log_path)
         .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
 
-    let log_file_err = OpenOptions::new()
+    let log_err = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(LOG_FILE)
+        .open(&log_path)
         .map_err(|e| VpnError::Config(format!("Failed to open log file: {}", e)))?;
 
     let daemonize = Daemonize::new()
-        .pid_file(PID_FILE)
+        .pid_file(pid_file())
         .chown_pid_file(true)
         .working_directory("/")
         .umask(0o022)
-        .stdout(log_file)
-        .stderr(log_file_err);
+        .stdout(log_out)
+        .stderr(log_err);
 
     daemonize
         .start()

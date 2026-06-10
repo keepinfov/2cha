@@ -10,9 +10,10 @@ pub use client::{
     example_client_config, ClientConfig, DnsSection, Ipv4ClientSection, Ipv6ClientSection,
 };
 pub use common::{
-    hex_to_key, prefix_to_netmask_v4, prefix_to_netmask_v6, CipherSuite, ConfigError,
+    decode_config_public_key, prefix_to_netmask_v4, prefix_to_netmask_v6, CipherSuite, ConfigError,
     CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TunSection,
 };
 pub use server::{
-    example_server_config, GatewaySection, Ipv4ServerSection, Ipv6ServerSection, ServerConfig,
+    example_server_config, remove_peer_from_file, upsert_peer_in_file, GatewaySection,
+    Ipv4ServerSection, Ipv6ServerSection, PeerSection, ServerConfig,
 };

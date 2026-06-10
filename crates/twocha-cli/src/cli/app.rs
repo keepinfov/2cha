@@ -4,7 +4,10 @@
 
 use clap::{Parser, Subcommand};
 
-use super::commands::{cmd_down, cmd_genkey, cmd_init, cmd_server, cmd_status, cmd_toggle, cmd_up};
+use super::commands::{
+    cmd_down, cmd_genkey, cmd_init, cmd_peer_add, cmd_peer_list, cmd_peer_remove, cmd_pubkey,
+    cmd_server, cmd_status, cmd_toggle, cmd_up,
+};
 use super::output;
 use super::print_banner;
 use twocha_protocol::Result;
@@ -17,10 +20,14 @@ use twocha_protocol::Result;
     about = "High-performance VPN utility with IPv4/IPv6 support",
     long_about = None,
     after_help = "Examples:\n  \
+        2cha init                  (interactive setup wizard)\n  \
+        2cha init client --template > client.toml\n  \
+        2cha genkey client.key\n  \
+        2cha pubkey client.key\n  \
         2cha up -c client.toml\n  \
         2cha server -c server.toml\n  \
-        2cha genkey > vpn.key\n  \
-        2cha init client > client.toml\n  \
+        2cha peer add <public-key> --name laptop\n  \
+        2cha peer list\n  \
         2cha status\n\n\
         Note: Commands requiring root will automatically prompt for sudo password.",
     styles = get_styles(),
@@ -100,16 +107,58 @@ enum Commands {
         quiet: bool,
     },
 
-    /// Generate encryption key
+    /// Generate X25519 keypair: private key to file (0600), public key to stdout
     #[command(visible_alias = "key")]
-    Genkey,
-
-    /// Create config template
-    Init {
-        /// Config type: client or server
-        #[arg(default_value = "client")]
-        mode: String,
+    Genkey {
+        /// Path for the new private key file
+        output: String,
     },
+
+    /// Print the public key for a private key file
+    Pubkey {
+        /// Private key file path
+        key_file: String,
+    },
+
+    /// Manage authorized peers on a running server (no restart needed)
+    #[command(subcommand)]
+    Peer(PeerCommands),
+
+    /// Create a config (interactive wizard; use --template for stdout)
+    Init {
+        /// Config type: client or server (asked interactively if omitted)
+        mode: Option<String>,
+
+        /// Print a static config template to stdout instead of the wizard
+        #[arg(short, long)]
+        template: bool,
+
+        /// Directory to write configs and keys to (wizard mode)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PeerCommands {
+    /// Authorize a client public key (and persist it to server.toml)
+    Add {
+        /// Base64 X25519 public key (from: 2cha pubkey client.key)
+        public_key: String,
+
+        /// Human-readable label for logs and listings
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+
+    /// Revoke a peer: drops its active session immediately
+    Remove {
+        /// Base64 X25519 public key
+        public_key: String,
+    },
+
+    /// List authorized peers and their connection state
+    List,
 }
 
 fn get_styles() -> clap::builder::Styles {
@@ -187,9 +236,21 @@ pub fn run() -> Result<()> {
             quiet,
         } => cmd_server(&config, daemon, verbose, quiet),
 
-        Commands::Genkey => cmd_genkey(),
+        Commands::Genkey { output } => cmd_genkey(&output),
 
-        Commands::Init { mode } => cmd_init(&mode),
+        Commands::Pubkey { key_file } => cmd_pubkey(&key_file),
+
+        Commands::Peer(cmd) => match cmd {
+            PeerCommands::Add { public_key, name } => cmd_peer_add(&public_key, name.as_deref()),
+            PeerCommands::Remove { public_key } => cmd_peer_remove(&public_key),
+            PeerCommands::List => cmd_peer_list(),
+        },
+
+        Commands::Init {
+            mode,
+            template,
+            output,
+        } => cmd_init(mode.as_deref(), template, output.as_deref()),
     }
 }
 

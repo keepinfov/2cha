@@ -8,6 +8,6 @@ pub mod network;
 pub mod routing;
 pub mod tun;
 
-pub use network::{is_would_block, PeerState, TunnelConfig, UdpTunnel};
+pub use network::{is_would_block, TunnelConfig, UdpTunnel};
 pub use routing::{get_routing_status, RoutingStatus};
 pub use tun::{IpVersion, TunDevice};

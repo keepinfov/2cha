@@ -2,22 +2,15 @@
 //!
 //! Security utilities using proven implementations from RustCrypto ecosystem.
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 /// Constant-time comparison (prevents timing attacks)
-///
-/// Uses a constant-time algorithm that doesn't leak information
-/// about the comparison through timing side-channels.
-#[inline(never)]
 pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
+    a.ct_eq(b).into()
 }
 
 /// Secure memory zeroing using zeroize crate

@@ -3,7 +3,6 @@
 //! Shared configuration types and utilities.
 
 use serde::Deserialize;
-use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Supported cipher suites
@@ -42,27 +41,25 @@ pub struct TunSection {
 pub struct CryptoSection {
     #[serde(default)]
     pub cipher: CipherSuite,
+    /// Path to the X25519 private key file (raw 32 bytes, mode 0600)
+    pub private_key_file: String,
+    /// Base64 public key of the server (client configs only)
     #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default)]
-    pub key_file: Option<String>,
+    pub server_public_key: Option<String>,
 }
 
 impl CryptoSection {
-    pub fn get_key(&self) -> Result<[u8; 32], ConfigError> {
-        if let Some(ref path) = self.key_file {
-            let content = fs::read_to_string(path)
-                .map_err(|e| ConfigError::IoError(format!("Cannot read key file: {}", e)))?;
-            return hex_to_key(content.trim());
-        }
-        if let Some(ref hex) = self.key {
-            return hex_to_key(hex);
-        }
-        if let Ok(hex) = std::env::var("VPN_KEY") {
-            return hex_to_key(&hex);
-        }
-        Err(ConfigError::MissingKey)
+    /// Load the local identity from `private_key_file`, enforcing 0600 perms
+    pub fn identity(&self) -> Result<crate::crypto::Identity, ConfigError> {
+        crate::crypto::Identity::load(std::path::Path::new(&self.private_key_file))
+            .map_err(|e| ConfigError::InvalidKey(format!("{}: {}", self.private_key_file, e)))
     }
+}
+
+/// Decode a base64 X25519 public key from a config value
+pub fn decode_config_public_key(value: &str) -> Result<[u8; 32], ConfigError> {
+    crate::crypto::decode_public_key(value.trim())
+        .map_err(|e| ConfigError::InvalidKey(format!("bad public key: {}", e)))
 }
 
 /// Performance configuration
@@ -95,21 +92,14 @@ impl Default for PerformanceSection {
 /// Timeout configuration
 #[derive(Debug, Deserialize)]
 pub struct TimeoutsSection {
-    #[serde(default = "default_keepalive")]
-    pub keepalive: u64,
+    /// Drop a session after this many seconds without authenticated traffic
     #[serde(default = "default_session_timeout")]
     pub session: u64,
-    #[serde(default = "default_handshake_timeout")]
-    pub handshake: u64,
 }
 
 impl Default for TimeoutsSection {
     fn default() -> Self {
-        TimeoutsSection {
-            keepalive: 25,
-            session: 180,
-            handshake: 10,
-        }
+        TimeoutsSection { session: 180 }
     }
 }
 
@@ -150,14 +140,8 @@ pub fn default_prefix_v4() -> u8 {
 pub fn default_prefix_v6() -> u8 {
     64
 }
-pub fn default_keepalive() -> u64 {
-    25
-}
 pub fn default_session_timeout() -> u64 {
     180
-}
-pub fn default_handshake_timeout() -> u64 {
-    10
 }
 pub fn default_log_level() -> String {
     "info".to_string()
@@ -186,6 +170,7 @@ pub enum ConfigError {
     InvalidAddress(String),
     InvalidKey(String),
     MissingKey,
+    Invalid(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -196,8 +181,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidAddress(a) => write!(f, "Invalid address: {}", a),
             ConfigError::InvalidKey(e) => write!(f, "Invalid key: {}", e),
             ConfigError::MissingKey => {
-                write!(f, "No key provided (use key, key_file, or VPN_KEY env)")
+                write!(f, "No private key configured (set crypto.private_key_file)")
             }
+            ConfigError::Invalid(e) => write!(f, "Invalid config: {}", e),
         }
     }
 }
@@ -218,22 +204,6 @@ pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
 pub fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
     let addr: Ipv6Addr = s.parse().ok()?;
     Some(addr.octets())
-}
-
-pub fn hex_to_key(hex: &str) -> Result<[u8; 32], ConfigError> {
-    let hex = hex.trim();
-    if hex.len() != 64 {
-        return Err(ConfigError::InvalidKey(format!(
-            "Key must be 64 hex chars, got {}",
-            hex.len()
-        )));
-    }
-    let mut key = [0u8; 32];
-    for i in 0..32 {
-        key[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| ConfigError::InvalidKey("Invalid hex character".to_string()))?;
-    }
-    Ok(key)
 }
 
 pub fn prefix_to_netmask_v4(prefix: u8) -> [u8; 4] {
@@ -272,14 +242,5 @@ mod tests {
         assert_eq!(prefix_to_netmask_v4(32), [255, 255, 255, 255]);
         assert_eq!(prefix_to_netmask_v4(24), [255, 255, 255, 0]);
         assert_eq!(prefix_to_netmask_v4(8), [255, 0, 0, 0]);
-    }
-
-    #[test]
-    fn test_hex_to_key() {
-        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let key = hex_to_key(hex).unwrap();
-        assert_eq!(key[0], 0x01);
-        assert_eq!(key[1], 0x23);
-        assert_eq!(key[31], 0xef);
     }
 }

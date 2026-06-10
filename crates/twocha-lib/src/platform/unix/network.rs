@@ -1,15 +1,13 @@
 //! # Network Module (Unix)
 //!
-//! High-performance UDP tunnel with optimized I/O.
+//! Plain UDP transport plus a poll-based event loop. All encryption and
+//! session state lives in the v4 protocol engine (`twocha_core::v4`); this
+//! layer only moves datagrams.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::time::{Duration, Instant};
-use twocha_core::ChaCha20Poly1305;
-use twocha_protocol::{
-    NetworkError, PacketHeader, PacketType, ReplayWindow, Result, MAX_PACKET_SIZE,
-    PROTOCOL_HEADER_SIZE,
-};
+use std::time::Duration;
+use twocha_protocol::{NetworkError, Result, MAX_PACKET_SIZE};
 
 /// Tunnel configuration
 #[derive(Debug, Clone)]
@@ -18,8 +16,6 @@ pub struct TunnelConfig {
     pub remote_addr: Option<SocketAddr>,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
-    pub keepalive_interval: Duration,
-    pub session_timeout: Duration,
     pub recv_buffer_size: usize,
     pub send_buffer_size: usize,
 }
@@ -27,74 +23,25 @@ pub struct TunnelConfig {
 impl Default for TunnelConfig {
     fn default() -> Self {
         TunnelConfig {
-            local_addr: "0.0.0.0:51820".parse().unwrap(),
+            local_addr: SocketAddr::from(([0, 0, 0, 0], 51820)),
             remote_addr: None,
             read_timeout: Some(Duration::from_millis(100)),
             write_timeout: Some(Duration::from_secs(5)),
-            keepalive_interval: Duration::from_secs(25),
-            session_timeout: Duration::from_secs(180),
             recv_buffer_size: 2 * 1024 * 1024,
             send_buffer_size: 2 * 1024 * 1024,
         }
     }
 }
 
-/// Peer connection state
-#[derive(Debug)]
-pub struct PeerState {
-    pub addr: SocketAddr,
-    pub last_seen: Instant,
-    pub tx_counter: u32,
-    pub replay_window: ReplayWindow,
-    pub bytes_tx: u64,
-    pub bytes_rx: u64,
-    pub packets_tx: u64,
-    pub packets_rx: u64,
-}
-
-impl PeerState {
-    pub fn new(addr: SocketAddr) -> Self {
-        PeerState {
-            addr,
-            last_seen: Instant::now(),
-            tx_counter: 0,
-            replay_window: ReplayWindow::new(),
-            bytes_tx: 0,
-            bytes_rx: 0,
-            packets_tx: 0,
-            packets_rx: 0,
-        }
-    }
-
-    #[inline]
-    pub fn next_counter(&mut self) -> u32 {
-        self.tx_counter = self.tx_counter.wrapping_add(1);
-        self.tx_counter
-    }
-
-    #[inline]
-    pub fn is_expired(&self, timeout: Duration) -> bool {
-        self.last_seen.elapsed() > timeout
-    }
-
-    #[inline]
-    pub fn touch(&mut self) {
-        self.last_seen = Instant::now();
-    }
-}
-
-/// UDP tunnel for VPN traffic
+/// UDP socket wrapper for VPN traffic
 pub struct UdpTunnel {
     socket: UdpSocket,
     config: TunnelConfig,
-    cipher: ChaCha20Poly1305,
     recv_buffer: Vec<u8>,
-    send_buffer: Vec<u8>,
 }
 
 impl UdpTunnel {
-    /// Create new UDP tunnel
-    pub fn new(config: TunnelConfig, key: &[u8; 32]) -> Result<Self> {
+    pub fn new(config: TunnelConfig) -> Result<Self> {
         log::info!("Creating UDP tunnel on {}", config.local_addr);
 
         let socket = UdpSocket::bind(config.local_addr)
@@ -105,15 +52,10 @@ impl UdpTunnel {
 
         Self::set_socket_buffers(&socket, config.recv_buffer_size, config.send_buffer_size);
 
-        let recv_buffer = vec![0u8; MAX_PACKET_SIZE];
-        let send_buffer = vec![0u8; MAX_PACKET_SIZE];
-
         Ok(UdpTunnel {
             socket,
             config,
-            cipher: ChaCha20Poly1305::new(key),
-            recv_buffer,
-            send_buffer,
+            recv_buffer: vec![0u8; MAX_PACKET_SIZE],
         })
     }
 
@@ -147,29 +89,14 @@ impl UdpTunnel {
         self.socket.as_raw_fd()
     }
 
-    /// Send encrypted packet to peer
-    pub fn send_encrypted(&mut self, peer: &mut PeerState, data: &[u8]) -> Result<usize> {
-        let counter = peer.next_counter();
-        let header = PacketHeader::new(PacketType::Data, counter);
-
-        let header_bytes = header.serialize();
-        let encrypted = self.cipher.encrypt(&header.nonce, data, &header_bytes)?;
-
-        let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
-        self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
-        self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-
-        let sent = self
-            .socket
-            .send_to(&self.send_buffer[..total_len], peer.addr)?;
-        peer.bytes_tx += sent as u64;
-        peer.packets_tx += 1;
-
-        log::trace!("Sent {} bytes to {}", sent, peer.addr);
+    /// Send a complete datagram to `addr`
+    pub fn send_to(&self, datagram: &[u8], addr: SocketAddr) -> Result<usize> {
+        let sent = self.socket.send_to(datagram, addr)?;
+        log::trace!("Sent {} bytes to {}", sent, addr);
         Ok(sent)
     }
 
-    /// Receive packet from any source
+    /// Receive a datagram from any source
     pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((len, src)) => {
@@ -182,41 +109,6 @@ impl UdpTunnel {
         }
     }
 
-    /// Send keepalive
-    pub fn send_keepalive(&mut self, peer: &mut PeerState) -> Result<()> {
-        let counter = peer.next_counter();
-        let header = PacketHeader::new(PacketType::Keepalive, counter);
-        let header_bytes = header.serialize();
-
-        let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
-
-        let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
-        self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
-        self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-
-        self.socket
-            .send_to(&self.send_buffer[..total_len], peer.addr)?;
-        log::trace!("Sent keepalive to {}", peer.addr);
-        Ok(())
-    }
-
-    /// Send disconnect notification
-    pub fn send_disconnect(&mut self, peer: &mut PeerState) -> Result<()> {
-        let counter = peer.next_counter();
-        let header = PacketHeader::new(PacketType::Disconnect, counter);
-        let header_bytes = header.serialize();
-
-        let encrypted = self.cipher.encrypt(&header.nonce, &[], &header_bytes)?;
-
-        let total_len = PROTOCOL_HEADER_SIZE + encrypted.len();
-        self.send_buffer[..PROTOCOL_HEADER_SIZE].copy_from_slice(&header_bytes);
-        self.send_buffer[PROTOCOL_HEADER_SIZE..total_len].copy_from_slice(&encrypted);
-
-        self.socket
-            .send_to(&self.send_buffer[..total_len], peer.addr)?;
-        Ok(())
-    }
-
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         self.socket.set_nonblocking(nonblocking)?;
         Ok(())
@@ -226,8 +118,289 @@ impl UdpTunnel {
         &self.config
     }
 
-    pub fn cipher(&self) -> &ChaCha20Poly1305 {
-        &self.cipher
+    /// Receive up to `batch.capacity()` datagrams in one syscall (Linux).
+    /// Returns the number received; 0 means the socket would block.
+    #[cfg(target_os = "linux")]
+    pub fn recv_batch(&self, batch: &mut BatchBuffer) -> Result<usize> {
+        batch.count = 0;
+        let n = batch.capacity();
+        for i in 0..n {
+            batch.iovecs[i] = libc::iovec {
+                iov_base: batch.bufs[i].as_mut_ptr() as *mut libc::c_void,
+                iov_len: batch.bufs[i].len(),
+            };
+            let hdr = &mut batch.hdrs[i];
+            hdr.msg_len = 0;
+            hdr.msg_hdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_name = &mut batch.addrs[i] as *mut _ as *mut libc::c_void;
+            hdr.msg_hdr.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            hdr.msg_hdr.msg_iov = &mut batch.iovecs[i];
+            hdr.msg_hdr.msg_iovlen = 1;
+        }
+
+        loop {
+            let r = unsafe {
+                libc::recvmmsg(
+                    self.fd(),
+                    batch.hdrs.as_mut_ptr(),
+                    n as libc::c_uint,
+                    libc::MSG_DONTWAIT as _,
+                    std::ptr::null_mut(),
+                )
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => return Ok(0),
+                    _ => return Err(err.into()),
+                }
+            }
+            let r = r as usize;
+            for i in 0..r {
+                batch.lens[i] = batch.hdrs[i].msg_len as usize;
+                batch.srcs[i] = decode_sockaddr(&batch.addrs[i]);
+            }
+            batch.count = r;
+            return Ok(r);
+        }
+    }
+
+    /// Fallback for non-Linux unix: drain the socket one datagram at a time.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn recv_batch(&self, batch: &mut BatchBuffer) -> Result<usize> {
+        batch.count = 0;
+        while batch.count < batch.capacity() {
+            let i = batch.count;
+            match self.socket.recv_from(&mut batch.bufs[i]) {
+                Ok((len, src)) => {
+                    batch.lens[i] = len;
+                    batch.srcs[i] = Some(src);
+                    batch.count += 1;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(e) => {
+                    if batch.count > 0 {
+                        break;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(batch.count)
+    }
+
+    /// Send multiple datagrams in as few syscalls as possible (Linux).
+    /// Returns the number actually handed to the kernel; under UDP semantics
+    /// the rest are dropped (kernel send buffer full).
+    #[cfg(target_os = "linux")]
+    pub fn send_batch(&self, msgs: &[(Vec<u8>, SocketAddr)]) -> Result<usize> {
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        let mut addrs: Vec<(libc::sockaddr_storage, libc::socklen_t)> =
+            msgs.iter().map(|(_, a)| encode_sockaddr(*a)).collect();
+        let mut iovecs: Vec<libc::iovec> = msgs
+            .iter()
+            .map(|(data, _)| libc::iovec {
+                iov_base: data.as_ptr() as *mut libc::c_void,
+                iov_len: data.len(),
+            })
+            .collect();
+        let mut hdrs: Vec<libc::mmsghdr> = Vec::with_capacity(msgs.len());
+        for i in 0..msgs.len() {
+            let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_name = &mut addrs[i].0 as *mut _ as *mut libc::c_void;
+            hdr.msg_hdr.msg_namelen = addrs[i].1;
+            hdr.msg_hdr.msg_iov = &mut iovecs[i];
+            hdr.msg_hdr.msg_iovlen = 1;
+            hdrs.push(hdr);
+        }
+
+        let mut sent = 0;
+        while sent < msgs.len() {
+            let r = unsafe {
+                libc::sendmmsg(
+                    self.fd(),
+                    hdrs[sent..].as_mut_ptr(),
+                    (msgs.len() - sent) as libc::c_uint,
+                    0,
+                )
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => break,
+                    _ => {
+                        // Unexpected error: fall back to per-datagram sends
+                        for (data, addr) in &msgs[sent..] {
+                            if self.socket.send_to(data, *addr).is_ok() {
+                                sent += 1;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if r == 0 {
+                break;
+            }
+            sent += r as usize;
+        }
+        Ok(sent)
+    }
+
+    /// Fallback for non-Linux unix: per-datagram sends.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn send_batch(&self, msgs: &[(Vec<u8>, SocketAddr)]) -> Result<usize> {
+        let mut sent = 0;
+        for (data, addr) in msgs {
+            if self.socket.send_to(data, *addr).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BATCHED I/O
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Reusable receive buffers for batched UDP I/O — allocated once at startup.
+pub struct BatchBuffer {
+    bufs: Vec<Vec<u8>>,
+    lens: Vec<usize>,
+    srcs: Vec<Option<SocketAddr>>,
+    count: usize,
+    #[cfg(target_os = "linux")]
+    addrs: Vec<libc::sockaddr_storage>,
+    #[cfg(target_os = "linux")]
+    iovecs: Vec<libc::iovec>,
+    #[cfg(target_os = "linux")]
+    hdrs: Vec<libc::mmsghdr>,
+}
+
+impl BatchBuffer {
+    /// `batch_size` is clamped to 1..=64.
+    pub fn new(batch_size: usize) -> Self {
+        let n = batch_size.clamp(1, 64);
+        BatchBuffer {
+            bufs: vec![vec![0u8; MAX_PACKET_SIZE]; n],
+            lens: vec![0; n],
+            srcs: vec![None; n],
+            count: 0,
+            #[cfg(target_os = "linux")]
+            addrs: vec![unsafe { std::mem::zeroed() }; n],
+            #[cfg(target_os = "linux")]
+            iovecs: vec![
+                libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                };
+                n
+            ],
+            #[cfg(target_os = "linux")]
+            hdrs: vec![unsafe { std::mem::zeroed() }; n],
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.bufs.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Datagram `i` of the last `recv_batch` (None if the source address
+    /// could not be decoded).
+    pub fn get(&self, i: usize) -> Option<(SocketAddr, &[u8])> {
+        if i >= self.count {
+            return None;
+        }
+        self.srcs[i].map(|src| (src, &self.bufs[i][..self.lens[i]]))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn decode_sockaddr(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET => {
+            let sin = unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes());
+            Some(SocketAddr::from((ip, u16::from_be(sin.sin_port))))
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            Some(
+                std::net::SocketAddrV6::new(
+                    ip,
+                    u16::from_be(sin6.sin6_port),
+                    sin6.sin6_flowinfo,
+                    sin6.sin6_scope_id,
+                )
+                .into(),
+            )
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn encode_sockaddr(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    match addr {
+        SocketAddr::V4(v4) => {
+            let sin = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe {
+                std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in, sin);
+            }
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        }
+        SocketAddr::V6(v6) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
+                sin6_scope_id: v6.scope_id(),
+            };
+            unsafe {
+                std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, sin6);
+            }
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
+        }
     }
 }
 
@@ -311,4 +484,90 @@ pub fn is_would_block(e: &twocha_protocol::VpnError) -> bool {
         || s.contains("temporarily unavailable")
         || s.contains("os error 11")
         || s.contains("Resource temporarily unavailable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tunnel_on_loopback() -> UdpTunnel {
+        UdpTunnel::new(TunnelConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            read_timeout: Some(Duration::from_millis(200)),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn local_addr(t: &UdpTunnel) -> SocketAddr {
+        t.socket.local_addr().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_sockaddr_roundtrip() {
+        for addr in [
+            "127.0.0.1:51820".parse::<SocketAddr>().unwrap(),
+            "[::1]:443".parse().unwrap(),
+            "10.8.0.1:1".parse().unwrap(),
+        ] {
+            let (storage, _) = encode_sockaddr(addr);
+            assert_eq!(decode_sockaddr(&storage), Some(addr));
+        }
+    }
+
+    #[test]
+    fn test_batch_buffer_clamp() {
+        assert_eq!(BatchBuffer::new(0).capacity(), 1);
+        assert_eq!(BatchBuffer::new(32).capacity(), 32);
+        assert_eq!(BatchBuffer::new(1000).capacity(), 64);
+    }
+
+    #[test]
+    fn test_recv_batch_roundtrip() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        for payload in [b"one".as_slice(), b"two", b"three"] {
+            sender.send_to(payload, dst).unwrap();
+        }
+        // Give the loopback a moment to deliver
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut batch = BatchBuffer::new(8);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 3);
+        let (src, data) = batch.get(0).unwrap();
+        assert_eq!(src, local_addr(&sender));
+        assert_eq!(data, b"one");
+        assert_eq!(batch.get(2).unwrap().1, b"three");
+        assert!(batch.get(3).is_none());
+
+        // Drained socket: next call reports 0, not an error
+        assert_eq!(receiver.recv_batch(&mut batch).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_send_batch_roundtrip() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        let msgs: Vec<(Vec<u8>, SocketAddr)> = (0..5u8)
+            .map(|i| (vec![i; (i as usize + 1) * 10], dst))
+            .collect();
+        assert_eq!(sender.send_batch(&msgs).unwrap(), 5);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut batch = BatchBuffer::new(16);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 5);
+        for i in 0..5usize {
+            let (_, data) = batch.get(i).unwrap();
+            assert_eq!(data, &vec![i as u8; (i + 1) * 10][..]);
+        }
+    }
 }
