@@ -145,7 +145,7 @@ impl UdpTunnel {
                     self.fd(),
                     batch.hdrs.as_mut_ptr(),
                     n as libc::c_uint,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                     std::ptr::null_mut(),
                 )
             };
