@@ -57,8 +57,6 @@ pub struct ClientConfig {
     #[serde(default)]
     pub performance: PerformanceSection,
     #[serde(default)]
-    pub timeouts: TimeoutsSection,
-    #[serde(default)]
     pub logging: LoggingSection,
 }
 
@@ -142,25 +140,37 @@ impl ClientConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-
-        // Resolve relative key_file path to absolute based on config file's directory
-        if let Some(ref key_file) = config.crypto.key_file {
-            let key_path = Path::new(key_file);
-            if key_path.is_relative() {
-                if let Some(config_dir) = path.parent() {
-                    let absolute_key_path = config_dir.join(key_path);
-                    if let Ok(canonical) = fs::canonicalize(&absolute_key_path) {
-                        config.crypto.key_file = Some(canonical.to_string_lossy().to_string());
-                    } else {
-                        // Try to make it absolute even if file doesn't exist yet (for better error message)
-                        config.crypto.key_file =
-                            Some(absolute_key_path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-
+        super::server::resolve_key_path(&mut config.crypto.private_key_file, path);
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Early validation: fail at load time, not deep in the runtime
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.tun_ipv4()?;
+        self.tun_ipv6()?;
+        if self.ipv4.prefix > 32 {
+            return Err(ConfigError::Invalid("ipv4.prefix must be 0..=32".into()));
+        }
+        if self.ipv6.prefix > 128 {
+            return Err(ConfigError::Invalid("ipv6.prefix must be 0..=128".into()));
+        }
+        self.server_public()?;
+        Ok(())
+    }
+
+    /// The server's static public key (required for clients)
+    pub fn server_public(&self) -> Result<[u8; 32], ConfigError> {
+        let value =
+            self.crypto.server_public_key.as_deref().ok_or_else(|| {
+                ConfigError::Invalid("crypto.server_public_key is required".into())
+            })?;
+        decode_config_public_key(value)
+    }
+
+    /// Load the client identity key
+    pub fn identity(&self) -> Result<crate::crypto::Identity, ConfigError> {
+        self.crypto.identity()
     }
 
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
@@ -254,10 +264,6 @@ impl ClientConfig {
         }
     }
 
-    pub fn key(&self) -> Result<[u8; 32], ConfigError> {
-        self.crypto.get_key()
-    }
-
     pub fn dns_servers(&self) -> Vec<String> {
         let mut servers = self.dns.servers_v4.clone();
         servers.extend(self.dns.servers_v6.clone());
@@ -267,7 +273,7 @@ impl ClientConfig {
 
 /// Generate example client config
 pub fn example_client_config() -> &'static str {
-    r#"# 2cha VPN Client Configuration v0.6
+    r#"# 2cha VPN Client Configuration v1.0
 # Usage: sudo 2cha up -c client.toml
 
 [client]
@@ -290,8 +296,10 @@ queue_len = 500
 
 [crypto]
 cipher = "chacha20-poly1305"
-# key = "SAME_KEY_AS_SERVER"
-# key_file = "/etc/2cha/client.key"
+# Generate with: 2cha genkey /etc/2cha/client.key
+private_key_file = "/etc/2cha/client.key"
+# Server's public key. Get it with: 2cha pubkey server.key (on the server)
+server_public_key = "SERVER_PUBLIC_KEY_BASE64"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IPv4 Configuration
@@ -332,9 +340,6 @@ socket_send_buffer = 2097152
 batch_size = 32
 multi_queue = false
 cpu_affinity = []
-
-[timeouts]
-keepalive = 25
 
 [logging]
 level = "info"

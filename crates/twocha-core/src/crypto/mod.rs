@@ -8,10 +8,15 @@
 
 mod aead;
 mod aes_gcm;
+pub mod identity;
+pub mod mac;
+pub mod noise;
 mod util;
 
 pub use aead::ChaCha20Poly1305;
 pub use aes_gcm::Aes256Gcm;
+pub use identity::{decode_public_key, encode_public_key, Identity};
+pub use noise::{Handshake, SessionCrypto};
 pub use util::{constant_time_compare, secure_zero};
 
 use crate::config::CipherSuite;

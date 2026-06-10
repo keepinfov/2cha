@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["keepinfov"]
@@ -25,15 +25,23 @@ log = "0.4"
 env_logger = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
+toml_edit = "0.23"
 
 # Cryptography (RustCrypto - pure Rust, safe, audited)
 chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
+snow = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+blake2 = "0.10"
+subtle = "2.5"
+base64 = "0.22"
+rand = "0.8"
 
 # CLI/TUI
 clap = { version = "4.5", features = ["derive", "color", "wrap_help"] }
 console = "0.16.1"
+dialoguer = "0.12"
 indicatif = "0.18.3"
 rpassword = "7.3"
 
