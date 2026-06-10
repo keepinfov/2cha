@@ -42,7 +42,10 @@ pub fn cmd_init(mode: Option<&str>, template: bool, output: Option<&str>) -> Res
     let mode = match mode {
         Some(m) => m,
         None => {
-            let items = ["client  — connect to an existing server", "server  — host a VPN"];
+            let items = [
+                "client  — connect to an existing server",
+                "server  — host a VPN",
+            ];
             let idx = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt("What do you want to set up?")
                 .items(items)

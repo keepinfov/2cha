@@ -6,8 +6,8 @@
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, routing::ClientRoutingContext, BatchBuffer, EventLoop, TunDevice,
-    TunnelConfig, UdpTunnel, POLLIN,
+    is_would_block, routing::ClientRoutingContext, BatchBuffer, EventLoop, TunDevice, TunnelConfig,
+    UdpTunnel, POLLIN,
 };
 
 use crate::vpn::common;

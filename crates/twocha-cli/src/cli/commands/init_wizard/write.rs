@@ -47,9 +47,8 @@ pub fn write_config(theme: &ColorfulTheme, path: &Path, contents: &str) -> Resul
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            VpnError::Config(format!("cannot create {}: {}", parent.display(), e))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| VpnError::Config(format!("cannot create {}: {}", parent.display(), e)))?;
     }
     std::fs::write(path, contents)
         .map_err(|e| VpnError::Config(format!("cannot write {}: {}", path.display(), e)))?;
@@ -64,9 +63,8 @@ pub fn load_or_generate_key(path: &Path) -> Result<(Identity, bool)> {
         return Ok((identity, false));
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            VpnError::Config(format!("cannot create {}: {}", parent.display(), e))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| VpnError::Config(format!("cannot create {}: {}", parent.display(), e)))?;
     }
     let identity = Identity::generate();
     identity.save(path)?;

@@ -264,10 +264,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
     summary_line("Config", server_cfg_path.display());
     summary_line("Private key", key_path.display());
     summary_line("Public key", style(&server_public).green());
-    summary_line(
-        "Tunnel",
-        format!("{}/{}", server_address(subnet), prefix),
-    );
+    summary_line("Tunnel", format!("{}/{}", server_address(subnet), prefix));
     for (client, _) in &clients {
         println!();
         println!(

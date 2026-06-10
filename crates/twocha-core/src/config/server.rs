@@ -403,7 +403,10 @@ mod tests {
         upsert_peer_in_file(&path, KEY_A, Some("renamed")).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("# keep this comment"), "comments preserved");
+        assert!(
+            content.contains("# keep this comment"),
+            "comments preserved"
+        );
 
         let cfg = ServerConfig::parse(&content).unwrap();
         assert_eq!(cfg.peers.len(), 2);

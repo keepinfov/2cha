@@ -257,7 +257,13 @@ pub fn run(config_path: &str) -> Result<()> {
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun.fd() {
-                    handle_tun_read(&mut tun, &mut tun_buffer, &tunnel, &mut state, &mut send_queue)?;
+                    handle_tun_read(
+                        &mut tun,
+                        &mut tun_buffer,
+                        &tunnel,
+                        &mut state,
+                        &mut send_queue,
+                    )?;
                 } else if fd == tunnel.fd() {
                     handle_udp_read(&tunnel, &mut tun, &mut state, &mut udp_batch)?;
                 } else if let Some(ref ctl) = control {
@@ -376,7 +382,12 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
                 state.peer_names.insert(pk, n.clone());
             }
             let verb = if added { "added" } else { "updated" };
-            log::info!("control: {} peer {} ({})", verb, key, name.as_deref().unwrap_or("-"));
+            log::info!(
+                "control: {} peer {} ({})",
+                verb,
+                key,
+                name.as_deref().unwrap_or("-")
+            );
             match twocha_core::upsert_peer_in_file(Path::new(config_path), &key, name.as_deref()) {
                 Ok(()) => format!("ok {} {}", verb, key),
                 Err(e) => format!("ok {} {} (warning: not persisted: {})", verb, key, e),

@@ -194,9 +194,8 @@ impl Drop for ControlListener {
 pub fn send_request(socket: &Path, request: &str) -> Result<String> {
     use std::io::{Read, Write};
 
-    let mut stream = UnixStream::connect(socket).map_err(|e| {
-        VpnError::Config(format!("cannot connect to {}: {}", socket.display(), e))
-    })?;
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|e| VpnError::Config(format!("cannot connect to {}: {}", socket.display(), e)))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(request.as_bytes())?;

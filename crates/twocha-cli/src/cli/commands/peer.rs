@@ -14,12 +14,8 @@ fn send(request: &str) -> Result<String> {
             "control socket not found — is the server running on this machine?".into(),
         ));
     };
-    control::send_request(&socket, request).map_err(|e| {
-        VpnError::Config(format!(
-            "{} (is the server running? do you need sudo?)",
-            e
-        ))
-    })
+    control::send_request(&socket, request)
+        .map_err(|e| VpnError::Config(format!("{} (is the server running? do you need sudo?)", e)))
 }
 
 #[cfg(windows)]
