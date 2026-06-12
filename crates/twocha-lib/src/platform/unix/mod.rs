@@ -2,6 +2,7 @@
 //!
 //! Platform-specific implementations for Unix systems (Linux, macOS).
 
+pub mod netlink;
 pub mod network;
 pub mod routing;
 pub mod tun;

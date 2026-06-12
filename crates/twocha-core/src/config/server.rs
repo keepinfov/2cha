@@ -29,6 +29,8 @@ pub struct ServerConfig {
     pub timeouts: TimeoutsSection,
     #[serde(default)]
     pub logging: LoggingSection,
+    #[serde(default)]
+    pub tls: TlsSection,
 }
 
 /// An authorized peer entry
@@ -48,6 +50,9 @@ pub struct ServerSection {
     pub listen_v6: Option<String>,
     #[serde(default = "default_max_clients")]
     pub max_clients: usize,
+    /// Obfuscation transport. Must match the clients' `transport`.
+    #[serde(default)]
+    pub transport: TransportKind,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,6 +307,9 @@ pub fn example_server_config() -> &'static str {
 listen = "0.0.0.0:51820"
 # listen_v6 = "[::]:51820"
 max_clients = 256
+# Obfuscation transport: "quic" (UDP, QUIC-mimicry) or "tls" (real TLS 1.3 over TCP).
+# Must match the clients' transport setting.
+transport = "quic"
 
 [tun]
 name = "tun0"
@@ -367,6 +375,16 @@ session = 180
 [logging]
 level = "info"
 # file = "/var/log/2cha.log"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TLS Transport (only used when server.transport = "tls")
+# ─────────────────────────────────────────────────────────────────────────────
+[tls]
+# SNI the server expects / presents. A self-signed cert is generated for it
+# when no cert/key files are supplied below.
+sni = "www.cloudflare.com"
+# cert_file = "/etc/2cha/tls/fullchain.pem"
+# key_file = "/etc/2cha/tls/privkey.pem"
 "#
 }
 
@@ -426,5 +444,32 @@ mod tests {
         let path = tmp_config();
         assert!(upsert_peer_in_file(&path, "not-base64!!", None).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn example_config_parses_with_transport_defaults() {
+        let cfg = ServerConfig::parse(example_server_config()).unwrap();
+        assert_eq!(cfg.server.transport, TransportKind::Quic);
+        assert_eq!(cfg.tls.sni, "www.cloudflare.com");
+    }
+
+    #[test]
+    fn transport_defaults_to_quic_when_absent() {
+        let cfg = ServerConfig::parse(
+            "[server]\nlisten = \"0.0.0.0:51820\"\n[tun]\n[crypto]\nprivate_key_file = \"k\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.server.transport, TransportKind::Quic);
+        assert_eq!(cfg.tls.sni, "www.cloudflare.com");
+    }
+
+    #[test]
+    fn transport_tls_selected() {
+        let cfg = ServerConfig::parse(
+            "[server]\nlisten = \"0.0.0.0:443\"\ntransport = \"tls\"\n[tun]\n[crypto]\nprivate_key_file = \"k\"\n[tls]\nsni = \"example.com\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.server.transport, TransportKind::Tls);
+        assert_eq!(cfg.tls.sni, "example.com");
     }
 }

@@ -48,6 +48,8 @@ rpassword = "7.3"
 # Unix-specific
 libc = "0.2"
 daemonize = "0.5"
+signal-hook = "0.3"
+socket2 = "0.5"
 
 # Windows-specific
 windows = { version = "0.62.2", features = [

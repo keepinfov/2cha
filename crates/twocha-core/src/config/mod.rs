@@ -11,7 +11,8 @@ pub use client::{
 };
 pub use common::{
     decode_config_public_key, prefix_to_netmask_v4, prefix_to_netmask_v6, CipherSuite, ConfigError,
-    CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TunSection,
+    CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TlsSection, TransportKind,
+    TunSection,
 };
 pub use server::{
     example_server_config, remove_peer_from_file, upsert_peer_in_file, GatewaySection,

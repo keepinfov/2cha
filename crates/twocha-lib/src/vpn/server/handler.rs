@@ -8,6 +8,8 @@
 use crate::platform::unix::{
     is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
+#[cfg(unix)]
+use crate::transport::tls::{TlsServerConn, TlsServerListener};
 
 use crate::vpn::common;
 #[cfg(unix)]
@@ -20,13 +22,15 @@ use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
+use std::os::unix::io::RawFd;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use twocha_core::v4::{
     session::keepalive_jitter, InitOutcome, RateLimiter, ServerHandshakeEngine, Session,
 };
 #[cfg(unix)]
-use twocha_core::ServerConfig;
+use twocha_core::{ServerConfig, TransportKind};
 #[cfg(unix)]
 use twocha_protocol::wire::{self, WireMsg, CID_LEN};
 use twocha_protocol::Result;
@@ -39,11 +43,30 @@ const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
 #[cfg(unix)]
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How a session's packets reach the peer. UDP carries the peer's address
+/// (which can roam); TLS pins the session to a specific accepted connection.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Udp(SocketAddr),
+    Tls(u64),
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Link::Udp(addr) => write!(f, "{}", addr),
+            Link::Tls(id) => write!(f, "tls#{}", id),
+        }
+    }
+}
+
 #[cfg(unix)]
 struct SessionEntry {
     session: Session,
     peer_public: [u8; 32],
-    endpoint: SocketAddr,
+    link: Link,
     next_keepalive: Instant,
 }
 
@@ -66,7 +89,7 @@ struct ServerState {
 
 #[cfg(unix)]
 impl ServerState {
-    fn install_session(&mut self, session: Session, peer_public: [u8; 32], endpoint: SocketAddr) {
+    fn install_session(&mut self, session: Session, peer_public: [u8; 32], link: Link) {
         let cid = session.local_cid;
         if let Some(old_cid) = self.cid_by_peer.insert(peer_public, cid) {
             self.sessions.remove(&old_cid);
@@ -77,15 +100,34 @@ impl ServerState {
             SessionEntry {
                 session,
                 peer_public,
-                endpoint,
+                link,
                 next_keepalive: Instant::now() + keepalive_jitter(),
             },
         );
         log::info!(
             "session established with {} (peers online: {})",
-            endpoint,
+            link,
             self.sessions.len()
         );
+    }
+
+    /// Drop any session bound to `link` and scrub it from the routing indices.
+    /// Used by the TLS loop when a connection closes or is reaped.
+    fn drop_link(&mut self, link: Link) {
+        let cids: Vec<[u8; CID_LEN]> = self
+            .sessions
+            .iter()
+            .filter(|(_, e)| e.link == link)
+            .map(|(cid, _)| *cid)
+            .collect();
+        for cid in cids {
+            if let Some(entry) = self.sessions.remove(&cid) {
+                if self.cid_by_peer.get(&entry.peer_public) == Some(&cid) {
+                    self.cid_by_peer.remove(&entry.peer_public);
+                }
+            }
+            self.cid_by_inner_ip.retain(|_, c| *c != cid);
+        }
     }
 
     fn cleanup(&mut self) {
@@ -101,7 +143,7 @@ impl ServerState {
         }
         for cid in dead {
             if let Some(entry) = self.sessions.remove(&cid) {
-                log::info!("session with {} closed (expired/idle)", entry.endpoint);
+                log::info!("session with {} closed (expired/idle)", entry.link);
                 if self.cid_by_peer.get(&entry.peer_public) == Some(&cid) {
                     self.cid_by_peer.remove(&entry.peer_public);
                 }
@@ -159,7 +201,9 @@ pub fn run(config_path: &str) -> Result<()> {
     tun.bring_up()?;
     tun.set_nonblocking(true)?;
 
-    // Setup gateway/routing
+    // Setup gateway/routing, tracking what we apply so it can be rolled back
+    // on shutdown.
+    let mut routing_ctx = routing::ServerRoutingContext::new();
     if cfg.gateway.ip_forward {
         if let Some(ref iface) = cfg.gateway.external_interface {
             if cfg.ipv4.enable {
@@ -168,7 +212,7 @@ pub fn run(config_path: &str) -> Result<()> {
                     cfg.ipv4.address.as_deref().unwrap_or("10.0.0.0"),
                     cfg.ipv4.prefix
                 );
-                if let Err(e) = routing::setup_server_gateway_v4(iface, &subnet) {
+                if let Err(e) = routing_ctx.setup_v4(iface, &subnet, tun.name()) {
                     log::error!("Failed to setup IPv4 gateway: {}", e);
                 }
             }
@@ -180,7 +224,7 @@ pub fn run(config_path: &str) -> Result<()> {
             if cfg.ipv6.enable {
                 if let Some(ref addr) = cfg.ipv6.address {
                     let subnet = format!("{}/{}", addr, cfg.ipv6.prefix);
-                    if let Err(e) = routing::setup_server_gateway_v6(iface, &subnet) {
+                    if let Err(e) = routing_ctx.setup_v6(iface, &subnet, tun.name()) {
                         log::error!("Failed to setup IPv6 gateway: {}", e);
                     }
                 }
@@ -188,26 +232,11 @@ pub fn run(config_path: &str) -> Result<()> {
         }
     }
 
-    // Create UDP tunnel
-    let tunnel_config = TunnelConfig {
-        local_addr: listen_addr,
-        read_timeout: Some(Duration::from_millis(10)),
-        recv_buffer_size: cfg.performance.socket_recv_buffer,
-        send_buffer_size: cfg.performance.socket_send_buffer,
-        ..Default::default()
-    };
-
-    let tunnel = UdpTunnel::new(tunnel_config)?;
-    tunnel.set_nonblocking(true)?;
-
-    log::info!("Listening on {}", listen_addr);
-
     common::reset_running();
     common::setup_signal_handler();
 
     let mut event_loop = EventLoop::new();
     event_loop.add_fd(tun.fd(), POLLIN);
-    event_loop.add_fd(tunnel.fd(), POLLIN);
 
     // Runtime peer management socket (the server still runs without it)
     let control = match ControlListener::bind() {
@@ -239,17 +268,94 @@ pub fn run(config_path: &str) -> Result<()> {
         idle_timeout: Duration::from_secs(cfg.timeouts.session),
     };
 
+    log::info!(
+        "Server ready. Authorized peers: {}, max clients: {}, transport: {}",
+        state.allowed.len(),
+        state.max_clients,
+        cfg.server.transport
+    );
+
+    let serve_result = match cfg.server.transport {
+        TransportKind::Quic => serve_udp(
+            &cfg,
+            config_path,
+            &mut tun,
+            &mut state,
+            &mut event_loop,
+            control.as_ref(),
+            listen_addr,
+        ),
+        TransportKind::Tls => serve_tls(
+            &cfg,
+            config_path,
+            &mut tun,
+            &mut state,
+            &mut event_loop,
+            control.as_ref(),
+            listen_addr,
+        ),
+    };
+
+    // Roll back NAT/forwarding regardless of how the loop exited.
+    routing_ctx.cleanup();
+
+    serve_result?;
+    log::info!("Server shutdown");
+    Ok(())
+}
+
+/// Periodic maintenance shared by both transport loops: rotate the cookie
+/// secret and expire idle/dead sessions.
+#[cfg(unix)]
+fn rotate_and_cleanup(
+    state: &mut ServerState,
+    last_cookie_rotate: &mut Instant,
+    last_cleanup: &mut Instant,
+) {
+    let now = Instant::now();
+    if last_cookie_rotate.elapsed() > COOKIE_ROTATE_INTERVAL {
+        state.engine.rotate_cookie_secret();
+        *last_cookie_rotate = now;
+    }
+    if last_cleanup.elapsed() > CLEANUP_INTERVAL {
+        state.cleanup();
+        *last_cleanup = now;
+    }
+}
+
+/// UDP / QUIC-mimicry transport loop. Behaviour is identical to the
+/// pre-abstraction server: one socket, demux by CID, recvmmsg batching,
+/// address roaming.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn serve_udp(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let tunnel_config = TunnelConfig {
+        local_addr: listen_addr,
+        read_timeout: Some(Duration::from_millis(10)),
+        recv_buffer_size: cfg.performance.socket_recv_buffer,
+        send_buffer_size: cfg.performance.socket_send_buffer,
+        ..Default::default()
+    };
+
+    let tunnel = UdpTunnel::new(tunnel_config)?;
+    tunnel.set_nonblocking(true)?;
+    event_loop.add_fd(tunnel.fd(), POLLIN);
+
+    log::info!("Listening on {} (udp/quic)", listen_addr);
+
     let mut last_cleanup = Instant::now();
     let mut last_cookie_rotate = Instant::now();
     let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
     let mut udp_batch = BatchBuffer::new(cfg.performance.batch_size);
     let mut send_queue: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(udp_batch.capacity());
-
-    log::info!(
-        "Server ready. Authorized peers: {}, max clients: {}",
-        state.allowed.len(),
-        state.max_clients
-    );
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -257,46 +363,265 @@ pub fn run(config_path: &str) -> Result<()> {
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun.fd() {
-                    handle_tun_read(
-                        &mut tun,
-                        &mut tun_buffer,
-                        &tunnel,
-                        &mut state,
-                        &mut send_queue,
-                    )?;
+                    handle_tun_read(tun, &mut tun_buffer, &tunnel, state, &mut send_queue)?;
                 } else if fd == tunnel.fd() {
-                    handle_udp_read(&tunnel, &mut tun, &mut state, &mut udp_batch)?;
-                } else if let Some(ref ctl) = control {
+                    handle_udp_read(&tunnel, tun, state, &mut udp_batch)?;
+                } else if let Some(ctl) = control {
                     if fd == ctl.fd() {
-                        ctl.process(|req| handle_control(req, &mut state, config_path));
+                        ctl.process(|req| handle_control(req, state, config_path));
                     }
                 }
             }
         }
 
-        let now = Instant::now();
-        if last_cookie_rotate.elapsed() > COOKIE_ROTATE_INTERVAL {
-            state.engine.rotate_cookie_secret();
-            last_cookie_rotate = now;
-        }
-        if last_cleanup.elapsed() > CLEANUP_INTERVAL {
-            state.cleanup();
-            last_cleanup = now;
-        }
+        rotate_and_cleanup(state, &mut last_cookie_rotate, &mut last_cleanup);
 
         // Keepalives keep NAT bindings open and break the silence pattern
+        let now = Instant::now();
         for entry in state.sessions.values_mut() {
             if now >= entry.next_keepalive {
-                if let Ok(datagram) = entry.session.seal_data(&[]) {
-                    let _ = tunnel.send_to(&datagram, entry.endpoint);
+                if let Link::Udp(addr) = entry.link {
+                    if let Ok(datagram) = entry.session.seal_data(&[]) {
+                        let _ = tunnel.send_to(&datagram, addr);
+                    }
                 }
                 entry.next_keepalive = now + keepalive_jitter();
             }
         }
     }
 
-    log::info!("Server shutdown");
     Ok(())
+}
+
+/// Build the TLS listener from configured cert/key, or a fresh self-signed
+/// certificate for the configured SNI when none is supplied.
+#[cfg(unix)]
+fn build_tls_listener(cfg: &ServerConfig, listen_addr: SocketAddr) -> Result<TlsServerListener> {
+    match (&cfg.tls.cert_file, &cfg.tls.key_file) {
+        (Some(cert), Some(key)) => {
+            let cert_pem = std::fs::read(cert).map_err(VpnError::Io)?;
+            let key_pem = std::fs::read(key).map_err(VpnError::Io)?;
+            TlsServerListener::bind(listen_addr, &cert_pem, &key_pem).map_err(VpnError::Io)
+        }
+        (None, None) => {
+            log::info!(
+                "tls: no cert/key configured, generating self-signed cert for {}",
+                cfg.tls.sni
+            );
+            TlsServerListener::bind_self_signed(listen_addr, &cfg.tls.sni).map_err(VpnError::Io)
+        }
+        _ => Err(VpnError::Config(
+            "tls.cert_file and tls.key_file must both be set or both omitted".into(),
+        )),
+    }
+}
+
+/// TLS-over-TCP transport loop. Each client is a separate TCP connection with
+/// its own poll fd; sessions are pinned to a connection (no address roaming).
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn serve_tls(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let listener = build_tls_listener(cfg, listen_addr)?;
+    listener.set_nonblocking(true).map_err(VpnError::Io)?;
+    let listener_fd = listener.pollfd();
+    event_loop.add_fd(listener_fd, POLLIN);
+
+    log::info!(
+        "Listening on {} (tls/tcp, sni={})",
+        listen_addr,
+        cfg.tls.sni
+    );
+
+    let mut conns: HashMap<u64, TlsServerConn> = HashMap::new();
+    let mut fd_to_conn: HashMap<RawFd, u64> = HashMap::new();
+    let mut last_active: HashMap<u64, Instant> = HashMap::new();
+    let mut next_conn_id: u64 = 1;
+
+    let mut last_cleanup = Instant::now();
+    let mut last_cookie_rotate = Instant::now();
+    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+
+    while common::running() {
+        let events = event_loop.poll(100)?;
+        let mut to_drop: Vec<u64> = Vec::new();
+
+        for (fd, revents) in events {
+            if revents & POLLIN == 0 {
+                continue;
+            }
+            if fd == tun.fd() {
+                handle_tun_read_tls(tun, &mut tun_buffer, state, &mut conns)?;
+            } else if fd == listener_fd {
+                accept_tls(
+                    &listener,
+                    event_loop,
+                    &mut conns,
+                    &mut fd_to_conn,
+                    &mut last_active,
+                    &mut next_conn_id,
+                );
+            } else if let Some(&id) = fd_to_conn.get(&fd) {
+                match handle_tls_conn_read(id, tun, state, &mut conns) {
+                    Ok(true) => {
+                        last_active.insert(id, Instant::now());
+                    }
+                    Ok(false) => {}
+                    Err(_) => to_drop.push(id),
+                }
+            } else if let Some(ctl) = control {
+                if fd == ctl.fd() {
+                    ctl.process(|req| handle_control(req, state, config_path));
+                }
+            }
+        }
+
+        for id in to_drop {
+            log::debug!("tls: closing connection {}", id);
+            drop_tls_conn(
+                id,
+                event_loop,
+                &mut conns,
+                &mut fd_to_conn,
+                &mut last_active,
+                state,
+            );
+        }
+
+        rotate_and_cleanup(state, &mut last_cookie_rotate, &mut last_cleanup);
+
+        // Reap idle connections: never-handshaked probes and peers whose
+        // session was dropped (revocation / expiry) but whose TCP stays open.
+        let idle = state.idle_timeout;
+        let stale: Vec<u64> = last_active
+            .iter()
+            .filter(|(_, t)| t.elapsed() > idle)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            log::debug!("tls: reaping idle connection {}", id);
+            drop_tls_conn(
+                id,
+                event_loop,
+                &mut conns,
+                &mut fd_to_conn,
+                &mut last_active,
+                state,
+            );
+        }
+
+        let now = Instant::now();
+        for entry in state.sessions.values_mut() {
+            if now >= entry.next_keepalive {
+                if let Link::Tls(id) = entry.link {
+                    if let Some(conn) = conns.get_mut(&id) {
+                        if let Ok(datagram) = entry.session.seal_data(&[]) {
+                            let _ = conn.send(&datagram);
+                        }
+                    }
+                }
+                entry.next_keepalive = now + keepalive_jitter();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Drain all pending TCP connections off the listener, completing each TLS
+/// handshake and registering the resulting connection in the poll loop.
+#[cfg(unix)]
+fn accept_tls(
+    listener: &TlsServerListener,
+    event_loop: &mut EventLoop,
+    conns: &mut HashMap<u64, TlsServerConn>,
+    fd_to_conn: &mut HashMap<RawFd, u64>,
+    last_active: &mut HashMap<u64, Instant>,
+    next_conn_id: &mut u64,
+) {
+    loop {
+        match listener.accept() {
+            Ok(Some(mut conn)) => {
+                if let Err(e) = conn.set_nonblocking(true) {
+                    log::warn!("tls: set_nonblocking failed: {}", e);
+                    continue;
+                }
+                let id = *next_conn_id;
+                *next_conn_id += 1;
+                let cfd = conn.pollfd();
+                event_loop.add_fd(cfd, POLLIN);
+                fd_to_conn.insert(cfd, id);
+                last_active.insert(id, Instant::now());
+                conns.insert(id, conn);
+                log::debug!("tls: accepted connection {} ({} open)", id, conns.len());
+            }
+            Ok(None) => break,
+            // A failed TCP accept or TLS handshake (e.g. a plain probe) is not
+            // fatal: log and keep serving other clients.
+            Err(e) => {
+                log::debug!("tls: accept/handshake failed: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// Close a TLS connection: deregister its fd, forget it, and drop any session
+/// pinned to it. Idempotent.
+#[cfg(unix)]
+fn drop_tls_conn(
+    id: u64,
+    event_loop: &mut EventLoop,
+    conns: &mut HashMap<u64, TlsServerConn>,
+    fd_to_conn: &mut HashMap<RawFd, u64>,
+    last_active: &mut HashMap<u64, Instant>,
+    state: &mut ServerState,
+) {
+    if let Some(conn) = conns.remove(&id) {
+        let fd = conn.pollfd();
+        event_loop.remove_fd(fd);
+        fd_to_conn.remove(&fd);
+    }
+    last_active.remove(&id);
+    state.drop_link(Link::Tls(id));
+}
+
+/// Read all available datagrams off one TLS connection. Returns whether any
+/// datagram was processed; an `Err` means the connection is dead (EOF / error)
+/// and should be dropped.
+#[cfg(unix)]
+fn handle_tls_conn_read(
+    id: u64,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    conns: &mut HashMap<u64, TlsServerConn>,
+) -> Result<bool> {
+    let mut buf = Vec::new();
+    let mut got_any = false;
+    while let Some(conn) = conns.get_mut(&id) {
+        let peer = conn.peer_addr();
+        let ready = match conn.recv(&mut buf) {
+            Ok(ready) => ready,
+            Err(e) => return Err(VpnError::Io(e)),
+        };
+        if !ready {
+            break;
+        }
+        got_any = true;
+        if let Some(reply) = handle_datagram(tun, state, peer, Link::Tls(id), &buf) {
+            if let Some(conn) = conns.get_mut(&id) {
+                let _ = conn.send(&reply);
+            }
+        }
+    }
+    Ok(got_any)
 }
 
 #[cfg(unix)]
@@ -321,11 +646,13 @@ fn handle_tun_read(
                     continue;
                 };
                 if let Some(entry) = state.sessions.get_mut(cid) {
-                    if let Ok(datagram) = entry.session.seal_data(packet) {
-                        send_queue.push((datagram, entry.endpoint));
-                        if send_queue.len() >= flush_at {
-                            let _ = tunnel.send_batch(send_queue);
-                            send_queue.clear();
+                    if let Link::Udp(addr) = entry.link {
+                        if let Ok(datagram) = entry.session.seal_data(packet) {
+                            send_queue.push((datagram, addr));
+                            if send_queue.len() >= flush_at {
+                                let _ = tunnel.send_batch(send_queue);
+                                send_queue.clear();
+                            }
                         }
                     }
                 }
@@ -338,6 +665,44 @@ fn handle_tun_read(
     if !send_queue.is_empty() {
         let _ = tunnel.send_batch(send_queue);
         send_queue.clear();
+    }
+    Ok(())
+}
+
+/// TUN -> TLS: seal each inbound packet for its session and write it down the
+/// pinned connection. The TLS layer handles its own framing.
+#[cfg(unix)]
+fn handle_tun_read_tls(
+    tun: &mut TunDevice,
+    buffer: &mut [u8],
+    state: &mut ServerState,
+    conns: &mut HashMap<u64, TlsServerConn>,
+) -> Result<()> {
+    loop {
+        match tun.read(buffer) {
+            Ok(n) if n > 0 => {
+                let packet = &buffer[..n];
+                let Some(dst) = common::inner_dst_ip(packet) else {
+                    continue;
+                };
+                let Some(cid) = state.cid_by_inner_ip.get(&dst).copied() else {
+                    log::trace!("no session for inner destination {}", dst);
+                    continue;
+                };
+                if let Some(entry) = state.sessions.get_mut(&cid) {
+                    if let Link::Tls(id) = entry.link {
+                        if let Ok(datagram) = entry.session.seal_data(packet) {
+                            if let Some(conn) = conns.get_mut(&id) {
+                                let _ = conn.send(&datagram);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => break,
+            Err(e) if is_would_block(&e) => break,
+            Err(_) => break,
+        }
     }
     Ok(())
 }
@@ -357,7 +722,9 @@ fn handle_udp_read(
                     let Some((src, data)) = batch.get(i) else {
                         continue;
                     };
-                    handle_datagram(tunnel, tun, state, src, data);
+                    if let Some(reply) = handle_datagram(tun, state, src, Link::Udp(src), data) {
+                        let _ = tunnel.send_to(&reply, src);
+                    }
                 }
             }
             Err(e) if is_would_block(&e) => break,
@@ -403,7 +770,7 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
             // Revocation must drop the active session immediately
             if let Some(cid) = state.cid_by_peer.remove(&pk) {
                 if let Some(entry) = state.sessions.remove(&cid) {
-                    log::info!("session with {} closed (peer removed)", entry.endpoint);
+                    log::info!("session with {} closed (peer removed)", entry.link);
                 }
                 state.cid_by_inner_ip.retain(|_, c| *c != cid);
             }
@@ -435,7 +802,7 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
                             "\npeer {} {} online endpoint={} last_recv_secs={}",
                             b64,
                             name,
-                            entry.endpoint,
+                            entry.link,
                             entry.session.last_recv.elapsed().as_secs()
                         ));
                     }
@@ -447,25 +814,24 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
     }
 }
 
-/// Process one inbound datagram. All failure paths are silent drops.
+/// Process one inbound datagram. Transport-neutral: returns an optional reply
+/// datagram for the caller to send back over the originating link (UDP socket
+/// or TLS connection). All failure paths are silent drops (`None`).
 #[cfg(unix)]
 fn handle_datagram(
-    tunnel: &UdpTunnel,
     tun: &mut TunDevice,
     state: &mut ServerState,
     src: SocketAddr,
+    src_link: Link,
     data: &[u8],
-) {
-    let msg = match wire::parse(data) {
-        Ok(msg) => msg,
-        Err(_) => return,
-    };
+) -> Option<Vec<u8>> {
+    let msg = wire::parse(data).ok()?;
 
     match msg {
         WireMsg::Init { .. } => {
             // Per-IP budget exceeded: drop before any crypto
             if !state.limiter.allow(src.ip()) {
-                return;
+                return None;
             }
             let under_load = state.limiter.under_load();
             let allowed = &state.allowed;
@@ -481,15 +847,13 @@ fn handle_datagram(
                     let is_new_peer = !state.cid_by_peer.contains_key(&peer_public);
                     if is_new_peer && state.cid_by_peer.len() >= state.max_clients {
                         log::warn!("max_clients reached, dropping handshake from {}", src);
-                        return;
+                        return None;
                     }
-                    let _ = tunnel.send_to(&datagram, src);
-                    state.install_session(session, peer_public, src);
+                    state.install_session(session, peer_public, src_link);
+                    Some(datagram)
                 }
-                InitOutcome::CookieReply(reply) => {
-                    let _ = tunnel.send_to(&reply, src);
-                }
-                InitOutcome::Drop => {}
+                InitOutcome::CookieReply(reply) => Some(reply),
+                InitOutcome::Drop => None,
             }
         }
         WireMsg::Data {
@@ -497,28 +861,27 @@ fn handle_datagram(
             masked_counter,
             ciphertext,
         } => {
-            let Some(entry) = state.sessions.get_mut(&receiver_cid) else {
-                return;
-            };
-            let payload = match entry.session.open_data(masked_counter, ciphertext) {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            // Roaming: authenticated packet from a new address moves the peer
-            if entry.endpoint != src {
-                log::info!("peer roamed {} -> {}", entry.endpoint, src);
-                entry.endpoint = src;
+            let entry = state.sessions.get_mut(&receiver_cid)?;
+            let payload = entry.session.open_data(masked_counter, ciphertext).ok()?;
+            // Roaming applies only to UDP, where the peer's address can change.
+            // A TLS session is pinned to its connection.
+            if let Link::Udp(addr) = src_link {
+                if entry.link != src_link {
+                    log::info!("peer roamed {} -> {}", entry.link, addr);
+                    entry.link = src_link;
+                }
             }
             if payload.is_empty() {
-                return; // keepalive
+                return None; // keepalive
             }
             if let Some(inner_src) = common::inner_src_ip(&payload) {
                 state.cid_by_inner_ip.insert(inner_src, receiver_cid);
             }
             let _ = tun.write(&payload);
+            None
         }
         // Server never consumes handshake responses or cookies
-        WireMsg::Resp { .. } | WireMsg::Cookie { .. } => {}
+        WireMsg::Resp { .. } | WireMsg::Cookie { .. } => None,
     }
 }
 

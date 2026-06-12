@@ -60,33 +60,26 @@ impl UdpTunnel {
     }
 
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
-        let fd = socket.as_raw_fd();
-
-        unsafe {
-            let recv_size = recv_size as libc::c_int;
-            let send_size = send_size as libc::c_int;
-
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &recv_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &send_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+        // socket2 borrows the std socket's fd and returns a checked Result, so
+        // a failed SO_RCVBUF/SO_SNDBUF is logged instead of silently ignored.
+        let sock = socket2::SockRef::from(socket);
+        if let Err(e) = sock.set_recv_buffer_size(recv_size) {
+            log::warn!("failed to set SO_RCVBUF to {}: {}", recv_size, e);
+        }
+        if let Err(e) = sock.set_send_buffer_size(send_size) {
+            log::warn!("failed to set SO_SNDBUF to {}: {}", send_size, e);
         }
     }
 
     #[inline]
     pub fn fd(&self) -> RawFd {
         self.socket.as_raw_fd()
+    }
+
+    /// The actual local address the socket is bound to (resolves the ephemeral
+    /// port when the config requested port 0).
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.socket.local_addr()?)
     }
 
     /// Send a complete datagram to `addr`
@@ -476,14 +469,20 @@ pub const POLLERR: i16 = libc::POLLERR;
 #[allow(dead_code)]
 pub const POLLHUP: i16 = libc::POLLHUP;
 
-/// Check if error is "would block"
+/// Check if an error means "no data right now" (the socket/fd would block or a
+/// read timeout elapsed). Matches on the error's structured kind rather than
+/// its display text, which is both faster and robust to locale/format changes.
 #[inline]
 pub fn is_would_block(e: &twocha_protocol::VpnError) -> bool {
-    let s = e.to_string();
-    s.contains("WouldBlock")
-        || s.contains("temporarily unavailable")
-        || s.contains("os error 11")
-        || s.contains("Resource temporarily unavailable")
+    use twocha_protocol::{NetworkError, VpnError};
+    match e {
+        VpnError::Io(io_err) => matches!(
+            io_err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        VpnError::Network(NetworkError::WouldBlock) => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -514,6 +513,27 @@ mod tests {
             let (storage, _) = encode_sockaddr(addr);
             assert_eq!(decode_sockaddr(&storage), Some(addr));
         }
+    }
+
+    #[test]
+    fn test_is_would_block() {
+        use std::io;
+        use twocha_protocol::{NetworkError, VpnError};
+
+        assert!(is_would_block(&VpnError::Io(io::Error::from(
+            io::ErrorKind::WouldBlock
+        ))));
+        assert!(is_would_block(&VpnError::Io(io::Error::from(
+            io::ErrorKind::TimedOut
+        ))));
+        assert!(is_would_block(&VpnError::Network(NetworkError::WouldBlock)));
+        // Unrelated errors must not be misclassified — the old string match
+        // treated anything containing "os error 11" as would-block.
+        assert!(!is_would_block(&VpnError::Io(io::Error::from(
+            io::ErrorKind::ConnectionReset
+        ))));
+        assert!(!is_would_block(&VpnError::Config("os error 11".into())));
+        assert!(!is_would_block(&VpnError::Network(NetworkError::Timeout)));
     }
 
     #[test]

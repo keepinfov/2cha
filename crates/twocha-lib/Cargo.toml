@@ -15,9 +15,16 @@ twocha-protocol.workspace = true
 twocha-core.workspace = true
 
 log.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+tun-rs = "2.8.5"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+signal-hook.workspace = true
+socket2.workspace = true
+neli = "0.7.4"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc.workspace = true
