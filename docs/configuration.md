@@ -11,7 +11,8 @@ paths are `/etc/2cha/server.toml` and `/etc/2cha/client.toml` on Unix
 Generate a fully-commented starting point with `2cha init server --template > server.toml`
 or `2cha init client --template > client.toml` (see [Quick Start](./quickstart.md)).
 
-> Relative `private_key_file` paths are resolved against the config file's directory.
+> Relative file paths (`private_key_file`, `tls.cert_file`, `tls.key_file`) are resolved
+> against the config file's directory, not the working directory.
 
 ---
 
