@@ -64,6 +64,8 @@ Full documentation lives in [`docs/`](docs/README.md):
 - **[Keys & Peers](docs/keys-and-peers.md)** — the key model and live peer management
 - **[Server Setup](docs/server-setup.md)** — first-time setup, gateway/NAT, running as a service
 - **[Client Setup](docs/client-setup.md)** — connecting and running as a service
+- **[Config CLI](docs/config-cli.md)** — inspect/edit configs with `2cha config`, validated and atomic
+- **[NixOS](docs/nixos.md)** — declarative `services.twocha` server/client
 - **[Configuration Reference](docs/configuration.md)** — every config key, type, and default
 - **[Transports](docs/transports.md)** — `quic` vs `tls`
 - **[Routing](docs/routing.md)** — full vs split tunnel, DNS
@@ -83,6 +85,7 @@ Full documentation lives in [`docs/`](docs/README.md):
 | `genkey <file>` | Generate an X25519 keypair (private → file, public → stdout) |
 | `pubkey <file>` | Print the public key for a private key file |
 | `peer add/remove/list` | Manage authorized peers on a running server |
+| `config validate/show/get/set/edit` | Inspect and edit a config file (validated, atomic) |
 | `init [client\|server]` | Create a config (wizard; `--template` for stdout) |
 
 Common flags: `-c/--config <FILE>`, `-d/--daemon`, `-v/--verbose`, `-q/--quiet`.
