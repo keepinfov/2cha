@@ -154,7 +154,11 @@ impl TunDevice {
         Ok(n)
     }
 
-    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
-        self.dev.set_nonblocking(nonblocking).map_err(map_io)
+    pub fn set_nonblocking(&self, _nonblocking: bool) -> Result<()> {
+        // WinTun exposes a read-wait event HANDLE rather than a pollable,
+        // non-blocking file descriptor, so `tun-rs` has no `set_nonblocking`
+        // on Windows. This is a no-op; the Windows event loop waits on the
+        // read-ready HANDLE instead.
+        Ok(())
     }
 }
