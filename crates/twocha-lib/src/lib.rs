@@ -7,6 +7,8 @@
 //! - VPN client and server handlers driving the v4 protocol engine
 
 pub mod platform;
+#[cfg(unix)]
+pub mod transport;
 pub mod vpn;
 
 // Re-export commonly used types

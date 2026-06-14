@@ -20,13 +20,25 @@ PORT=51820
 
 CAPTURE=""
 KEEP=0
+MODE=quic
+TLS_SNI="www.example-cdn.test"
 while [ $# -gt 0 ]; do
     case "$1" in
         --capture) CAPTURE="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
+        --tls) MODE=tls; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+# Wire protocol differs per transport: fake-QUIC rides UDP, the TLS transport
+# rides TCP. The capture filter and the probing assertion below switch on this.
+if [ "$MODE" = "tls" ]; then
+    L4=tcp
+else
+    L4=udp
+fi
+echo "== transport mode: $MODE (L4: $L4)"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "must run as root (network namespaces + TUN)" >&2
@@ -74,10 +86,22 @@ ip -n "$NS_C" link set "$VETH_C" up
 "$BIN" genkey "$WORK/server.key" >"$WORK/server.pub" 2>/dev/null
 "$BIN" genkey "$WORK/client.key" >"$WORK/client.pub" 2>/dev/null
 
+# In TLS mode both ends select transport = "tls" and share an SNI. The server
+# auto-generates a self-signed cert for that SNI (no cert/key files needed);
+# Noise_IK still runs *inside* the TLS tunnel for authentication.
+if [ "$MODE" = "tls" ]; then
+    SRV_TRANSPORT=$'transport = "tls"\n\n[tls]\nsni = "'"$TLS_SNI"$'"'
+    CLI_TRANSPORT=$'transport = "tls"\n\n[tls]\nsni = "'"$TLS_SNI"$'"'
+else
+    SRV_TRANSPORT=""
+    CLI_TRANSPORT=""
+fi
+
 cat >"$WORK/server.toml" <<EOF
 [server]
 listen = "$WIRE_S:$PORT"
 max_clients = 8
+$SRV_TRANSPORT
 
 [tun]
 name = "tun0"
@@ -103,6 +127,7 @@ EOF
 cat >"$WORK/client.toml" <<EOF
 [client]
 server = "$WIRE_S:$PORT"
+$CLI_TRANSPORT
 
 [tun]
 name = "tun0"
@@ -130,7 +155,7 @@ if [ -n "$CAPTURE" ]; then
         echo "      (NixOS hint: sudo --preserve-env=PATH, with tcpdump in a nix shell)" >&2
         CAPTURE=""
     else
-        ip netns exec "$NS_S" tcpdump -i "$VETH_S" -w "$CAPTURE" "udp port $PORT" \
+        ip netns exec "$NS_S" tcpdump -i "$VETH_S" -w "$CAPTURE" "$L4 port $PORT" \
             >"$WORK/tcpdump.log" 2>&1 &
         DUMP_PID=$!
         sleep 0.5
@@ -166,8 +191,30 @@ else
     exit 1
 fi
 
-echo "== anti-amplification: garbage datagram must get no reply"
-REPLY=$(ip netns exec "$NS_C" python3 - "$WIRE_S" "$PORT" <<'PY'
+if [ "$MODE" = "tls" ]; then
+    echo "== anti-probing: TLS server must complete a real handshake (SNI $TLS_SNI)"
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "WARN: openssl not found in PATH, skipping handshake assertion" >&2
+    else
+        # A real TLS server returns a ServerHello + Certificate and finishes the
+        # handshake. Fake-QUIC would silently drop this, so receiving a cert is
+        # the discriminating signal an active prober would look for. The cert is
+        # self-signed *by design* — Noise_IK inside the tunnel is the real
+        # authenticator — so we must NOT pass -verify_return_error here.
+        if ip netns exec "$NS_C" openssl s_client -connect "$WIRE_S:$PORT" \
+            -servername "$TLS_SNI" -showcerts 2>"$WORK/openssl.log" \
+            </dev/null | grep -q "BEGIN CERTIFICATE"; then
+            echo "PASS: server presented a certificate and completed TLS handshake"
+        else
+            echo "FAIL: no TLS handshake / certificate from server"
+            echo "--- openssl.log"; tail -20 "$WORK/openssl.log"
+            echo "--- server.log"; tail -20 "$WORK/server.log"
+            exit 1
+        fi
+    fi
+else
+    echo "== anti-amplification: garbage datagram must get no reply"
+    REPLY=$(ip netns exec "$NS_C" python3 - "$WIRE_S" "$PORT" <<'PY'
 import os, socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(2)
@@ -178,12 +225,13 @@ try:
 except socket.timeout:
     print(0)
 PY
-)
-if [ "$REPLY" = "0" ]; then
-    echo "PASS: zero response bytes to unauthenticated garbage"
-else
-    echo "FAIL: server replied with $REPLY bytes to garbage"
-    exit 1
+    )
+    if [ "$REPLY" = "0" ]; then
+        echo "PASS: zero response bytes to unauthenticated garbage"
+    else
+        echo "FAIL: server replied with $REPLY bytes to garbage"
+        exit 1
+    fi
 fi
 
 if [ -n "$CAPTURE" ]; then
@@ -194,8 +242,13 @@ if [ -n "$CAPTURE" ]; then
     DUMP_PID=""
     if [ -s "$CAPTURE" ]; then
         echo "== capture written to $CAPTURE"
-        echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
-        echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e udp.payload | tr -d '\\n:,' | xxd -r -p)"
+        if [ "$MODE" = "tls" ]; then
+            echo "   inspect with: wireshark $CAPTURE   (should show a real TLS 1.3 handshake: ClientHello/ServerHello/Certificate)"
+            echo "   handshake:    tshark -r $CAPTURE -Y tls.handshake.type"
+        else
+            echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
+            echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e udp.payload | tr -d '\\n:,' | xxd -r -p)"
+        fi
     else
         echo "WARN: capture file is missing or empty: $CAPTURE" >&2
         cat "$WORK/tcpdump.log" >&2

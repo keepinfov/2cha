@@ -25,6 +25,54 @@ impl std::fmt::Display for CipherSuite {
     }
 }
 
+/// Obfuscation transport carrying the v4 protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    /// UDP with QUIC-mimicry framing (backwards compatible default).
+    #[default]
+    Quic,
+    /// Real TLS 1.3 over TCP with Noise riding inside.
+    Tls,
+}
+
+impl std::fmt::Display for TransportKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportKind::Quic => write!(f, "quic"),
+            TransportKind::Tls => write!(f, "tls"),
+        }
+    }
+}
+
+/// TLS transport configuration. Only consulted when `transport = "tls"`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsSection {
+    /// SNI the client presents / the server expects. Choose a plausible host
+    /// to blend in. On the server a self-signed cert is generated for it when
+    /// no cert/key files are supplied.
+    #[serde(default = "default_tls_sni")]
+    pub sni: String,
+    /// PEM certificate chain path (server only; optional — self-signed if absent).
+    #[serde(default)]
+    pub cert_file: Option<String>,
+    /// PEM PKCS#8 private key path (server only; required if `cert_file` is set).
+    #[serde(default)]
+    pub key_file: Option<String>,
+}
+
+impl Default for TlsSection {
+    fn default() -> Self {
+        // Keep this consistent with the per-field serde defaults so an omitted
+        // `[tls]` table and a present-but-empty one resolve to the same SNI.
+        TlsSection {
+            sni: default_tls_sni(),
+            cert_file: None,
+            key_file: None,
+        }
+    }
+}
+
 /// TUN device configuration
 #[derive(Debug, Deserialize)]
 pub struct TunSection {
@@ -145,6 +193,9 @@ pub fn default_session_timeout() -> u64 {
 }
 pub fn default_log_level() -> String {
     "info".to_string()
+}
+pub fn default_tls_sni() -> String {
+    "www.cloudflare.com".to_string()
 }
 pub fn default_max_clients() -> usize {
     256

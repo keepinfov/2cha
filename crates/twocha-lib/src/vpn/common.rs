@@ -23,18 +23,19 @@ pub fn reset_running() {
     RUNNING.store(true, Ordering::SeqCst);
 }
 
+/// Install SIGINT/SIGTERM handlers that flip the run flag so the event loops
+/// exit cleanly. Uses `signal-hook` (sigaction-based) rather than the
+/// deprecated `libc::signal()`. The handler only does an atomic store, which is
+/// async-signal-safe.
 #[cfg(unix)]
 pub fn setup_signal_handler() {
-    let handler = handle_signal as *const () as libc::sighandler_t;
-    unsafe {
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
+    for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        // Safety: the registered action calls only `stop()`, an atomic store,
+        // which is sound to run in signal context.
+        if let Err(e) = unsafe { signal_hook::low_level::register(sig, stop) } {
+            log::warn!("failed to install handler for signal {}: {}", sig, e);
+        }
     }
-}
-
-#[cfg(unix)]
-extern "C" fn handle_signal(_: libc::c_int) {
-    stop();
 }
 
 /// Source IP of a raw IPv4/IPv6 packet read from TUN

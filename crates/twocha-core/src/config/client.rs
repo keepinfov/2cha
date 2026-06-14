@@ -49,6 +49,8 @@ pub struct ClientConfig {
     pub tun: TunSection,
     pub crypto: CryptoSection,
     #[serde(default)]
+    pub tls: TlsSection,
+    #[serde(default)]
     pub ipv4: Ipv4ClientSection,
     #[serde(default)]
     pub ipv6: Ipv6ClientSection,
@@ -67,6 +69,9 @@ pub struct ClientSection {
     pub prefer_ipv6: bool,
     #[serde(default)]
     pub dns_lookup: DnsLookup,
+    /// Obfuscation transport: `"quic"` (default) or `"tls"`.
+    #[serde(default)]
+    pub transport: TransportKind,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +293,15 @@ prefer_ipv6 = false
 #   true   - Same as "always" (backward compatibility)
 #   false  - Same as "never" (backward compatibility)
 dns_lookup = "auto"
+# Obfuscation transport:
+#   quic - UDP with QUIC-mimicry framing (default, backwards compatible)
+#   tls  - real TLS 1.3 over TCP with the Noise handshake riding inside
+transport = "quic"
+
+# Only used when transport = "tls". The SNI presented to the server; pick a
+# plausible host to blend in with normal HTTPS traffic.
+[tls]
+sni = "www.cloudflare.com"
 
 [tun]
 name = "tun0"
@@ -344,4 +358,52 @@ cpu_affinity = []
 [logging]
 level = "info"
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config_parses_with_transport_defaults() {
+        let cfg = ClientConfig::parse(example_client_config()).expect("example must parse");
+        assert_eq!(cfg.client.transport, TransportKind::Quic);
+        assert_eq!(cfg.tls.sni, "www.cloudflare.com");
+    }
+
+    #[test]
+    fn transport_defaults_to_quic_when_absent() {
+        let toml = r#"
+[client]
+server = "1.2.3.4:51820"
+[tun]
+name = "tun0"
+[crypto]
+private_key_file = "/tmp/k"
+server_public_key = "x"
+"#;
+        let cfg = ClientConfig::parse(toml).expect("minimal config must parse");
+        assert_eq!(cfg.client.transport, TransportKind::Quic);
+        // tls section absent -> default sni still present
+        assert_eq!(cfg.tls.sni, "www.cloudflare.com");
+    }
+
+    #[test]
+    fn transport_tls_selected() {
+        let toml = r#"
+[client]
+server = "1.2.3.4:443"
+transport = "tls"
+[tls]
+sni = "example.org"
+[tun]
+name = "tun0"
+[crypto]
+private_key_file = "/tmp/k"
+server_public_key = "x"
+"#;
+        let cfg = ClientConfig::parse(toml).expect("tls config must parse");
+        assert_eq!(cfg.client.transport, TransportKind::Tls);
+        assert_eq!(cfg.tls.sni, "example.org");
+    }
 }

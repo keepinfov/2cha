@@ -16,7 +16,7 @@ pub use config::{
     prefix_to_netmask_v6, remove_peer_from_file, upsert_peer_in_file, CipherSuite, ClientConfig,
     ConfigError, CryptoSection, DnsSection, GatewaySection, Ipv4ClientSection, Ipv4ServerSection,
     Ipv6ClientSection, Ipv6ServerSection, LoggingSection, PeerSection, PerformanceSection,
-    ServerConfig, TimeoutsSection, TunSection,
+    ServerConfig, TimeoutsSection, TlsSection, TransportKind, TunSection,
 };
 pub use crypto::{
     constant_time_compare, create_cipher, decode_public_key, encode_public_key, secure_zero,
