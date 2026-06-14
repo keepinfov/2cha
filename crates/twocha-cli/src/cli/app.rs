@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 use super::commands::{
+    cmd_config_edit, cmd_config_get, cmd_config_set, cmd_config_show, cmd_config_validate,
     cmd_down, cmd_genkey, cmd_init, cmd_peer_add, cmd_peer_list, cmd_peer_remove, cmd_pubkey,
     cmd_server, cmd_status, cmd_toggle, cmd_up,
 };
@@ -28,6 +29,8 @@ use twocha_protocol::Result;
         2cha server -c server.toml\n  \
         2cha peer add <public-key> --name laptop\n  \
         2cha peer list\n  \
+        2cha config get crypto.cipher -c server.toml\n  \
+        2cha config set crypto.cipher aes-256-gcm -c server.toml\n  \
         2cha status\n\n\
         Note: Commands requiring root will automatically prompt for sudo password.",
     styles = get_styles(),
@@ -124,6 +127,10 @@ enum Commands {
     #[command(subcommand)]
     Peer(PeerCommands),
 
+    /// Inspect and edit a config file (validated before every write)
+    #[command(subcommand)]
+    Config(ConfigCommands),
+
     /// Create a config (interactive wizard; use --template for stdout)
     Init {
         /// Config type: client or server (asked interactively if omitted)
@@ -159,6 +166,77 @@ enum PeerCommands {
 
     /// List authorized peers and their connection state
     List,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Parse and validate a config against its schema
+    Validate {
+        /// Config file path
+        #[arg(short, long, default_value = default_config())]
+        config: String,
+        /// Force server-schema validation
+        #[arg(long)]
+        server: bool,
+        /// Force client-schema validation
+        #[arg(long)]
+        client: bool,
+    },
+
+    /// Print a config file and its validation status
+    Show {
+        /// Config file path
+        #[arg(short, long, default_value = default_config())]
+        config: String,
+        /// Force server schema
+        #[arg(long)]
+        server: bool,
+        /// Force client schema
+        #[arg(long)]
+        client: bool,
+        /// Print the file only, without the validation summary
+        #[arg(long)]
+        raw: bool,
+    },
+
+    /// Print one value by dotted key (e.g. crypto.cipher)
+    Get {
+        /// Dotted key, e.g. server.listen or crypto.cipher
+        key: String,
+        /// Config file path
+        #[arg(short, long, default_value = default_config())]
+        config: String,
+    },
+
+    /// Set one value by dotted key (validated before writing)
+    Set {
+        /// Dotted key, e.g. server.listen or crypto.cipher
+        key: String,
+        /// New value (type inferred: bool, int, float, [a, b], else string)
+        value: String,
+        /// Config file path
+        #[arg(short, long, default_value = default_config())]
+        config: String,
+        /// Force server schema
+        #[arg(long)]
+        server: bool,
+        /// Force client schema
+        #[arg(long)]
+        client: bool,
+    },
+
+    /// Open the config in $EDITOR; the edit is validated before it is saved
+    Edit {
+        /// Config file path
+        #[arg(short, long, default_value = default_config())]
+        config: String,
+        /// Force server schema
+        #[arg(long)]
+        server: bool,
+        /// Force client schema
+        #[arg(long)]
+        client: bool,
+    },
 }
 
 fn get_styles() -> clap::builder::Styles {
@@ -244,6 +322,33 @@ pub fn run() -> Result<()> {
             PeerCommands::Add { public_key, name } => cmd_peer_add(&public_key, name.as_deref()),
             PeerCommands::Remove { public_key } => cmd_peer_remove(&public_key),
             PeerCommands::List => cmd_peer_list(),
+        },
+
+        Commands::Config(cmd) => match cmd {
+            ConfigCommands::Validate {
+                config,
+                server,
+                client,
+            } => cmd_config_validate(&config, server, client),
+            ConfigCommands::Show {
+                config,
+                server,
+                client,
+                raw,
+            } => cmd_config_show(&config, server, client, raw),
+            ConfigCommands::Get { key, config } => cmd_config_get(&config, &key),
+            ConfigCommands::Set {
+                key,
+                value,
+                config,
+                server,
+                client,
+            } => cmd_config_set(&config, &key, &value, server, client),
+            ConfigCommands::Edit {
+                config,
+                server,
+                client,
+            } => cmd_config_edit(&config, server, client),
         },
 
         Commands::Init {

@@ -24,6 +24,7 @@ env_logger = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 rpassword = { workspace = true }
+toml_edit = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 daemonize = { workspace = true }

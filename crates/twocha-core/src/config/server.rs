@@ -3,6 +3,7 @@
 //! VPN server configuration structures.
 
 use super::common::*;
+use super::edit::edit_config;
 use serde::Deserialize;
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -265,25 +266,6 @@ fn peers_array(
         ))
         .as_array_of_tables_mut()
         .ok_or_else(|| ConfigError::Invalid("'peers' is not an array of tables".into()))
-}
-
-fn edit_config(
-    path: &Path,
-    mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), ConfigError>,
-) -> Result<(), ConfigError> {
-    let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|e| ConfigError::ParseError(format!("{}", e)))?;
-    mutate(&mut doc)?;
-
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, doc.to_string()).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        ConfigError::IoError(e.to_string())
-    })?;
-    Ok(())
 }
 
 /// Resolve a relative key path against the config file's directory
