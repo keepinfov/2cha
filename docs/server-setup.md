@@ -101,7 +101,7 @@ When these are set, the server **itself** does the following on startup and **ro
 back on shutdown**:
 
 - enables IP forwarding (`sysctl net.ipv4.ip_forward=1`, falling back to writing `/proc`);
-- adds a NAT/masquerade rule via **nftables** (table `2cha_nat`), falling back to **iptables**;
+- adds a NAT/masquerade rule via **nftables** (table `twocha_nat`), falling back to **iptables**;
 - adds the matching FORWARD rules between `tun0` and `external_interface`.
 
 What you must still handle yourself:

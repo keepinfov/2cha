@@ -78,7 +78,7 @@ If `tun0` is held by another VPN/process, either stop that process or set a diff
 
 Both ends undo what they changed, so a clean shutdown shouldn't leave stale state:
 
-- **Server** (on Ctrl-C/SIGTERM or service stop): removes the `2cha_nat` nftables table (or
+- **Server** (on Ctrl-C/SIGTERM or service stop): removes the `twocha_nat` nftables table (or
   the iptables rules), restores the previous `ip_forward` value, and drops sessions.
 - **Client** (`2cha down` or exit): restores the original default gateway, deletes routes it
   added, and restores `/etc/resolv.conf`.

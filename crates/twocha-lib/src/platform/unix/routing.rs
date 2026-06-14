@@ -257,7 +257,7 @@ fn apply_nftables(rules: &str) -> io::Result<()> {
 
 fn setup_nat_nftables_v4(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
     let rules = format!(
-        r#"table ip 2cha_nat {{
+        r#"table ip twocha_nat {{
     chain postrouting {{
         type nat hook postrouting priority srcnat;
         ip saddr {} oifname "{}" masquerade
@@ -270,7 +270,7 @@ fn setup_nat_nftables_v4(external_iface: &str, vpn_subnet: &str) -> io::Result<(
 
 fn setup_nat_nftables_v6(external_iface: &str, vpn_subnet: &str) -> io::Result<()> {
     let rules = format!(
-        r#"table ip6 2cha_nat6 {{
+        r#"table ip6 twocha_nat6 {{
     chain postrouting {{
         type nat hook postrouting priority srcnat;
         ip6 saddr {} oifname "{}" masquerade
@@ -574,7 +574,7 @@ impl ClientRoutingContext {
 /// whichever backend was used is cleaned up regardless of which one succeeded.
 pub fn teardown_masquerade_v4(external_iface: &str, vpn_subnet: &str, tun_iface: &str) {
     let _ = Command::new("nft")
-        .args(["delete", "table", "ip", "2cha_nat"])
+        .args(["delete", "table", "ip", "twocha_nat"])
         .output();
 
     let _ = Command::new("iptables")
@@ -624,7 +624,7 @@ pub fn teardown_masquerade_v4(external_iface: &str, vpn_subnet: &str, tun_iface:
 /// Remove the IPv6 NAT rules installed by [`setup_masquerade_v6`].
 pub fn teardown_masquerade_v6(external_iface: &str, vpn_subnet: &str, _tun_iface: &str) {
     let _ = Command::new("nft")
-        .args(["delete", "table", "ip6", "2cha_nat6"])
+        .args(["delete", "table", "ip6", "twocha_nat6"])
         .output();
 
     let _ = Command::new("ip6tables")

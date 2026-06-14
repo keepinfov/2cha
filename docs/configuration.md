@@ -113,7 +113,7 @@ off. See [Server Setup](./server-setup.md#5-gateway-mode-internet-access-for-cli
 |---|---|---|---|
 | `ip_forward` | bool | `false` | Enable IPv4 forwarding (`net.ipv4.ip_forward=1`). |
 | `ip6_forward` | bool | `false` | Enable IPv6 forwarding. |
-| `masquerade_v4` | bool | `false` | Add IPv4 NAT (nftables `2cha_nat`, falling back to iptables). |
+| `masquerade_v4` | bool | `false` | Add IPv4 NAT (nftables `twocha_nat`, falling back to iptables). |
 | `masquerade_v6` | bool | `false` | Add IPv6 NAT. |
 | `external_interface` | string | `None` | The egress interface for NAT, e.g. `"eth0"`. |
 

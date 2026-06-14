@@ -10,7 +10,7 @@ use super::render::{render_client, ClientParams};
 use super::write::{
     default_config_dir, load_or_generate_key, summary_line, wizard_io_err, write_config,
 };
-use super::{prompt_cipher, validate_endpoint};
+use super::{prompt_cipher, prompt_transport, validate_endpoint};
 use crate::cli::output::icon_success;
 
 pub fn run(output_dir: Option<&Path>) -> Result<()> {
@@ -55,6 +55,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         .map_err(wizard_io_err)?;
 
     let cipher = prompt_cipher(&theme)?;
+    let transport = prompt_transport(&theme, false)?;
 
     let key_path: PathBuf = Input::with_theme(&theme)
         .with_prompt("Client private key file")
@@ -101,6 +102,8 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         } else {
             Vec::new()
         },
+        transport: transport.kind,
+        tls_sni: transport.sni,
     });
 
     twocha_core::ClientConfig::parse(&config)
