@@ -352,6 +352,26 @@ impl TlsServerListener {
 mod tests {
     use super::*;
     use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Poll `f` until it yields a frame, yielding the CPU between attempts and
+    /// giving up after `TEST_DEADLINE`. The busy-spin without a yield/timeout is
+    /// what let this test wedge a (single-core) sandbox builder forever; bounding
+    /// it turns a hang into a clear failure.
+    fn poll_frame(label: &str, mut f: impl FnMut() -> io::Result<bool>) {
+        const TEST_DEADLINE: Duration = Duration::from_secs(10);
+        let start = Instant::now();
+        loop {
+            if f().unwrap() {
+                return;
+            }
+            assert!(
+                start.elapsed() < TEST_DEADLINE,
+                "timed out waiting for {label}"
+            );
+            thread::yield_now();
+        }
+    }
 
     #[test]
     fn tls_loopback_roundtrip() {
@@ -370,12 +390,7 @@ mod tests {
             // Echo two datagrams back.
             let mut out = Vec::new();
             for _ in 0..2 {
-                loop {
-                    if conn.recv(&mut out).unwrap() {
-                        break;
-                    }
-                    thread::yield_now();
-                }
+                poll_frame("server recv", || conn.recv(&mut out));
                 conn.send(&out).unwrap();
             }
         });
@@ -383,22 +398,14 @@ mod tests {
         let mut client = TlsClientTransport::connect(addr, "example.com").unwrap();
         client.set_nonblocking(true).unwrap();
 
-        client.send(b"hello v4 datagram").unwrap();
         let mut got = Vec::new();
-        loop {
-            if client.recv(&mut got).unwrap() {
-                break;
-            }
-        }
+        client.send(b"hello v4 datagram").unwrap();
+        poll_frame("client recv (small)", || client.recv(&mut got));
         assert_eq!(got, b"hello v4 datagram");
 
         let big = vec![0xABu8; 1400];
         client.send(&big).unwrap();
-        loop {
-            if client.recv(&mut got).unwrap() {
-                break;
-            }
-        }
+        poll_frame("client recv (large)", || client.recv(&mut got));
         assert_eq!(got, big);
 
         server.join().unwrap();
