@@ -15,7 +15,7 @@ use super::render::{
 use super::write::{
     default_config_dir, load_or_generate_key, summary_line, wizard_io_err, write_config,
 };
-use super::{prompt_cipher, validate_endpoint};
+use super::{prompt_cipher, prompt_transport, validate_endpoint};
 use crate::cli::output::{icon_success, icon_warning};
 
 struct GeneratedClient {
@@ -66,6 +66,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
     let listen_port = listen.rsplit(':').next().unwrap_or("51820").to_string();
 
     let cipher = prompt_cipher(&theme)?;
+    let transport = prompt_transport(&theme, true)?;
 
     // ── Server key ───────────────────────────────────────────────────────
     let key_path: PathBuf = Input::with_theme(&theme)
@@ -201,6 +202,8 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
             } else {
                 Vec::new()
             },
+            transport: transport.kind.clone(),
+            tls_sni: transport.sni.clone(),
         });
 
         peers.push(PeerParams {
@@ -236,6 +239,10 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         prefix,
         gateway,
         external_interface,
+        transport: transport.kind.clone(),
+        tls_sni: transport.sni.clone(),
+        tls_cert_file: transport.cert_file.clone(),
+        tls_key_file: transport.key_file.clone(),
     });
 
     let parsed = twocha_core::ServerConfig::parse(&server_cfg)
