@@ -4,6 +4,7 @@
 
 mod client;
 mod common;
+mod edit;
 mod server;
 
 pub use client::{
@@ -14,6 +15,7 @@ pub use common::{
     CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TlsSection, TransportKind,
     TunSection,
 };
+pub use edit::{get_value, set_value};
 pub use server::{
     example_server_config, remove_peer_from_file, upsert_peer_in_file, GatewaySection,
     Ipv4ServerSection, Ipv6ServerSection, PeerSection, ServerConfig,

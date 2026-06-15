@@ -3,6 +3,7 @@
 //! VPN server configuration structures.
 
 use super::common::*;
+use super::edit::edit_config;
 use serde::Deserialize;
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -130,7 +131,7 @@ impl ServerConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        resolve_key_path(&mut config.crypto.private_key_file, path);
+        resolve_paths(&mut config.crypto, &mut config.tls, path);
         config.validate()?;
         Ok(config)
     }
@@ -267,34 +268,32 @@ fn peers_array(
         .ok_or_else(|| ConfigError::Invalid("'peers' is not an array of tables".into()))
 }
 
-fn edit_config(
-    path: &Path,
-    mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), ConfigError>,
-) -> Result<(), ConfigError> {
-    let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|e| ConfigError::ParseError(format!("{}", e)))?;
-    mutate(&mut doc)?;
-
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, doc.to_string()).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        ConfigError::IoError(e.to_string())
-    })?;
-    Ok(())
+/// Resolve a relative path against the config file's directory, in place.
+/// Absolute paths are left untouched.
+pub(super) fn resolve_relative_path(path_str: &mut String, config_path: &Path) {
+    let p = Path::new(path_str.as_str());
+    if p.is_relative() {
+        if let Some(config_dir) = config_path.parent() {
+            let absolute = config_dir.join(p);
+            let resolved = fs::canonicalize(&absolute).unwrap_or(absolute);
+            *path_str = resolved.to_string_lossy().to_string();
+        }
+    }
 }
 
-/// Resolve a relative key path against the config file's directory
-pub(super) fn resolve_key_path(key_file: &mut String, config_path: &Path) {
-    let key_path = Path::new(key_file.as_str());
-    if key_path.is_relative() {
-        if let Some(config_dir) = config_path.parent() {
-            let absolute = config_dir.join(key_path);
-            let resolved = fs::canonicalize(&absolute).unwrap_or(absolute);
-            *key_file = resolved.to_string_lossy().to_string();
-        }
+/// Resolve every file-path field in `crypto`/`tls` against the config file's
+/// directory, so a relative path means "next to the config" regardless of CWD.
+pub(super) fn resolve_paths(
+    crypto: &mut super::common::CryptoSection,
+    tls: &mut super::common::TlsSection,
+    config_path: &Path,
+) {
+    resolve_relative_path(&mut crypto.private_key_file, config_path);
+    if let Some(cert) = tls.cert_file.as_mut() {
+        resolve_relative_path(cert, config_path);
+    }
+    if let Some(key) = tls.key_file.as_mut() {
+        resolve_relative_path(key, config_path);
     }
 }
 
@@ -461,6 +460,46 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.server.transport, TransportKind::Quic);
         assert_eq!(cfg.tls.sni, "www.cloudflare.com");
+    }
+
+    #[test]
+    fn from_file_resolves_relative_paths_against_config_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "2cha-relpath-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create the referenced files so canonicalize resolves cleanly.
+        for f in ["server.key", "cert.pem", "tls.key"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let path = dir.join("server.toml");
+        std::fs::write(
+            &path,
+            "[server]\nlisten = \"0.0.0.0:443\"\ntransport = \"tls\"\n[tun]\n\
+             [crypto]\nprivate_key_file = \"server.key\"\n\
+             [tls]\ncert_file = \"cert.pem\"\nkey_file = \"tls.key\"\n\
+             [[peers]]\npublic_key = \"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=\"\n",
+        )
+        .unwrap();
+
+        let cfg = ServerConfig::from_file(&path).unwrap();
+        for resolved in [
+            &cfg.crypto.private_key_file,
+            cfg.tls.cert_file.as_ref().unwrap(),
+            cfg.tls.key_file.as_ref().unwrap(),
+        ] {
+            assert!(
+                Path::new(resolved).is_absolute(),
+                "expected absolute path, got {resolved}"
+            );
+        }
+        assert!(cfg.crypto.private_key_file.ends_with("server.key"));
+        assert!(cfg.tls.cert_file.as_ref().unwrap().ends_with("cert.pem"));
+        assert!(cfg.tls.key_file.as_ref().unwrap().ends_with("tls.key"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -145,7 +145,7 @@ impl ClientConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        super::server::resolve_key_path(&mut config.crypto.private_key_file, path);
+        super::server::resolve_paths(&mut config.crypto, &mut config.tls, path);
         config.validate()?;
         Ok(config)
     }

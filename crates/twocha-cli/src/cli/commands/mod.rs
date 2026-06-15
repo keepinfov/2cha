@@ -2,6 +2,7 @@
 //!
 //! Command implementations for the VPN CLI.
 
+mod config;
 mod init;
 mod init_wizard;
 mod keys;
@@ -10,6 +11,9 @@ mod server;
 mod status;
 mod updown;
 
+pub use config::{
+    cmd_config_edit, cmd_config_get, cmd_config_set, cmd_config_show, cmd_config_validate,
+};
 pub use init::cmd_init;
 pub use keys::{cmd_genkey, cmd_pubkey};
 pub use peer::{cmd_peer_add, cmd_peer_list, cmd_peer_remove};

@@ -22,6 +22,8 @@ day-to-day operation.
 | [Keys & Peers](./keys-and-peers.md) | The key model, generating/exchanging keys, and live peer management. |
 | [Server Setup](./server-setup.md) | First-time server config, gateway/NAT, firewall, running as a service. |
 | [Client Setup](./client-setup.md) | Client config, connecting, status, running as a service. |
+| [Config CLI](./config-cli.md) | Inspect and edit configs with `2cha config` (validated, atomic). |
+| [NixOS](./nixos.md) | Declarative `services.twocha` server/client on NixOS. |
 
 ## Reference & tuning
 

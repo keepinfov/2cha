@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "clap",
  "console",
@@ -1703,6 +1703,7 @@ dependencies = [
  "libc",
  "log",
  "rpassword",
+ "toml_edit",
  "twocha-core",
  "twocha-lib",
  "twocha-protocol",
@@ -1710,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1730,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-lib"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "ctrlc",
  "libc",
@@ -1748,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-protocol"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "typenum"
