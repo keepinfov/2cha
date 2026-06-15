@@ -24,6 +24,11 @@ tun-rs = "2.8.5"
 libc.workspace = true
 signal-hook.workspace = true
 socket2.workspace = true
+
+# netlink routing (Linux desktop only): Android's Bionic libc lacks the kernel
+# connector constants neli references, and the mobile path never routes (the
+# Android VpnService owns the data plane), so neli is excluded there.
+[target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
 neli = "0.7.4"
 
 [target.'cfg(windows)'.dependencies]
