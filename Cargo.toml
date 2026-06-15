@@ -5,6 +5,7 @@ members = [
     "crates/twocha-core",
     "crates/twocha-lib",
     "crates/twocha-cli",
+    "crates/twocha-mobile",
 ]
 
 [workspace.package]
