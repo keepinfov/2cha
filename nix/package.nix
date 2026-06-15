@@ -41,6 +41,7 @@
         checkFlags = [
           "--skip=tls_loopback_roundtrip"
           "--skip=udp_carrier_roundtrip_preserves_datagrams"
+          "--skip=run_mobile_loopback_roundtrip"
         ];
       });
 

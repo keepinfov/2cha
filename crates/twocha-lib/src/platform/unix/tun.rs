@@ -68,6 +68,33 @@ impl TunDevice {
         })
     }
 
+    /// Wrap an externally-provided TUN file descriptor (e.g. the fd returned by
+    /// Android `VpnService.Builder.establish()`).
+    ///
+    /// The caller has already configured addressing, routes, DNS and brought the
+    /// interface up (the VpnService Builder owns the data plane on Android), so
+    /// this performs no configuration — it only records the MTU for framing.
+    ///
+    /// # Ownership
+    /// This takes ownership of `fd` and will close it when the `TunDevice` is
+    /// dropped. Callers must pass a detached fd (Android: `pfd.detachFd()`); do
+    /// not keep using the fd through its original owner afterwards.
+    ///
+    /// # Safety
+    /// `fd` must be a valid, open TUN file descriptor.
+    pub unsafe fn from_fd(fd: RawFd, mtu: u16) -> Result<Self> {
+        let dev = SyncDevice::from_fd(fd).map_err(map_io)?;
+        let name = dev.name().unwrap_or_else(|_| "tun".to_string());
+        log::info!("Wrapped external TUN fd {} as {}", fd, name);
+        Ok(TunDevice {
+            dev,
+            name,
+            mtu,
+            ipv4_addr: None,
+            ipv6_addr: None,
+        })
+    }
+
     #[inline]
     pub fn name(&self) -> &str {
         &self.name

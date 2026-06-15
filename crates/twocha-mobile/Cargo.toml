@@ -1,0 +1,25 @@
+[package]
+name = "twocha-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "twocha_mobile"
+crate-type = ["cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+twocha-protocol = { workspace = true }
+twocha-core = { workspace = true }
+twocha-lib = { workspace = true }
+uniffi = { version = "0.31", features = ["cli"] }
+log = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
