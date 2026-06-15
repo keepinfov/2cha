@@ -7,7 +7,13 @@
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::{AsRawFd, RawFd};
-use tun_rs::{DeviceBuilder, SyncDevice};
+use tun_rs::SyncDevice;
+// Device creation/configuration (DeviceBuilder, set address/mtu/up) is desktop
+// only — on Android the VpnService creates and configures the interface, and we
+// only wrap its fd via `from_fd`. The `tun-rs` Android backend doesn't expose
+// these APIs at all.
+#[cfg(not(target_os = "android"))]
+use tun_rs::DeviceBuilder;
 use twocha_protocol::{Result, TunError, VpnError};
 
 fn map_io(e: std::io::Error) -> VpnError {
@@ -33,6 +39,7 @@ pub struct TunDevice {
 
 impl TunDevice {
     /// Create a new TUN device
+    #[cfg(not(target_os = "android"))]
     pub fn create(name: &str) -> Result<Self> {
         Self::create_with_options(name, false)
     }
@@ -40,6 +47,7 @@ impl TunDevice {
     /// Create a TUN device with options. The device is created but left
     /// unconfigured (down, no addresses); callers configure it via
     /// `set_ipv4_address`/`set_ipv6_address`/`set_mtu`/`bring_up`.
+    #[cfg(not(target_os = "android"))]
     pub fn create_with_options(name: &str, multi_queue: bool) -> Result<Self> {
         log::info!("Creating TUN device: {}", name);
 
@@ -84,7 +92,12 @@ impl TunDevice {
     /// `fd` must be a valid, open TUN file descriptor.
     pub unsafe fn from_fd(fd: RawFd, mtu: u16) -> Result<Self> {
         let dev = SyncDevice::from_fd(fd).map_err(map_io)?;
+        // `SyncDevice::name()` is unavailable on the Android tun-rs backend (the
+        // VpnService owns the interface); the name is cosmetic here so default it.
+        #[cfg(not(target_os = "android"))]
         let name = dev.name().unwrap_or_else(|_| "tun".to_string());
+        #[cfg(target_os = "android")]
+        let name = "tun".to_string();
         log::info!("Wrapped external TUN fd {} as {}", fd, name);
         Ok(TunDevice {
             dev,
@@ -120,6 +133,9 @@ impl TunDevice {
         self.ipv6_addr
     }
 
+    // Address/MTU/up configuration is desktop only; on Android the VpnService
+    // Builder owns all of this before handing us the fd.
+    #[cfg(not(target_os = "android"))]
     pub fn set_ipv4_address(&mut self, addr: Ipv4Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv4 address: {}/{}", addr, prefix);
         self.dev
@@ -129,6 +145,7 @@ impl TunDevice {
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn set_ipv6_address(&mut self, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         log::info!("Setting IPv6 address: {}/{}", addr, prefix);
         self.dev.add_address_v6(addr, prefix).map_err(map_io)?;
@@ -136,6 +153,7 @@ impl TunDevice {
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn set_mtu(&mut self, mtu: u16) -> Result<()> {
         log::debug!("Setting MTU: {}", mtu);
         self.dev.set_mtu(mtu).map_err(map_io)?;
@@ -143,6 +161,7 @@ impl TunDevice {
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn bring_up(&self) -> Result<()> {
         log::info!("Bringing up interface: {}", self.name);
         self.dev.enabled(true).map_err(map_io)?;

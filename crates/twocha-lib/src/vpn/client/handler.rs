@@ -6,9 +6,12 @@
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, routing::ClientRoutingContext, EventLoop, TunDevice, TunnelConfig, UdpTunnel,
-    POLLIN,
+    is_would_block, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
+// Netlink routing is Linux-desktop only; the mobile (`run_mobile`) path lets the
+// Android VpnService own routing, so this is excluded on Android.
+#[cfg(all(unix, not(target_os = "android")))]
+use crate::platform::unix::routing::ClientRoutingContext;
 #[cfg(unix)]
 use crate::transport::{
     tls::TlsClientTransport, udp_quic::UdpQuicClientTransport, ClientTransport,
@@ -40,8 +43,8 @@ const HANDSHAKE_BASE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const REKEY_RETRY: Duration = Duration::from_secs(5);
 
-/// Run the VPN client
-#[cfg(unix)]
+/// Run the VPN client (Linux desktop): owns routing via netlink.
+#[cfg(all(unix, not(target_os = "android")))]
 pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     let cfg =
         ClientConfig::from_file(config_path).map_err(|e| VpnError::Config(format!("{}", e)))?;
@@ -490,11 +493,12 @@ fn handle_transport_read(
     Ok(())
 }
 
-/// Run the VPN client (Windows): not supported by protocol v4 yet
-#[cfg(windows)]
+/// Run the VPN client (Windows / Android): the desktop entry point isn't
+/// available. Android drives the engine through `run_mobile` instead.
+#[cfg(any(windows, target_os = "android"))]
 pub fn run(_config_path: &str, _quiet: bool) -> Result<()> {
     Err(twocha_protocol::VpnError::Config(
-        "Windows support for protocol v4 is not implemented yet".into(),
+        "the desktop `run` entry point is not available on this platform".into(),
     ))
 }
 
