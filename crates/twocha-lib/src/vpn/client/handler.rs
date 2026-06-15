@@ -615,7 +615,10 @@ mod tests {
         let client_result = client.join().unwrap();
         let server_got = server.join().unwrap();
 
-        assert!(client_result.is_ok(), "run_mobile errored: {client_result:?}");
+        assert!(
+            client_result.is_ok(),
+            "run_mobile errored: {client_result:?}"
+        );
         assert_eq!(server_got.as_deref(), Some(&b"ping-packet"[..]));
         assert!(
             !protected.lock().unwrap().is_empty(),
