@@ -7,7 +7,6 @@
 //! Noise_IK handshake, the obfuscation transport, PFS rekeys and the packet
 //! pump, all reused verbatim from `twocha-lib`.
 
-use std::os::unix::io::RawFd;
 use std::sync::Arc;
 
 use twocha_core::{decode_public_key, ClientConfig, Identity};
@@ -122,14 +121,29 @@ impl TwochaTunnel {
             .server_public()
             .map_err(|e| TwochaError::Config(format!("{e}")))?;
 
-        let protect = move |fd: RawFd| protector.protect(fd);
+        #[cfg(unix)]
+        {
+            let protect = move |fd: std::os::unix::io::RawFd| protector.protect(fd);
 
-        // SAFETY: `tun_fd` is a valid fd whose ownership the host transfers to
-        // us; the engine closes it on teardown.
-        unsafe {
-            twocha_lib::vpn::client::run_mobile(cfg, identity, server_public, tun_fd, &protect)
+            // SAFETY: `tun_fd` is a valid fd whose ownership the host transfers
+            // to us; the engine closes it on teardown.
+            unsafe {
+                twocha_lib::vpn::client::run_mobile(cfg, identity, server_public, tun_fd, &protect)
+            }
+            .map_err(|e| TwochaError::Vpn(format!("{e}")))
         }
-        .map_err(|e| TwochaError::Vpn(format!("{e}")))
+
+        // The mobile tunnel binds to a host-provided tun fd + `protect`
+        // callback, which only exist on the Android/unix target. The crate
+        // still compiles on other hosts (so a `cargo build --workspace` on
+        // Windows/macOS CI passes) but `start` is a no-op stub there.
+        #[cfg(not(unix))]
+        {
+            let _ = (cfg, identity, server_public, tun_fd, protector);
+            Err(TwochaError::Vpn(
+                "mobile tunnel is only supported on unix (Android) targets".to_string(),
+            ))
+        }
     }
 
     /// Signal the running tunnel to stop; `start` then returns.
