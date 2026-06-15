@@ -74,6 +74,13 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+# The mobile cdylib must keep its symbol table: uniffi's library-mode bindgen
+# extracts the `UNIFFI_META_*` records from `.symtab`, which `strip = true`
+# would remove (leaving the generator to silently emit zero bindings). Desktop
+# binaries stay stripped; only this crate's artifact retains symbols.
+[profile.release.package.twocha-mobile]
+strip = false
+
 [profile.release-small]
 inherits = "release"
 opt-level = "z"
