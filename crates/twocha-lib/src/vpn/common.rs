@@ -12,6 +12,13 @@ pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
+/// The process-global run flag, for handlers (desktop client, server) that share
+/// the signal-handler lifecycle. The mobile tunnel owns its own per-tunnel flag
+/// instead, so two tunnels can't stomp on one another's lifecycle.
+pub fn flag() -> &'static AtomicBool {
+    &RUNNING
+}
+
 /// Stop all running handlers (also used as the signal handler target)
 pub fn stop() {
     RUNNING.store(false, Ordering::SeqCst);
