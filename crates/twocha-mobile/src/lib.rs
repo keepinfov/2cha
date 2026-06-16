@@ -7,6 +7,7 @@
 //! Noise_IK handshake, the obfuscation transport, PFS rekeys and the packet
 //! pump, all reused verbatim from `twocha-lib`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use twocha_core::{decode_public_key, ClientConfig, Identity};
@@ -43,6 +44,15 @@ impl std::error::Error for TwochaError {}
 #[uniffi::export(callback_interface)]
 pub trait SocketProtector: Send + Sync {
     fn protect(&self, fd: i32) -> bool;
+}
+
+/// Host-implemented lifecycle hook. `on_connected` fires exactly once, when the
+/// Noise_IK handshake has completed and the data plane is live — so the host can
+/// distinguish "connecting" from a genuinely established tunnel rather than
+/// guessing before `start` has done any work.
+#[uniffi::export(callback_interface)]
+pub trait TunnelObserver: Send + Sync {
+    fn on_connected(&self);
 }
 
 /// A freshly generated X25519 identity, both halves base64-encoded.
@@ -86,16 +96,24 @@ pub fn init_logging() {
 
 /// A managed v4 tunnel. The engine owns the run loop, so `start` blocks until
 /// `stop` is called from another thread; the host should run `start` on a
-/// dedicated thread inside its `VpnService`. A single active tunnel is
-/// supported (lifecycle is process-global).
+/// dedicated thread inside its `VpnService`.
+///
+/// Each tunnel owns its own run flag, so a `stop` only affects the tunnel it was
+/// called on. This avoids a disconnect racing a fresh connect through a shared
+/// process-global flag, and means a stale (slow-to-exit) engine can't terminate
+/// a newer session.
 #[derive(uniffi::Object)]
-pub struct TwochaTunnel;
+pub struct TwochaTunnel {
+    running: Arc<AtomicBool>,
+}
 
 #[uniffi::export]
 impl TwochaTunnel {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Arc::new(TwochaTunnel)
+        Arc::new(TwochaTunnel {
+            running: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     /// Connect and run until [`stop`](TwochaTunnel::stop). Parses `config_toml`
@@ -111,6 +129,7 @@ impl TwochaTunnel {
         private_key_b64: String,
         tun_fd: i32,
         protector: Box<dyn SocketProtector>,
+        observer: Box<dyn TunnelObserver>,
     ) -> Result<(), TwochaError> {
         let cfg =
             ClientConfig::parse(&config_toml).map_err(|e| TwochaError::Config(format!("{e}")))?;
@@ -121,14 +140,27 @@ impl TwochaTunnel {
             .server_public()
             .map_err(|e| TwochaError::Config(format!("{e}")))?;
 
+        // Arm this tunnel's flag; a `stop` from a previous run on the same
+        // instance left it false.
+        self.running.store(true, Ordering::SeqCst);
+
         #[cfg(unix)]
         {
             let protect = move |fd: std::os::unix::io::RawFd| protector.protect(fd);
+            let on_connected = move || observer.on_connected();
 
             // SAFETY: `tun_fd` is a valid fd whose ownership the host transfers
             // to us; the engine closes it on teardown.
             unsafe {
-                twocha_lib::vpn::client::run_mobile(cfg, identity, server_public, tun_fd, &protect)
+                twocha_lib::vpn::client::run_mobile(
+                    cfg,
+                    identity,
+                    server_public,
+                    tun_fd,
+                    &protect,
+                    &self.running,
+                    &on_connected,
+                )
             }
             .map_err(|e| TwochaError::Vpn(format!("{e}")))
         }
@@ -139,15 +171,15 @@ impl TwochaTunnel {
         // Windows/macOS CI passes) but `start` is a no-op stub there.
         #[cfg(not(unix))]
         {
-            let _ = (cfg, identity, server_public, tun_fd, protector);
+            let _ = (cfg, identity, server_public, tun_fd, protector, observer);
             Err(TwochaError::Vpn(
                 "mobile tunnel is only supported on unix (Android) targets".to_string(),
             ))
         }
     }
 
-    /// Signal the running tunnel to stop; `start` then returns.
+    /// Signal this tunnel to stop; its blocking `start` then returns.
     pub fn stop(&self) {
-        twocha_lib::vpn::client::stop();
+        self.running.store(false, Ordering::SeqCst);
     }
 }

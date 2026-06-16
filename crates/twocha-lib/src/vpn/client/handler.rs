@@ -24,6 +24,8 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, Session};
@@ -113,6 +115,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
         cfg.crypto.cipher,
         &identity,
         server_public,
+        common::flag(),
     )?;
 
     transport.set_nonblocking(true)?;
@@ -169,6 +172,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
         &mut tun,
         transport.as_mut(),
         session,
+        common::flag(),
     )?;
 
     let _ = routing_ctx.cleanup();
@@ -226,6 +230,7 @@ fn run_event_loop(
     tun: &mut TunDevice,
     transport: &mut dyn ClientTransport,
     mut session: Session,
+    running: &AtomicBool,
 ) -> Result<()> {
     let transport_fds = transport.pollfds();
     let tun_fd = tun.fd();
@@ -239,7 +244,7 @@ fn run_event_loop(
     let mut next_keepalive = Instant::now() + keepalive_jitter();
     let mut pending: Option<(ClientHandshake, Instant)> = None;
 
-    while common::running() {
+    while running.load(Ordering::SeqCst) {
         let events = event_loop.poll(100)?;
 
         for (fd, revents) in events {
@@ -288,27 +293,31 @@ fn run_event_loop(
 /// 1. build the obfuscation transport and call `protect(fd)` on every socket
 ///    it polls **before any network I/O**, so traffic escapes the VPN routing
 ///    loop (Android `VpnService.protect`);
-/// 2. complete the Noise_IK handshake;
+/// 2. complete the Noise_IK handshake, then invoke `on_connected` exactly once;
 /// 3. wrap the external tun fd and run the shared steady-state event loop.
 ///
-/// Blocks until [`stop`] flips the shared running flag from another thread.
+/// The lifecycle is driven by the caller-owned `running` flag (a per-tunnel
+/// `AtomicBool`, not the process-global one): blocks until another thread flips
+/// it false. This avoids a stop signal racing a fresh start through a shared
+/// global, and lets two tunnels coexist without stomping on each other.
 ///
 /// # Safety
 /// `tun_fd` must be a valid, open TUN fd whose ownership is transferred here
 /// (it is closed when the wrapped device drops). Android: pass `pfd.detachFd()`.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn run_mobile(
     cfg: ClientConfig,
     identity: Identity,
     server_public: [u8; 32],
     tun_fd: RawFd,
     protect: &dyn Fn(RawFd) -> bool,
+    running: &AtomicBool,
+    on_connected: &dyn Fn(),
 ) -> Result<()> {
     let server_addr = cfg
         .server_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
-
-    common::reset_running();
 
     let mut transport = build_transport(&cfg, server_addr)?;
     log::info!("transport: {} -> {}", cfg.client.transport, server_addr);
@@ -326,7 +335,12 @@ pub unsafe fn run_mobile(
         cfg.crypto.cipher,
         &identity,
         server_public,
+        running,
     )?;
+
+    // Handshake done: the tunnel is genuinely established. Tell the host so it
+    // can flip its UI to "connected" (instead of guessing before this point).
+    on_connected();
 
     transport.set_nonblocking(true)?;
 
@@ -340,6 +354,7 @@ pub unsafe fn run_mobile(
         &mut tun,
         transport.as_mut(),
         session,
+        running,
     )
 }
 
@@ -353,12 +368,13 @@ fn handshake_over_transport(
     suite: CipherSuite,
     identity: &Identity,
     server_public: [u8; 32],
+    running: &AtomicBool,
 ) -> Result<Session> {
     transport.set_nonblocking(true)?;
     let mut buf = Vec::new();
 
     for attempt in 0..HANDSHAKE_ATTEMPTS {
-        if !common::running() {
+        if !running.load(Ordering::SeqCst) {
             return Err(NetworkError::Timeout.into());
         }
         let timeout = HANDSHAKE_BASE_TIMEOUT * 2u32.pow(attempt.min(4));
@@ -376,7 +392,7 @@ fn handshake_over_transport(
 
         let deadline = Instant::now() + timeout;
         let session = loop {
-            if Instant::now() >= deadline || !common::running() {
+            if Instant::now() >= deadline || !running.load(Ordering::SeqCst) {
                 break None;
             }
             match transport.recv(&mut buf) {
@@ -513,6 +529,7 @@ mod tests {
     use std::net::UdpSocket;
     use std::os::unix::io::IntoRawFd;
     use std::os::unix::net::UnixDatagram;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use twocha_core::v4::{InitOutcome, ServerHandshakeEngine};
@@ -598,13 +615,33 @@ mod tests {
         let protected: Arc<Mutex<Vec<RawFd>>> = Arc::new(Mutex::new(Vec::new()));
         let protected_in = protected.clone();
 
+        // Per-tunnel run flag (not the process-global one) and a connected counter
+        // so we can assert `on_connected` fires exactly once, after the handshake.
+        let running = Arc::new(AtomicBool::new(true));
+        let running_in = running.clone();
+        let connected = Arc::new(AtomicUsize::new(0));
+        let connected_in = connected.clone();
+
         let client = thread::spawn(move || {
             let protect = move |fd: RawFd| {
                 protected_in.lock().unwrap().push(fd);
                 true
             };
+            let on_connected = || {
+                connected_in.fetch_add(1, Ordering::SeqCst);
+            };
             // SAFETY: tun_fd is an owned socketpair fd transferred to the engine.
-            unsafe { run_mobile(cfg, client_id, server_public, tun_fd, &protect) }
+            unsafe {
+                run_mobile(
+                    cfg,
+                    client_id,
+                    server_public,
+                    tun_fd,
+                    &protect,
+                    &running_in,
+                    &on_connected,
+                )
+            }
         });
 
         // Hand a "tun packet" to the client; it seals and forwards to the server
@@ -615,7 +652,8 @@ mod tests {
         let n = test_end.recv(&mut buf).expect("reply did not round-trip");
         assert_eq!(&buf[..n], b"pong-packet");
 
-        stop();
+        // Flipping the per-tunnel flag (not the global stop()) ends the loop.
+        running.store(false, Ordering::SeqCst);
         let client_result = client.join().unwrap();
         let server_got = server.join().unwrap();
 
@@ -627,6 +665,11 @@ mod tests {
         assert!(
             !protected.lock().unwrap().is_empty(),
             "protect() must fire for the transport pollfd before the handshake"
+        );
+        assert_eq!(
+            connected.load(Ordering::SeqCst),
+            1,
+            "on_connected must fire exactly once, after the handshake completes"
         );
     }
 }
