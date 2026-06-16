@@ -98,59 +98,9 @@ jobs:
           name: 2cha-universal-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-universal-linux-${{ matrix.arch }}.tar.gz
 
-  build-windows:
-    name: Build Windows Executable
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            arch: x86_64
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Create release artifacts
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Force -Path 2cha.exe -DestinationPath 2cha-windows-${{ matrix.arch }}.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: 2cha-windows-${{ matrix.arch }}
-          path: target/${{ matrix.target }}/release/2cha-windows-${{ matrix.arch }}.zip
-
   release:
     name: Create Release
-    needs: [build-linux, build-windows]
+    needs: [build-linux]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
 

@@ -65,23 +65,25 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-  # Multiplatform build testing
-  build-linux:
-    name: Build Linux (${{ matrix.target }})
-    needs: test
+  # Cross-target type/borrow check across architectures and libc flavors.
+  # A `check` (not a full release build) keeps this fast while still catching
+  # platform/libc-specific compile errors (e.g. the musl recvmmsg flag cast).
+  # It runs under `cross` because a transitive dep (ring) compiles C in its
+  # build script, so even `cargo check` needs a C cross-toolchain per target —
+  # cross supplies that (and the musl ARM toolchains apt lacks) via Docker.
+  check-targets:
+    name: Check (${{ matrix.target }})
+    needs: check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            cross: false
-          - target: x86_64-unknown-linux-musl
-            cross: false
-          - target: aarch64-unknown-linux-musl
-            cross: true
-          - target: armv7-unknown-linux-musleabihf
-            cross: true
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
 
     steps:
       - name: Checkout code
@@ -89,60 +91,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install musl-tools (for musl targets)
-        if: contains(matrix.target, 'musl') && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build (native)
-        if: "!matrix.cross"
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Verify binary exists
-        run: |
-          ls -la target/${{ matrix.target }}/release/2cha* || true
-          test -f target/${{ matrix.target }}/release/2cha || test -f target/${{ matrix.target }}/release/2cha.exe
-
-  build-windows:
-    name: Build Windows (${{ matrix.target }})
-    needs: test
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-          - target: i686-pc-windows-msvc
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        uses: taiki-e/install-action@cross
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -151,22 +102,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-check-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-check-${{ matrix.target }}-
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Verify binary exists
-        run: |
-          dir target\${{ matrix.target }}\release\
-          if (!(Test-Path "target\${{ matrix.target }}\release\2cha.exe")) { exit 1 }
+      - name: Check workspace
+        run: cross check --workspace --target ${{ matrix.target }}
 
   # Summary job to check all builds passed
   ci-success:
     name: CI Success
-    needs: [check, test, build-linux, build-windows]
+    needs: [check, test, check-targets]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -174,8 +120,7 @@ jobs:
         run: |
           if [[ "${{ needs.check.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.build-linux.result }}" != "success" ]] || \
-             [[ "${{ needs.build-windows.result }}" != "success" ]]; then
+             [[ "${{ needs.check-targets.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
