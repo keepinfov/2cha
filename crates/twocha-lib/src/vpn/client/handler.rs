@@ -6,7 +6,7 @@
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
+    is_would_block, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
 // Netlink routing is Linux-desktop only; the mobile (`run_mobile`) path lets the
 // Android VpnService own routing, so this is excluded on Android.
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
-use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, Session};
+use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, SealScratch, Session};
 #[cfg(unix)]
 use twocha_core::{CipherSuite, ClientConfig, Identity, TransportKind};
 #[cfg(unix)]
@@ -240,7 +240,7 @@ fn run_event_loop(
         event_loop.add_fd(*fd, POLLIN);
     }
 
-    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut bufs = IoBufs::new(cfg);
     let mut next_keepalive = Instant::now() + keepalive_jitter();
     let mut pending: Option<(ClientHandshake, Instant)> = None;
 
@@ -250,9 +250,9 @@ fn run_event_loop(
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun_fd {
-                    handle_tun_read(tun, &mut tun_buffer, transport, &mut session)?;
+                    handle_tun_read(tun, transport, &mut session, &mut bufs)?;
                 } else if transport_fds.contains(&fd) {
-                    handle_transport_read(transport, tun, &mut session, &mut pending)?;
+                    handle_transport_read(transport, tun, &mut session, &mut pending, &mut bufs)?;
                 }
             }
         }
@@ -432,18 +432,69 @@ fn handshake_over_transport(
     Err(NetworkError::Timeout.into())
 }
 
+/// Reusable data-plane buffers, allocated once per event loop: no per-packet
+/// heap traffic on the TX (seal scratch + pooled datagrams) or RX
+/// (recvmmsg batch + payload) paths.
+#[cfg(unix)]
+struct IoBufs {
+    tun_buffer: Vec<u8>,
+    seal_scratch: SealScratch,
+    /// Sealed datagrams awaiting a send_many flush...
+    send_queue: Vec<Vec<u8>>,
+    /// ...and their recycled allocations after it.
+    send_pool: Vec<Vec<u8>>,
+    batch: BatchBuffer,
+    payload: Vec<u8>,
+    flush_at: usize,
+}
+
+#[cfg(unix)]
+impl IoBufs {
+    fn new(cfg: &ClientConfig) -> Self {
+        let flush_at = cfg.performance.batch_size.max(1);
+        IoBufs {
+            tun_buffer: vec![0u8; cfg.tun.mtu as usize + 100],
+            seal_scratch: SealScratch::default(),
+            send_queue: Vec::with_capacity(flush_at),
+            send_pool: Vec::with_capacity(flush_at),
+            batch: BatchBuffer::new(cfg.performance.batch_size),
+            payload: Vec::new(),
+            flush_at,
+        }
+    }
+
+    fn flush_send_queue(&mut self, transport: &mut dyn ClientTransport) {
+        if self.send_queue.is_empty() {
+            return;
+        }
+        let _ = transport.send_many(&self.send_queue);
+        self.send_pool.append(&mut self.send_queue);
+    }
+}
+
 #[cfg(unix)]
 fn handle_tun_read(
     tun: &mut TunDevice,
-    buffer: &mut [u8],
     transport: &mut dyn ClientTransport,
     session: &mut Session,
+    bufs: &mut IoBufs,
 ) -> Result<()> {
     loop {
-        match tun.read(buffer) {
+        match tun.read(&mut bufs.tun_buffer) {
             Ok(n) if n > 0 => {
-                if let Ok(datagram) = session.seal_data(&buffer[..n]) {
-                    let _ = transport.send(&datagram);
+                let mut out = bufs.send_pool.pop().unwrap_or_default();
+                match session.seal_data_into(
+                    &bufs.tun_buffer[..n],
+                    &mut bufs.seal_scratch,
+                    &mut out,
+                ) {
+                    Ok(()) => {
+                        bufs.send_queue.push(out);
+                        if bufs.send_queue.len() >= bufs.flush_at {
+                            bufs.flush_send_queue(transport);
+                        }
+                    }
+                    Err(_) => bufs.send_pool.push(out),
                 }
             }
             Ok(_) => break,
@@ -451,6 +502,7 @@ fn handle_tun_read(
             Err(_) => break,
         }
     }
+    bufs.flush_send_queue(transport);
     Ok(())
 }
 
@@ -460,50 +512,55 @@ fn handle_transport_read(
     tun: &mut TunDevice,
     session: &mut Session,
     pending: &mut Option<(ClientHandshake, Instant)>,
+    bufs: &mut IoBufs,
 ) -> Result<()> {
-    let mut buf = Vec::new();
     loop {
-        match transport.recv(&mut buf) {
-            Ok(true) => {}
-            Ok(false) => break,
+        let n = match transport.recv_batch(&mut bufs.batch) {
+            Ok(0) => break,
+            Ok(n) => n,
             Err(_) => break,
-        }
-        match wire::parse(&buf) {
-            Ok(WireMsg::Data {
-                receiver_cid,
-                masked_counter,
-                ciphertext,
-            }) => {
-                if receiver_cid != session.local_cid {
-                    continue;
-                }
-                match session.open_data(masked_counter, ciphertext) {
-                    Ok(payload) if payload.is_empty() => {} // keepalive
-                    Ok(payload) => {
-                        let _ = tun.write(&payload);
+        };
+        for i in 0..n {
+            let Some((_, data)) = bufs.batch.get(i) else {
+                continue; // skipped slot (truncated / spoofed source)
+            };
+            match wire::parse(data) {
+                Ok(WireMsg::Data {
+                    receiver_cid,
+                    masked_counter,
+                    ciphertext,
+                }) => {
+                    if receiver_cid != session.local_cid {
+                        continue;
                     }
-                    Err(_) => {}
-                }
-            }
-            Ok(WireMsg::Resp { .. }) => {
-                if let Some((hs, _)) = pending.take() {
-                    match hs.complete(&buf) {
-                        Ok(new_session) => {
-                            log::info!("rekey complete (session age was {:?})", session.age());
-                            *session = new_session;
+                    match session.open_data_into(masked_counter, ciphertext, &mut bufs.payload) {
+                        Ok(()) if bufs.payload.is_empty() => {} // keepalive
+                        Ok(()) => {
+                            let _ = tun.write(&bufs.payload);
                         }
-                        Err(e) => log::debug!("rekey response rejected: {}", e),
+                        Err(_) => {}
                     }
                 }
-            }
-            Ok(WireMsg::Cookie { nonce, sealed }) => {
-                if let Some((hs, _)) = pending.as_mut() {
-                    if hs.apply_cookie(nonce, sealed).is_ok() {
-                        let _ = transport.send(hs.datagram());
+                Ok(WireMsg::Resp { .. }) => {
+                    if let Some((hs, _)) = pending.take() {
+                        match hs.complete(data) {
+                            Ok(new_session) => {
+                                log::info!("rekey complete (session age was {:?})", session.age());
+                                *session = new_session;
+                            }
+                            Err(e) => log::debug!("rekey response rejected: {}", e),
+                        }
                     }
                 }
+                Ok(WireMsg::Cookie { nonce, sealed }) => {
+                    if let Some((hs, _)) = pending.as_mut() {
+                        if hs.apply_cookie(nonce, sealed).is_ok() {
+                            let _ = transport.send(hs.datagram());
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     Ok(())

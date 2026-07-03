@@ -123,8 +123,10 @@ impl UdpTunnel {
         Ok(sent)
     }
 
-    /// Receive a datagram from any source
-    pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
+    /// Receive a datagram from any source into `out`, reusing its allocation.
+    /// Returns the source address, or `None` when the socket would block (or
+    /// the datagram was truncated and dropped).
+    pub fn recv_into(&mut self, out: &mut Vec<u8>) -> Result<Option<SocketAddr>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((len, src)) => {
                 // A datagram that fills the whole buffer was (very likely)
@@ -135,12 +137,21 @@ impl UdpTunnel {
                     return Ok(None);
                 }
                 log::trace!("Received {} bytes from {}", len, src);
-                Ok(Some((src, self.recv_buffer[..len].to_vec())))
+                out.clear();
+                out.extend_from_slice(&self.recv_buffer[..len]);
+                Ok(Some(src))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Receive a datagram from any source (allocating convenience wrapper
+    /// over [`UdpTunnel::recv_into`]).
+    pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
+        let mut out = Vec::new();
+        Ok(self.recv_into(&mut out)?.map(|src| (src, out)))
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
@@ -320,6 +331,77 @@ impl UdpTunnel {
         }
         Ok(sent)
     }
+
+    /// Send multiple datagrams to a single fixed destination in as few
+    /// syscalls as possible (client hot path: everything goes to the server).
+    #[cfg(target_os = "linux")]
+    pub fn send_batch_to(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
+        if datagrams.is_empty() {
+            return Ok(0);
+        }
+        let (mut storage, addr_len) = encode_sockaddr(addr);
+        let mut iovecs: Vec<libc::iovec> = datagrams
+            .iter()
+            .map(|data| libc::iovec {
+                iov_base: data.as_ptr() as *mut libc::c_void,
+                iov_len: data.len(),
+            })
+            .collect();
+        let mut hdrs: Vec<libc::mmsghdr> = Vec::with_capacity(datagrams.len());
+        for iovec in iovecs.iter_mut() {
+            let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_name = &mut storage as *mut _ as *mut libc::c_void;
+            hdr.msg_hdr.msg_namelen = addr_len;
+            hdr.msg_hdr.msg_iov = iovec;
+            hdr.msg_hdr.msg_iovlen = 1;
+            hdrs.push(hdr);
+        }
+
+        let mut sent = 0;
+        while sent < datagrams.len() {
+            let r = unsafe {
+                libc::sendmmsg(
+                    self.fd(),
+                    hdrs[sent..].as_mut_ptr(),
+                    (datagrams.len() - sent) as libc::c_uint,
+                    0,
+                )
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => break,
+                    _ => {
+                        // Unexpected error: fall back to per-datagram sends
+                        for data in &datagrams[sent..] {
+                            if self.socket.send_to(data, addr).is_ok() {
+                                sent += 1;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if r == 0 {
+                break;
+            }
+            sent += r as usize;
+        }
+        Ok(sent)
+    }
+
+    /// Fallback for non-Linux unix: per-datagram sends.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn send_batch_to(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
+        let mut sent = 0;
+        for data in datagrams {
+            if self.socket.send_to(data, addr).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -374,6 +456,33 @@ impl BatchBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.count == 0
+    }
+
+    /// Reset for manual filling via [`BatchBuffer::push`].
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    /// Append a datagram copied from `data`, tagged with `src`. Returns false
+    /// (without copying) when the batch is full or `data` exceeds a slot.
+    /// Lets non-datagram transports satisfy batch-oriented callers.
+    pub fn push(&mut self, src: SocketAddr, data: &[u8]) -> bool {
+        if self.count >= self.capacity() || data.len() > self.bufs[self.count].len() {
+            return false;
+        }
+        self.bufs[self.count][..data.len()].copy_from_slice(data);
+        self.lens[self.count] = data.len();
+        self.srcs[self.count] = Some(src);
+        self.count += 1;
+        true
+    }
+
+    /// Invalidate slot `i` so [`BatchBuffer::get`] skips it (e.g. a datagram
+    /// from an unexpected source on a point-to-point path).
+    pub fn skip(&mut self, i: usize) {
+        if i < self.count {
+            self.srcs[i] = None;
+        }
     }
 
     /// Datagram `i` of the last `recv_batch` (None if the source address

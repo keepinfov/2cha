@@ -27,7 +27,8 @@ use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use twocha_core::v4::{
-    session::keepalive_jitter, InitOutcome, RateLimiter, ServerHandshakeEngine, Session,
+    session::keepalive_jitter, InitOutcome, RateLimiter, SealScratch, ServerHandshakeEngine,
+    Session,
 };
 #[cfg(unix)]
 use twocha_core::{ServerConfig, TransportKind};
@@ -356,6 +357,9 @@ fn serve_udp(
     let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
     let mut udp_batch = BatchBuffer::new(cfg.performance.batch_size);
     let mut send_queue: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(udp_batch.capacity());
+    let mut send_pool: Vec<Vec<u8>> = Vec::with_capacity(udp_batch.capacity());
+    let mut seal_scratch = SealScratch::default();
+    let mut payload_buf = Vec::new();
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -363,9 +367,17 @@ fn serve_udp(
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun.fd() {
-                    handle_tun_read(tun, &mut tun_buffer, &tunnel, state, &mut send_queue)?;
+                    handle_tun_read(
+                        tun,
+                        &mut tun_buffer,
+                        &tunnel,
+                        state,
+                        &mut send_queue,
+                        &mut send_pool,
+                        &mut seal_scratch,
+                    )?;
                 } else if fd == tunnel.fd() {
-                    handle_udp_read(&tunnel, tun, state, &mut udp_batch)?;
+                    handle_udp_read(&tunnel, tun, state, &mut udp_batch, &mut payload_buf)?;
                 } else if let Some(ctl) = control {
                     if fd == ctl.fd() {
                         ctl.process(|req| handle_control(req, state, config_path));
@@ -448,6 +460,9 @@ fn serve_tls(
     let mut last_cleanup = Instant::now();
     let mut last_cookie_rotate = Instant::now();
     let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut seal_scratch = SealScratch::default();
+    let mut seal_out = Vec::new();
+    let mut payload_buf = Vec::new();
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -458,7 +473,14 @@ fn serve_tls(
                 continue;
             }
             if fd == tun.fd() {
-                handle_tun_read_tls(tun, &mut tun_buffer, state, &mut conns)?;
+                handle_tun_read_tls(
+                    tun,
+                    &mut tun_buffer,
+                    state,
+                    &mut conns,
+                    &mut seal_scratch,
+                    &mut seal_out,
+                )?;
             } else if fd == listener_fd {
                 accept_tls(
                     &listener,
@@ -469,7 +491,7 @@ fn serve_tls(
                     &mut next_conn_id,
                 );
             } else if let Some(&id) = fd_to_conn.get(&fd) {
-                match handle_tls_conn_read(id, tun, state, &mut conns) {
+                match handle_tls_conn_read(id, tun, state, &mut conns, &mut payload_buf) {
                     Ok(true) => {
                         last_active.insert(id, Instant::now());
                     }
@@ -602,6 +624,7 @@ fn handle_tls_conn_read(
     tun: &mut TunDevice,
     state: &mut ServerState,
     conns: &mut HashMap<u64, TlsServerConn>,
+    payload_buf: &mut Vec<u8>,
 ) -> Result<bool> {
     let mut buf = Vec::new();
     let mut got_any = false;
@@ -615,7 +638,7 @@ fn handle_tls_conn_read(
             break;
         }
         got_any = true;
-        if let Some(reply) = handle_datagram(tun, state, peer, Link::Tls(id), &buf) {
+        if let Some(reply) = handle_datagram(tun, state, peer, Link::Tls(id), &buf, payload_buf) {
             if let Some(conn) = conns.get_mut(&id) {
                 let _ = conn.send(&reply);
             }
@@ -625,13 +648,27 @@ fn handle_tls_conn_read(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn handle_tun_read(
     tun: &mut TunDevice,
     buffer: &mut [u8],
     tunnel: &UdpTunnel,
     state: &mut ServerState,
     send_queue: &mut Vec<(Vec<u8>, SocketAddr)>,
+    send_pool: &mut Vec<Vec<u8>>,
+    scratch: &mut SealScratch,
 ) -> Result<()> {
+    // Datagram allocations are recycled through `send_pool` across flushes,
+    // so the steady-state TX path allocates nothing.
+    fn flush(
+        tunnel: &UdpTunnel,
+        send_queue: &mut Vec<(Vec<u8>, SocketAddr)>,
+        send_pool: &mut Vec<Vec<u8>>,
+    ) {
+        let _ = tunnel.send_batch(send_queue);
+        send_pool.extend(send_queue.drain(..).map(|(datagram, _)| datagram));
+    }
+
     send_queue.clear();
     let flush_at = send_queue.capacity().max(1);
     loop {
@@ -647,12 +684,15 @@ fn handle_tun_read(
                 };
                 if let Some(entry) = state.sessions.get_mut(cid) {
                     if let Link::Udp(addr) = entry.link {
-                        if let Ok(datagram) = entry.session.seal_data(packet) {
-                            send_queue.push((datagram, addr));
-                            if send_queue.len() >= flush_at {
-                                let _ = tunnel.send_batch(send_queue);
-                                send_queue.clear();
+                        let mut datagram = send_pool.pop().unwrap_or_default();
+                        match entry.session.seal_data_into(packet, scratch, &mut datagram) {
+                            Ok(()) => {
+                                send_queue.push((datagram, addr));
+                                if send_queue.len() >= flush_at {
+                                    flush(tunnel, send_queue, send_pool);
+                                }
                             }
+                            Err(_) => send_pool.push(datagram),
                         }
                     }
                 }
@@ -663,8 +703,7 @@ fn handle_tun_read(
         }
     }
     if !send_queue.is_empty() {
-        let _ = tunnel.send_batch(send_queue);
-        send_queue.clear();
+        flush(tunnel, send_queue, send_pool);
     }
     Ok(())
 }
@@ -677,6 +716,8 @@ fn handle_tun_read_tls(
     buffer: &mut [u8],
     state: &mut ServerState,
     conns: &mut HashMap<u64, TlsServerConn>,
+    scratch: &mut SealScratch,
+    seal_out: &mut Vec<u8>,
 ) -> Result<()> {
     loop {
         match tun.read(buffer) {
@@ -691,9 +732,15 @@ fn handle_tun_read_tls(
                 };
                 if let Some(entry) = state.sessions.get_mut(&cid) {
                     if let Link::Tls(id) = entry.link {
-                        if let Ok(datagram) = entry.session.seal_data(packet) {
+                        // seal_out is copied into rustls' internal buffer by
+                        // send(), so reusing it across packets is safe.
+                        if entry
+                            .session
+                            .seal_data_into(packet, scratch, seal_out)
+                            .is_ok()
+                        {
                             if let Some(conn) = conns.get_mut(&id) {
-                                let _ = conn.send(&datagram);
+                                let _ = conn.send(seal_out);
                             }
                         }
                     }
@@ -713,6 +760,7 @@ fn handle_udp_read(
     tun: &mut TunDevice,
     state: &mut ServerState,
     batch: &mut BatchBuffer,
+    payload_buf: &mut Vec<u8>,
 ) -> Result<()> {
     loop {
         match tunnel.recv_batch(batch) {
@@ -722,7 +770,9 @@ fn handle_udp_read(
                     let Some((src, data)) = batch.get(i) else {
                         continue;
                     };
-                    if let Some(reply) = handle_datagram(tun, state, src, Link::Udp(src), data) {
+                    if let Some(reply) =
+                        handle_datagram(tun, state, src, Link::Udp(src), data, payload_buf)
+                    {
                         let _ = tunnel.send_to(&reply, src);
                     }
                 }
@@ -817,6 +867,7 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
 /// Process one inbound datagram. Transport-neutral: returns an optional reply
 /// datagram for the caller to send back over the originating link (UDP socket
 /// or TLS connection). All failure paths are silent drops (`None`).
+/// `payload_buf` is loop-hoisted scratch for the decrypted payload.
 #[cfg(unix)]
 fn handle_datagram(
     tun: &mut TunDevice,
@@ -824,6 +875,7 @@ fn handle_datagram(
     src: SocketAddr,
     src_link: Link,
     data: &[u8],
+    payload_buf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
     let msg = wire::parse(data).ok()?;
 
@@ -862,7 +914,10 @@ fn handle_datagram(
             ciphertext,
         } => {
             let entry = state.sessions.get_mut(&receiver_cid)?;
-            let payload = entry.session.open_data(masked_counter, ciphertext).ok()?;
+            entry
+                .session
+                .open_data_into(masked_counter, ciphertext, payload_buf)
+                .ok()?;
             // Roaming applies only to UDP, where the peer's address can change.
             // A TLS session is pinned to its connection.
             if let Link::Udp(addr) = src_link {
@@ -871,13 +926,13 @@ fn handle_datagram(
                     entry.link = src_link;
                 }
             }
-            if payload.is_empty() {
+            if payload_buf.is_empty() {
                 return None; // keepalive
             }
-            if let Some(inner_src) = common::inner_src_ip(&payload) {
+            if let Some(inner_src) = common::inner_src_ip(payload_buf) {
                 state.cid_by_inner_ip.insert(inner_src, receiver_cid);
             }
-            let _ = tun.write(&payload);
+            let _ = tun.write(payload_buf);
             None
         }
         // Server never consumes handshake responses or cookies
