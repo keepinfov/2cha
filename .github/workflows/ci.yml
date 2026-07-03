@@ -109,10 +109,51 @@ jobs:
       - name: Check workspace
         run: cross check --workspace --target ${{ matrix.target }}
 
+  # End-to-end connectivity through real network namespaces: handshake, ping,
+  # the full-MTU padding-cap regression canary and an iperf3 throughput smoke,
+  # for both transports plus the opt-in server worker pool. GitHub's ubuntu
+  # runners provide sudo and /dev/net/tun.
+  e2e-netns:
+    name: E2E (netns)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-
+
+      - name: Install iperf3
+        run: sudo apt-get update && sudo apt-get install -y iperf3
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: E2E quic
+        run: sudo -E scripts/netns-test.sh
+
+      - name: E2E quic (worker pool)
+        run: sudo -E scripts/netns-test.sh --workers 2
+
+      - name: E2E tls
+        run: sudo -E scripts/netns-test.sh --tls
+
   # Summary job to check all builds passed
   ci-success:
     name: CI Success
-    needs: [check, test, check-targets]
+    needs: [check, test, check-targets, e2e-netns]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -120,7 +161,8 @@ jobs:
         run: |
           if [[ "${{ needs.check.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.check-targets.result }}" != "success" ]]; then
+             [[ "${{ needs.check-targets.result }}" != "success" ]] || \
+             [[ "${{ needs.e2e-netns.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

@@ -6,6 +6,7 @@
 # Optionally captures the wire traffic for DPI inspection.
 #
 # Usage: sudo scripts/netns-test.sh [--capture /tmp/2cha.pcap] [--keep]
+#                                    [--tls] [--workers N]
 set -euo pipefail
 
 NS_S=2cha-srv
@@ -21,12 +22,17 @@ PORT=51820
 CAPTURE=""
 KEEP=0
 MODE=quic
+WORKERS=0
 TLS_SNI="www.example-cdn.test"
+# Minimum iperf3 throughput (Mbit/s) before the smoke test fails; debug
+# builds on slow CI runners can override via env.
+IPERF_MIN_MBPS="${IPERF_MIN_MBPS:-50}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --capture) CAPTURE="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
         --tls) MODE=tls; shift ;;
+        --workers) WORKERS="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -38,7 +44,7 @@ if [ "$MODE" = "tls" ]; then
 else
     L4=udp
 fi
-echo "== transport mode: $MODE (L4: $L4)"
+echo "== transport mode: $MODE (L4: $L4, server workers: $WORKERS)"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "must run as root (network namespaces + TUN)" >&2
@@ -56,6 +62,7 @@ cleanup() {
     [ -n "${SRV_PID:-}" ] && kill "$SRV_PID" 2>/dev/null
     [ -n "${CLI_PID:-}" ] && kill "$CLI_PID" 2>/dev/null
     [ -n "${DUMP_PID:-}" ] && kill "$DUMP_PID" 2>/dev/null
+    [ -n "${IPERF_PID:-}" ] && kill "$IPERF_PID" 2>/dev/null
     sleep 0.3
     if [ "$KEEP" -eq 0 ]; then
         ip netns del "$NS_S" 2>/dev/null
@@ -122,6 +129,10 @@ prefix = 24
 
 [ipv6]
 enable = false
+
+[performance]
+# 0 = single-threaded loop; >= 2 exercises the multi-worker pool
+worker_threads = $WORKERS
 EOF
 
 cat >"$WORK/client.toml" <<EOF
@@ -189,6 +200,45 @@ else
     echo "--- server.log"; tail -20 "$WORK/server.log"
     echo "--- client.log"; tail -20 "$WORK/client.log"
     exit 1
+fi
+
+# Padding-bug canary: 1392B ICMP payload + 8 ICMP + 20 IP = a full 1420B
+# inner packet. Before the padding cap, random pad pushed ~29% of these
+# past 1500B on the wire, where they were truncated and dropped — so any
+# loss here is a deterministic-in-practice regression signal.
+echo "== full-MTU ping through tunnel (padding-cap regression)"
+FULL_MTU_OUT="$(ip netns exec "$NS_C" ping -c 20 -i 0.2 -s 1392 -W 2 "$TUN_S" || true)"
+echo "$FULL_MTU_OUT" | tail -2
+if echo "$FULL_MTU_OUT" | grep -q " 0% packet loss"; then
+    echo "PASS: zero loss at full MTU"
+else
+    echo "FAIL: full-MTU packets dropped (padding overflow / truncation regression)"
+    echo "--- server.log"; tail -20 "$WORK/server.log"
+    echo "--- client.log"; tail -20 "$WORK/client.log"
+    exit 1
+fi
+
+if command -v iperf3 >/dev/null 2>&1; then
+    echo "== iperf3 throughput smoke (5s through tunnel)"
+    ip netns exec "$NS_S" iperf3 -s -1 >"$WORK/iperf-srv.log" 2>&1 &
+    IPERF_PID=$!
+    sleep 0.5
+    BPS=$(ip netns exec "$NS_C" iperf3 -c "$TUN_S" -t 5 -J 2>"$WORK/iperf-cli.log" \
+        | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["end"]["sum_received"]["bits_per_second"]))' \
+        || echo 0)
+    wait "$IPERF_PID" 2>/dev/null || true
+    IPERF_PID=""
+    echo "   throughput: $((BPS / 1000000)) Mbit/s"
+    if [ "$BPS" -gt $((IPERF_MIN_MBPS * 1000000)) ]; then
+        echo "PASS: throughput above ${IPERF_MIN_MBPS} Mbit/s floor"
+    else
+        echo "FAIL: throughput below ${IPERF_MIN_MBPS} Mbit/s floor"
+        echo "--- iperf-srv.log"; tail -10 "$WORK/iperf-srv.log"
+        echo "--- iperf-cli.log"; tail -10 "$WORK/iperf-cli.log"
+        exit 1
+    fi
+else
+    echo "SKIP: iperf3 not installed, skipping throughput smoke"
 fi
 
 if [ "$MODE" = "tls" ]; then
