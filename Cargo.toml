@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 license = "MIT"
 authors = ["keepinfov"]
@@ -30,9 +30,10 @@ toml_edit = "0.23"
 
 # Cryptography (RustCrypto - pure Rust, safe, audited)
 chacha20poly1305 = "0.10"
-aes-gcm = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
-snow = "0.9"
+# ring-accelerated: AES-GCM/ChaCha20 via ring's assembly kernels; snow's
+# fallback resolver keeps BLAKE2s (unsupported by ring) on the pure-Rust path.
+snow = { version = "0.9", features = ["ring-accelerated"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 blake2 = "0.10"
 subtle = "2.5"
@@ -50,7 +51,8 @@ rpassword = "7.3"
 libc = "0.2"
 daemonize = "0.5"
 signal-hook = "0.3"
-socket2 = "0.5"
+# "all" unlocks SO_REUSEPORT (worker pool binds N sockets to one port)
+socket2 = { version = "0.5", features = ["all"] }
 
 # Windows-specific
 windows = { version = "0.62.2", features = [

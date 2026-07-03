@@ -11,4 +11,4 @@ pub mod session;
 
 pub use handshake::{ClientHandshake, InitOutcome, ServerHandshakeEngine};
 pub use ratelimit::RateLimiter;
-pub use session::Session;
+pub use session::{SealScratch, Session};

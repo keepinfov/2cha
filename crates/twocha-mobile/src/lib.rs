@@ -50,9 +50,14 @@ pub trait SocketProtector: Send + Sync {
 /// Noise_IK handshake has completed and the data plane is live — so the host can
 /// distinguish "connecting" from a genuinely established tunnel rather than
 /// guessing before `start` has done any work.
+///
+/// `on_stats` fires roughly once per second while the tunnel runs, carrying
+/// cumulative payload byte counters since tunnel start (drives the host's
+/// live traffic UI).
 #[uniffi::export(callback_interface)]
 pub trait TunnelObserver: Send + Sync {
     fn on_connected(&self);
+    fn on_stats(&self, tx_bytes: u64, rx_bytes: u64);
 }
 
 /// A freshly generated X25519 identity, both halves base64-encoded.
@@ -147,7 +152,11 @@ impl TwochaTunnel {
         #[cfg(unix)]
         {
             let protect = move |fd: std::os::unix::io::RawFd| protector.protect(fd);
+            // Both callbacks funnel into the one host observer.
+            let observer: Arc<dyn TunnelObserver> = Arc::from(observer);
+            let stats_observer = Arc::clone(&observer);
             let on_connected = move || observer.on_connected();
+            let on_stats = move |tx: u64, rx: u64| stats_observer.on_stats(tx, rx);
 
             // SAFETY: `tun_fd` is a valid fd whose ownership the host transfers
             // to us; the engine closes it on teardown.
@@ -160,6 +169,7 @@ impl TwochaTunnel {
                     &protect,
                     &self.running,
                     &on_connected,
+                    &on_stats,
                 )
             }
             .map_err(|e| TwochaError::Vpn(format!("{e}")))

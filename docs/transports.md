@@ -47,6 +47,19 @@ Because the cert is allowed to be self-signed, a client connecting with `2cha` d
 verify it against a CA — that's deliberate and safe, since Noise inside the tunnel provides
 real mutual authentication.
 
+## Performance: prefer `quic` for throughput
+
+Choose `tls` only when you need it (UDP blocked/throttled, active-probing concerns).
+For raw throughput `quic` is the better transport:
+
+- **TCP-in-TCP meltdown is inherent to `tls` mode.** Tunnelling TCP flows through another
+  TCP connection stacks two loss-recovery/congestion-control loops: when the outer TCP
+  retransmits, the inner TCP's RTT estimate inflates and both stacks back off, collapsing
+  throughput on lossy paths. No amount of tuning in 2cha can remove this — it's a property
+  of the encapsulation.
+- The `quic` path preserves datagram semantics end to end (inner TCP sees real loss and
+  reacts once) and uses batched `recvmmsg`/`sendmmsg` syscalls on Linux.
+
 ## Choosing a port
 
 `tls` is typically run on `:443` so it's indistinguishable from a web server. Remember to open

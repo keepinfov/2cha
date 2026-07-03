@@ -108,27 +108,39 @@ pub struct SessionCrypto {
 }
 
 impl SessionCrypto {
+    /// Encrypt `plaintext` under the given counter into a caller-supplied
+    /// buffer (`out.len() >= plaintext.len() + 16`). Returns the bytes
+    /// written (ciphertext || tag). Allocation-free hot path.
+    pub fn encrypt_into(&self, counter: u64, plaintext: &[u8], out: &mut [u8]) -> Result<usize> {
+        self.transport
+            .write_message(counter, plaintext, out)
+            .map_err(|_| VpnError::from(CryptoError::EncryptionFailed))
+    }
+
+    /// Decrypt and authenticate a message sent under `counter` into a
+    /// caller-supplied buffer (`out.len() >= ciphertext.len() - 16`).
+    /// Returns the plaintext length. Allocation-free hot path.
+    pub fn decrypt_into(&self, counter: u64, ciphertext: &[u8], out: &mut [u8]) -> Result<usize> {
+        if ciphertext.len() < 16 {
+            return Err(CryptoError::AuthenticationFailed.into());
+        }
+        self.transport
+            .read_message(counter, ciphertext, out)
+            .map_err(|_| VpnError::from(CryptoError::AuthenticationFailed))
+    }
+
     /// Encrypt `plaintext` under the given counter. Output = ciphertext || tag.
     pub fn encrypt(&self, counter: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; plaintext.len() + 16];
-        let n = self
-            .transport
-            .write_message(counter, plaintext, &mut buf)
-            .map_err(|_| VpnError::from(CryptoError::EncryptionFailed))?;
+        let n = self.encrypt_into(counter, plaintext, &mut buf)?;
         buf.truncate(n);
         Ok(buf)
     }
 
     /// Decrypt and authenticate a message sent under `counter`
     pub fn decrypt(&self, counter: u64, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        if ciphertext.len() < 16 {
-            return Err(CryptoError::AuthenticationFailed.into());
-        }
         let mut buf = vec![0u8; ciphertext.len()];
-        let n = self
-            .transport
-            .read_message(counter, ciphertext, &mut buf)
-            .map_err(|_| VpnError::from(CryptoError::AuthenticationFailed))?;
+        let n = self.decrypt_into(counter, ciphertext, &mut buf)?;
         buf.truncate(n);
         Ok(buf)
     }

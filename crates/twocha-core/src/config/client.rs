@@ -154,6 +154,7 @@ impl ClientConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.tun_ipv4()?;
         self.tun_ipv6()?;
+        validate_tun_mtu(self.tun.mtu)?;
         if self.ipv4.prefix > 32 {
             return Err(ConfigError::Invalid("ipv4.prefix must be 0..=32".into()));
         }
@@ -353,6 +354,8 @@ socket_recv_buffer = 2097152
 socket_send_buffer = 2097152
 batch_size = 32
 multi_queue = false
+# Data-plane threads: 0 = auto (2-thread split on QUIC), 1 = single-threaded
+worker_threads = 0
 cpu_affinity = []
 
 [logging]

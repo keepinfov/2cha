@@ -356,7 +356,7 @@ mod tests {
         assert!(ch.datagram().len() >= wire::INIT_MIN_DATAGRAM);
 
         let outcome = engine.handle_init(ch.datagram(), &addr(), false, |k| *k == client_pub);
-        let (resp, mut server_session, peer) = match outcome {
+        let (resp, server_session, peer) = match outcome {
             InitOutcome::Established {
                 datagram,
                 session,
@@ -366,7 +366,7 @@ mod tests {
         };
         assert_eq!(peer, client_pub);
 
-        let mut client_session = ch.complete(&resp).unwrap();
+        let client_session = ch.complete(&resp).unwrap();
 
         // CIDs are mirrored
         assert_eq!(client_session.remote_cid, server_session.local_cid);
@@ -416,14 +416,14 @@ mod tests {
             server_id.public_bytes(),
         )
         .unwrap();
-        let (resp, mut server_session) =
+        let (resp, server_session) =
             match engine.handle_init(ch.datagram(), &addr(), false, |k| *k == client_pub) {
                 InitOutcome::Established {
                     datagram, session, ..
                 } => (datagram, session),
                 _ => panic!(),
             };
-        let mut client_session = ch.complete(&resp).unwrap();
+        let client_session = ch.complete(&resp).unwrap();
 
         let dg = client_session.seal_data(b"once").unwrap();
         if let WireMsg::Data {
@@ -550,7 +550,7 @@ mod tests {
             InitOutcome::Established { datagram, .. } => datagram,
             _ => panic!(),
         };
-        let mut session = ch.complete(&resp).unwrap();
+        let session = ch.complete(&resp).unwrap();
 
         let sizes: std::collections::HashSet<usize> = (0..16)
             .map(|_| session.seal_data(b"").unwrap().len())

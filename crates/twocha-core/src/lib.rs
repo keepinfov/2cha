@@ -19,7 +19,4 @@ pub use config::{
     LoggingSection, PeerSection, PerformanceSection, ServerConfig, TimeoutsSection, TlsSection,
     TransportKind, TunSection,
 };
-pub use crypto::{
-    constant_time_compare, create_cipher, decode_public_key, encode_public_key, secure_zero,
-    Aes256Gcm, ChaCha20Poly1305, Cipher, Identity,
-};
+pub use crypto::{decode_public_key, encode_public_key, Identity};

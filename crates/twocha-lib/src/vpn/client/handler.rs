@@ -6,7 +6,7 @@
 
 #[cfg(unix)]
 use crate::platform::unix::{
-    is_would_block, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
+    is_would_block, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
 // Netlink routing is Linux-desktop only; the mobile (`run_mobile`) path lets the
 // Android VpnService own routing, so this is excluded on Android.
@@ -24,11 +24,11 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
-use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, Session};
+use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, SealScratch, Session};
 #[cfg(unix)]
 use twocha_core::{CipherSuite, ClientConfig, Identity, TransportKind};
 #[cfg(unix)]
@@ -111,14 +111,14 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
     // Initial Noise_IK handshake, driven over the transport (retry + backoff)
     let session = handshake_over_transport(
-        transport.as_mut(),
+        transport.as_dyn_mut(),
         cfg.crypto.cipher,
         &identity,
         server_public,
         common::flag(),
     )?;
 
-    transport.set_nonblocking(true)?;
+    transport.as_dyn_mut().set_nonblocking(true)?;
 
     // Setup routing only after the tunnel is actually up
     let mut routing_ctx = ClientRoutingContext::new();
@@ -165,14 +165,15 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
         println!();
     }
 
-    run_event_loop(
+    run_data_plane(
         &cfg,
         &identity,
         server_public,
-        &mut tun,
-        transport.as_mut(),
+        tun,
+        transport,
         session,
         common::flag(),
+        None,
     )?;
 
     let _ = routing_ctx.cleanup();
@@ -184,14 +185,30 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     Ok(())
 }
 
+/// A built obfuscation transport, kept concrete so the QUIC carrier can be
+/// unwrapped for the threaded data plane after the handshake.
+#[cfg(unix)]
+enum BuiltTransport {
+    Quic(UdpQuicClientTransport),
+    // Boxed: the rustls connection dwarfs the UDP carrier
+    Tls(Box<TlsClientTransport>),
+}
+
+#[cfg(unix)]
+impl BuiltTransport {
+    fn as_dyn_mut(&mut self) -> &mut dyn ClientTransport {
+        match self {
+            BuiltTransport::Quic(t) => t,
+            BuiltTransport::Tls(t) => t.as_mut(),
+        }
+    }
+}
+
 /// Build the selected obfuscation transport. Both carry complete v4 wire
 /// datagrams; the QUIC path is byte-identical to the pre-abstraction client.
 #[cfg(unix)]
-fn build_transport(
-    cfg: &ClientConfig,
-    server_addr: SocketAddr,
-) -> Result<Box<dyn ClientTransport>> {
-    let transport: Box<dyn ClientTransport> = match cfg.client.transport {
+fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
+    let transport = match cfg.client.transport {
         TransportKind::Quic => {
             let local_addr: SocketAddr = if server_addr.is_ipv6() {
                 SocketAddr::from(([0u16; 8], 0))
@@ -207,15 +224,103 @@ fn build_transport(
                 ..Default::default()
             };
             let tunnel = UdpTunnel::new(tunnel_config)?;
-            Box::new(UdpQuicClientTransport::new(tunnel, server_addr))
+            BuiltTransport::Quic(UdpQuicClientTransport::new(tunnel, server_addr))
         }
         TransportKind::Tls => {
             // TCP connect + real TLS 1.3 handshake (blocking) happen here.
             let t = TlsClientTransport::connect(server_addr, &cfg.tls.sni).map_err(VpnError::Io)?;
-            Box::new(t)
+            BuiltTransport::Tls(Box::new(t))
         }
     };
     Ok(transport)
+}
+
+/// Cumulative payload byte counters, shared by the data-plane threads and
+/// emitted to the host (mobile UI) roughly once per second from the
+/// control-plane timer path.
+#[cfg(unix)]
+pub(crate) struct StatsEmitter<'a> {
+    tx_bytes: AtomicU64,
+    rx_bytes: AtomicU64,
+    emit: &'a (dyn Fn(u64, u64) + Sync),
+}
+
+#[cfg(unix)]
+impl<'a> StatsEmitter<'a> {
+    pub(crate) fn new(emit: &'a (dyn Fn(u64, u64) + Sync)) -> Self {
+        StatsEmitter {
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            emit,
+        }
+    }
+
+    #[inline]
+    fn count_tx(&self, bytes: usize) {
+        self.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn count_rx(&self, bytes: usize) {
+        self.rx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn emit_now(&self) {
+        (self.emit)(
+            self.tx_bytes.load(Ordering::Relaxed),
+            self.rx_bytes.load(Ordering::Relaxed),
+        );
+    }
+}
+
+/// How often the stats callback fires (cheap: one JNA call carrying two u64s)
+#[cfg(unix)]
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Post-handshake dispatch: the QUIC carrier gets the 2-thread split (uplink
+/// seals on one thread, downlink + control plane on the other) unless
+/// `performance.worker_threads = 1` pins the single-threaded loop. TLS always
+/// keeps the single-threaded loop (a TCP stream gains nothing from the split).
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn run_data_plane(
+    cfg: &ClientConfig,
+    identity: &Identity,
+    server_public: [u8; 32],
+    tun: TunDevice,
+    transport: BuiltTransport,
+    session: Session,
+    running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
+) -> Result<()> {
+    // 0 = auto: the split is the default for QUIC
+    let threaded = cfg.performance.worker_threads != 1;
+    match transport {
+        BuiltTransport::Quic(t) if threaded => {
+            let (tunnel, remote) = t.into_parts();
+            run_event_loop_threaded(
+                cfg,
+                identity,
+                server_public,
+                tun,
+                tunnel,
+                remote,
+                session,
+                running,
+                stats,
+            )
+        }
+        mut other => run_event_loop(
+            cfg,
+            identity,
+            server_public,
+            &tun,
+            other.as_dyn_mut(),
+            session,
+            running,
+            stats,
+        ),
+    }
 }
 
 /// The steady-state data plane: poll the tun fd and the transport fds, pump
@@ -223,14 +328,16 @@ fn build_transport(
 /// verbatim by the desktop (`run`) and mobile (`run_mobile`) entry points; it
 /// returns when `common::running()` flips false.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     cfg: &ClientConfig,
     identity: &Identity,
     server_public: [u8; 32],
-    tun: &mut TunDevice,
+    tun: &TunDevice,
     transport: &mut dyn ClientTransport,
     mut session: Session,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     let transport_fds = transport.pollfds();
     let tun_fd = tun.fd();
@@ -240,8 +347,9 @@ fn run_event_loop(
         event_loop.add_fd(*fd, POLLIN);
     }
 
-    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut bufs = IoBufs::new(cfg);
     let mut next_keepalive = Instant::now() + keepalive_jitter();
+    let mut next_stats = Instant::now() + STATS_INTERVAL;
     let mut pending: Option<(ClientHandshake, Instant)> = None;
 
     while running.load(Ordering::SeqCst) {
@@ -250,14 +358,28 @@ fn run_event_loop(
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun_fd {
-                    handle_tun_read(tun, &mut tun_buffer, transport, &mut session)?;
+                    handle_tun_read(tun, transport, &mut session, &mut bufs, stats)?;
                 } else if transport_fds.contains(&fd) {
-                    handle_transport_read(transport, tun, &mut session, &mut pending)?;
+                    handle_transport_read(
+                        transport,
+                        tun,
+                        &mut session,
+                        &mut pending,
+                        &mut bufs,
+                        stats,
+                    )?;
                 }
             }
         }
 
         let now = Instant::now();
+
+        if let Some(stats) = stats {
+            if now >= next_stats {
+                stats.emit_now();
+                next_stats = now + STATS_INTERVAL;
+            }
+        }
 
         // PFS ratchet: initiate (or retry) a fresh handshake
         let needs_rekey = session.should_rekey() || session.expired();
@@ -275,6 +397,246 @@ fn run_event_loop(
         if now >= next_keepalive {
             if let Ok(datagram) = session.seal_data(&[]) {
                 let _ = transport.send(&datagram);
+            }
+            next_keepalive = now + keepalive_jitter();
+        }
+    }
+
+    Ok(())
+}
+
+/// 2-thread data plane for the QUIC transport: the uplink thread owns
+/// tun-read → seal → `send_batch_to`, while the calling thread owns
+/// UDP-read → open → tun-write plus the whole control plane (keepalives,
+/// rekey, cookies). Crypto for the two directions runs on two cores.
+///
+/// Sharing: `TunDevice` and `UdpTunnel` I/O take `&self` (each thread keeps
+/// its own scratch/batch buffers); the session sits in an `RwLock` — read per
+/// packet, write only when a rekey installs a fresh session. Scoped threads
+/// guarantee the uplink joins before this returns, preserving `run_mobile`'s
+/// fd-ownership contract.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn run_event_loop_threaded(
+    cfg: &ClientConfig,
+    identity: &Identity,
+    server_public: [u8; 32],
+    tun: TunDevice,
+    tunnel: UdpTunnel,
+    remote: SocketAddr,
+    session: Session,
+    running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
+) -> Result<()> {
+    let session = std::sync::RwLock::new(session);
+    log::info!("client data plane: 2-thread split (uplink + downlink)");
+
+    std::thread::scope(|scope| {
+        let uplink = scope
+            .spawn(|| client_uplink_loop(cfg, &tun, &tunnel, remote, &session, running, stats));
+
+        let downlink_result = client_downlink_loop(
+            cfg,
+            identity,
+            server_public,
+            &tun,
+            &tunnel,
+            remote,
+            &session,
+            running,
+            stats,
+        );
+
+        // The downlink exits only when `running` flips false (or on a poll
+        // error, in which case stop the uplink too instead of leaking it).
+        running.store(false, Ordering::SeqCst);
+        let uplink_result = uplink
+            .join()
+            .unwrap_or_else(|_| Err(VpnError::Config("client uplink thread panicked".into())));
+        downlink_result.and(uplink_result)
+    })
+}
+
+/// Uplink half of the threaded client loop: tun → seal → UDP burst.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn client_uplink_loop(
+    cfg: &ClientConfig,
+    tun: &TunDevice,
+    tunnel: &UdpTunnel,
+    remote: SocketAddr,
+    session: &std::sync::RwLock<Session>,
+    running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
+) -> Result<()> {
+    let mut event_loop = EventLoop::new();
+    event_loop.add_fd(tun.fd(), POLLIN);
+
+    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut scratch = SealScratch::default();
+    let flush_at = cfg.performance.batch_size.max(1);
+    let mut queue: Vec<Vec<u8>> = Vec::with_capacity(flush_at);
+    let mut pool: Vec<Vec<u8>> = Vec::with_capacity(flush_at);
+
+    while running.load(Ordering::SeqCst) {
+        let events = event_loop.poll(100)?;
+        if events.is_empty() {
+            continue;
+        }
+        loop {
+            match tun.read(&mut tun_buffer) {
+                Ok(n) if n > 0 => {
+                    let mut out = pool.pop().unwrap_or_default();
+                    let sealed = session
+                        .read()
+                        .unwrap()
+                        .seal_data_into(&tun_buffer[..n], &mut scratch, &mut out)
+                        .is_ok();
+                    if sealed {
+                        if let Some(stats) = stats {
+                            stats.count_tx(n);
+                        }
+                        queue.push(out);
+                        if queue.len() >= flush_at {
+                            let _ = tunnel.send_batch_to(&queue, remote);
+                            pool.append(&mut queue);
+                        }
+                    } else {
+                        // Session expired mid-rekey: drop the packet (the
+                        // downlink thread is installing a fresh session).
+                        pool.push(out);
+                    }
+                }
+                Ok(_) => break,
+                Err(e) if is_would_block(&e) => break,
+                Err(_) => break,
+            }
+        }
+        if !queue.is_empty() {
+            let _ = tunnel.send_batch_to(&queue, remote);
+            pool.append(&mut queue);
+        }
+    }
+    Ok(())
+}
+
+/// Downlink half + control plane of the threaded client loop.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn client_downlink_loop(
+    cfg: &ClientConfig,
+    identity: &Identity,
+    server_public: [u8; 32],
+    tun: &TunDevice,
+    tunnel: &UdpTunnel,
+    remote: SocketAddr,
+    session: &std::sync::RwLock<Session>,
+    running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
+) -> Result<()> {
+    let mut event_loop = EventLoop::new();
+    event_loop.add_fd(tunnel.fd(), POLLIN);
+
+    let mut batch = BatchBuffer::new(cfg.performance.batch_size);
+    let mut payload = Vec::new();
+    let mut next_keepalive = Instant::now() + keepalive_jitter();
+    let mut next_stats = Instant::now() + STATS_INTERVAL;
+    let mut pending: Option<(ClientHandshake, Instant)> = None;
+
+    while running.load(Ordering::SeqCst) {
+        let events = event_loop.poll(100)?;
+
+        if !events.is_empty() {
+            loop {
+                let n = match tunnel.recv_batch(&mut batch) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                for i in 0..n {
+                    let Some((src, data)) = batch.get(i) else {
+                        continue;
+                    };
+                    if src != remote {
+                        continue; // point-to-point filter
+                    }
+                    match wire::parse(data) {
+                        Ok(WireMsg::Data {
+                            receiver_cid,
+                            masked_counter,
+                            ciphertext,
+                        }) => {
+                            let sess = session.read().unwrap();
+                            if receiver_cid != sess.local_cid {
+                                continue;
+                            }
+                            match sess.open_data_into(masked_counter, ciphertext, &mut payload) {
+                                Ok(()) if payload.is_empty() => {} // keepalive
+                                Ok(()) => {
+                                    if let Some(stats) = stats {
+                                        stats.count_rx(payload.len());
+                                    }
+                                    let _ = tun.write(&payload);
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        Ok(WireMsg::Resp { .. }) => {
+                            if let Some((hs, _)) = pending.take() {
+                                match hs.complete(data) {
+                                    Ok(new_session) => {
+                                        let mut guard = session.write().unwrap();
+                                        log::info!(
+                                            "rekey complete (session age was {:?})",
+                                            guard.age()
+                                        );
+                                        *guard = new_session;
+                                    }
+                                    Err(e) => log::debug!("rekey response rejected: {}", e),
+                                }
+                            }
+                        }
+                        Ok(WireMsg::Cookie { nonce, sealed }) => {
+                            if let Some((hs, _)) = pending.as_mut() {
+                                if hs.apply_cookie(nonce, sealed).is_ok() {
+                                    let _ = tunnel.send_to(hs.datagram(), remote);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let now = Instant::now();
+
+        if let Some(stats) = stats {
+            if now >= next_stats {
+                stats.emit_now();
+                next_stats = now + STATS_INTERVAL;
+            }
+        }
+
+        // PFS ratchet: initiate (or retry) a fresh handshake
+        let needs_rekey = {
+            let sess = session.read().unwrap();
+            sess.should_rekey() || sess.expired()
+        };
+        let pending_stale = matches!(&pending, Some((_, t)) if t.elapsed() > REKEY_RETRY);
+        if (needs_rekey && pending.is_none()) || pending_stale {
+            match ClientHandshake::new(cfg.crypto.cipher, identity, server_public) {
+                Ok(hs) => {
+                    let _ = tunnel.send_to(hs.datagram(), remote);
+                    pending = Some((hs, now));
+                }
+                Err(e) => log::error!("failed to start rekey handshake: {}", e),
+            }
+        }
+
+        if now >= next_keepalive {
+            if let Ok(datagram) = session.read().unwrap().seal_data(&[]) {
+                let _ = tunnel.send_to(&datagram, remote);
             }
             next_keepalive = now + keepalive_jitter();
         }
@@ -314,6 +676,7 @@ pub unsafe fn run_mobile(
     protect: &dyn Fn(RawFd) -> bool,
     running: &AtomicBool,
     on_connected: &dyn Fn(),
+    on_stats: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<()> {
     let server_addr = cfg
         .server_addr()
@@ -324,14 +687,14 @@ pub unsafe fn run_mobile(
 
     // Protect every carrier socket before it sends anything, otherwise the
     // handshake datagrams would be routed back into the tunnel we're building.
-    for fd in transport.pollfds() {
+    for fd in transport.as_dyn_mut().pollfds() {
         if !protect(fd) {
             log::warn!("protect(fd={}) returned false; traffic may loop", fd);
         }
     }
 
     let session = handshake_over_transport(
-        transport.as_mut(),
+        transport.as_dyn_mut(),
         cfg.crypto.cipher,
         &identity,
         server_public,
@@ -342,19 +705,21 @@ pub unsafe fn run_mobile(
     // can flip its UI to "connected" (instead of guessing before this point).
     on_connected();
 
-    transport.set_nonblocking(true)?;
+    transport.as_dyn_mut().set_nonblocking(true)?;
 
-    let mut tun = TunDevice::from_fd(tun_fd, cfg.tun.mtu)?;
+    let tun = TunDevice::from_fd(tun_fd, cfg.tun.mtu)?;
     tun.set_nonblocking(true)?;
 
-    run_event_loop(
+    let stats = StatsEmitter::new(on_stats);
+    run_data_plane(
         &cfg,
         &identity,
         server_public,
-        &mut tun,
-        transport.as_mut(),
+        tun,
+        transport,
         session,
         running,
+        Some(&stats),
     )
 }
 
@@ -432,18 +797,73 @@ fn handshake_over_transport(
     Err(NetworkError::Timeout.into())
 }
 
+/// Reusable data-plane buffers, allocated once per event loop: no per-packet
+/// heap traffic on the TX (seal scratch + pooled datagrams) or RX
+/// (recvmmsg batch + payload) paths.
+#[cfg(unix)]
+struct IoBufs {
+    tun_buffer: Vec<u8>,
+    seal_scratch: SealScratch,
+    /// Sealed datagrams awaiting a send_many flush...
+    send_queue: Vec<Vec<u8>>,
+    /// ...and their recycled allocations after it.
+    send_pool: Vec<Vec<u8>>,
+    batch: BatchBuffer,
+    payload: Vec<u8>,
+    flush_at: usize,
+}
+
+#[cfg(unix)]
+impl IoBufs {
+    fn new(cfg: &ClientConfig) -> Self {
+        let flush_at = cfg.performance.batch_size.max(1);
+        IoBufs {
+            tun_buffer: vec![0u8; cfg.tun.mtu as usize + 100],
+            seal_scratch: SealScratch::default(),
+            send_queue: Vec::with_capacity(flush_at),
+            send_pool: Vec::with_capacity(flush_at),
+            batch: BatchBuffer::new(cfg.performance.batch_size),
+            payload: Vec::new(),
+            flush_at,
+        }
+    }
+
+    fn flush_send_queue(&mut self, transport: &mut dyn ClientTransport) {
+        if self.send_queue.is_empty() {
+            return;
+        }
+        let _ = transport.send_many(&self.send_queue);
+        self.send_pool.append(&mut self.send_queue);
+    }
+}
+
 #[cfg(unix)]
 fn handle_tun_read(
-    tun: &mut TunDevice,
-    buffer: &mut [u8],
+    tun: &TunDevice,
     transport: &mut dyn ClientTransport,
     session: &mut Session,
+    bufs: &mut IoBufs,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     loop {
-        match tun.read(buffer) {
+        match tun.read(&mut bufs.tun_buffer) {
             Ok(n) if n > 0 => {
-                if let Ok(datagram) = session.seal_data(&buffer[..n]) {
-                    let _ = transport.send(&datagram);
+                let mut out = bufs.send_pool.pop().unwrap_or_default();
+                match session.seal_data_into(
+                    &bufs.tun_buffer[..n],
+                    &mut bufs.seal_scratch,
+                    &mut out,
+                ) {
+                    Ok(()) => {
+                        if let Some(stats) = stats {
+                            stats.count_tx(n);
+                        }
+                        bufs.send_queue.push(out);
+                        if bufs.send_queue.len() >= bufs.flush_at {
+                            bufs.flush_send_queue(transport);
+                        }
+                    }
+                    Err(_) => bufs.send_pool.push(out),
                 }
             }
             Ok(_) => break,
@@ -451,59 +871,69 @@ fn handle_tun_read(
             Err(_) => break,
         }
     }
+    bufs.flush_send_queue(transport);
     Ok(())
 }
 
 #[cfg(unix)]
 fn handle_transport_read(
     transport: &mut dyn ClientTransport,
-    tun: &mut TunDevice,
+    tun: &TunDevice,
     session: &mut Session,
     pending: &mut Option<(ClientHandshake, Instant)>,
+    bufs: &mut IoBufs,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
-    let mut buf = Vec::new();
     loop {
-        match transport.recv(&mut buf) {
-            Ok(true) => {}
-            Ok(false) => break,
+        let n = match transport.recv_batch(&mut bufs.batch) {
+            Ok(0) => break,
+            Ok(n) => n,
             Err(_) => break,
-        }
-        match wire::parse(&buf) {
-            Ok(WireMsg::Data {
-                receiver_cid,
-                masked_counter,
-                ciphertext,
-            }) => {
-                if receiver_cid != session.local_cid {
-                    continue;
-                }
-                match session.open_data(masked_counter, ciphertext) {
-                    Ok(payload) if payload.is_empty() => {} // keepalive
-                    Ok(payload) => {
-                        let _ = tun.write(&payload);
+        };
+        for i in 0..n {
+            let Some((_, data)) = bufs.batch.get(i) else {
+                continue; // skipped slot (truncated / spoofed source)
+            };
+            match wire::parse(data) {
+                Ok(WireMsg::Data {
+                    receiver_cid,
+                    masked_counter,
+                    ciphertext,
+                }) => {
+                    if receiver_cid != session.local_cid {
+                        continue;
                     }
-                    Err(_) => {}
-                }
-            }
-            Ok(WireMsg::Resp { .. }) => {
-                if let Some((hs, _)) = pending.take() {
-                    match hs.complete(&buf) {
-                        Ok(new_session) => {
-                            log::info!("rekey complete (session age was {:?})", session.age());
-                            *session = new_session;
+                    match session.open_data_into(masked_counter, ciphertext, &mut bufs.payload) {
+                        Ok(()) if bufs.payload.is_empty() => {} // keepalive
+                        Ok(()) => {
+                            if let Some(stats) = stats {
+                                stats.count_rx(bufs.payload.len());
+                            }
+                            let _ = tun.write(&bufs.payload);
                         }
-                        Err(e) => log::debug!("rekey response rejected: {}", e),
+                        Err(_) => {}
                     }
                 }
-            }
-            Ok(WireMsg::Cookie { nonce, sealed }) => {
-                if let Some((hs, _)) = pending.as_mut() {
-                    if hs.apply_cookie(nonce, sealed).is_ok() {
-                        let _ = transport.send(hs.datagram());
+                Ok(WireMsg::Resp { .. }) => {
+                    if let Some((hs, _)) = pending.take() {
+                        match hs.complete(data) {
+                            Ok(new_session) => {
+                                log::info!("rekey complete (session age was {:?})", session.age());
+                                *session = new_session;
+                            }
+                            Err(e) => log::debug!("rekey response rejected: {}", e),
+                        }
                     }
                 }
+                Ok(WireMsg::Cookie { nonce, sealed }) => {
+                    if let Some((hs, _)) = pending.as_mut() {
+                        if hs.apply_cookie(nonce, sealed).is_ok() {
+                            let _ = transport.send(hs.datagram());
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     Ok(())
@@ -535,6 +965,18 @@ mod tests {
     use twocha_core::v4::{InitOutcome, ServerHandshakeEngine};
     use twocha_core::CipherSuite;
 
+    /// Default config: worker_threads = 0 (auto) → 2-thread split on QUIC.
+    #[test]
+    fn run_mobile_loopback_roundtrip() {
+        loopback_roundtrip("");
+    }
+
+    /// worker_threads = 1 pins the single-threaded event loop.
+    #[test]
+    fn run_mobile_loopback_roundtrip_single_thread() {
+        loopback_roundtrip("[performance]\nworker_threads = 1\n");
+    }
+
     /// Drive `run_mobile` end-to-end over real loopback sockets against a
     /// minimal in-process v4 server: assert the `protect` callback fires for
     /// the transport's pollfd(s) before the handshake, that a tun packet seals
@@ -542,8 +984,7 @@ mod tests {
     ///
     /// Uses a `UnixDatagram` socketpair as the "tun fd" — `TunDevice::from_fd`
     /// only does `read`/`write` on it, so message boundaries behave like a tun.
-    #[test]
-    fn run_mobile_loopback_roundtrip() {
+    fn loopback_roundtrip(extra_toml: &str) {
         let client_id = Identity::generate();
         let server_id = Identity::generate();
         let client_pub = client_id.public_bytes();
@@ -560,8 +1001,7 @@ mod tests {
         let server = thread::spawn(move || {
             let mut buf = [0u8; 2048];
             let (n, src) = server_sock.recv_from(&mut buf).expect("recv init");
-            let mut session = match engine.handle_init(&buf[..n], &src, false, |k| *k == client_pub)
-            {
+            let session = match engine.handle_init(&buf[..n], &src, false, |k| *k == client_pub) {
                 InitOutcome::Established {
                     datagram, session, ..
                 } => {
@@ -607,7 +1047,7 @@ mod tests {
         let cfg = ClientConfig::parse(&format!(
             "[client]\nserver = \"{server_addr}\"\ntransport = \"quic\"\n\
              [crypto]\nprivate_key_file = \"/dev/null\"\n\
-             server_public_key = \"{}\"\n[tun]\nmtu = 1400\n",
+             server_public_key = \"{}\"\n[tun]\nmtu = 1400\n{extra_toml}",
             twocha_core::encode_public_key(&server_public),
         ))
         .unwrap();
@@ -640,6 +1080,7 @@ mod tests {
                     &protect,
                     &running_in,
                     &on_connected,
+                    &|_, _| {},
                 )
             }
         });

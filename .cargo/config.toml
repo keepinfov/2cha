@@ -1,5 +1,9 @@
 # Cargo configuration for 2cha
 # This enables static linking with musl
+#
+# `--cfg aes_armv8` lets the RustCrypto `aes` crate (the non-ring fallback
+# path) use the ARMv8 Cryptography Extensions on stable instead of a soft
+# bitsliced AES. Safe on every aarch64 Android/server device we target.
 
 # x86_64 musl target
 [target.x86_64-unknown-linux-musl]
@@ -9,7 +13,15 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # aarch64 musl target
 [target.aarch64-unknown-linux-musl]
 linker = "aarch64-linux-musl-gcc"
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "--cfg", "aes_armv8"]
+
+# aarch64 glibc target
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["--cfg", "aes_armv8"]
+
+# aarch64 Android (cargo-ndk reads this workspace config)
+[target.aarch64-linux-android]
+rustflags = ["--cfg", "aes_armv8"]
 
 # arm musl target (32-bit)
 [target.armv7-unknown-linux-musleabihf]

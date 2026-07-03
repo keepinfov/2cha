@@ -35,7 +35,7 @@ use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, Connection, ServerConfig, ServerConnection};
 
-use super::{push_frame, take_frame, ClientTransport};
+use super::{ClientTransport, FrameBuf};
 
 /// Certificate verifier that accepts any server certificate. See the module
 /// docs for why this is safe here: Noise_IK inside the tunnel is the real trust
@@ -98,7 +98,7 @@ struct TlsCarrier {
     sock: TcpStream,
     conn: Connection,
     /// Decrypted plaintext awaiting reassembly into complete frames.
-    inbuf: Vec<u8>,
+    inbuf: FrameBuf,
 }
 
 impl TlsCarrier {
@@ -112,7 +112,7 @@ impl TlsCarrier {
         Ok(TlsCarrier {
             sock,
             conn,
-            inbuf: Vec::new(),
+            inbuf: FrameBuf::new(),
         })
     }
 
@@ -132,17 +132,51 @@ impl TlsCarrier {
     }
 
     fn send(&mut self, datagram: &[u8]) -> io::Result<()> {
-        let mut frame = Vec::with_capacity(super::FRAME_HEADER_LEN + datagram.len());
-        push_frame(&mut frame, datagram)?;
-        self.conn.writer().write_all(&frame)?;
+        if datagram.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "datagram exceeds u16 frame length",
+            ));
+        }
+        // rustls' writer buffers plaintext internally, so writing the header
+        // and body separately costs no extra copy of the datagram.
+        let header = (datagram.len() as u16).to_be_bytes();
+        let mut writer = self.conn.writer();
+        writer.write_all(&header)?;
+        writer.write_all(datagram)?;
         self.flush()
     }
 
+    /// Move any plaintext rustls has already decrypted into the reassembly
+    /// buffer, and push out any records the TLS layer owes the peer (session
+    /// tickets, key updates) so the connection stays healthy.
+    fn drain_plaintext(&mut self) -> io::Result<()> {
+        let state = self
+            .conn
+            .process_new_packets()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let pending = state.plaintext_bytes_to_read();
+        if pending > 0 {
+            self.conn
+                .reader()
+                .read_exact(self.inbuf.make_room(pending))?;
+        }
+        if self.conn.wants_write() {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     fn recv(&mut self, out: &mut Vec<u8>) -> io::Result<bool> {
-        if let Some(datagram) = take_frame(&mut self.inbuf) {
-            *out = datagram;
+        if self.inbuf.pop_frame_into(out) {
             return Ok(true);
         }
+        // Drain plaintext already buffered inside rustls BEFORE polling the
+        // socket: the blocking handshake's `complete_io` can pull the peer's
+        // first app-data records in the same TCP segment as its final
+        // handshake flight, and a socket-first loop would strand that data
+        // (invisible to poll) until the peer happens to send more.
+        self.drain_plaintext()?;
         // In non-blocking mode `read_tls` returns WouldBlock when the socket is
         // merely drained, so `Ok(0)` genuinely means the peer closed the TCP
         // connection (EOF). We surface that as an error so the poll loop can
@@ -158,26 +192,11 @@ impl TlsCarrier {
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
-            let state = self
-                .conn
-                .process_new_packets()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let pending = state.plaintext_bytes_to_read();
-            if pending > 0 {
-                let start = self.inbuf.len();
-                self.inbuf.resize(start + pending, 0);
-                self.conn.reader().read_exact(&mut self.inbuf[start..])?;
-            }
-            // The TLS layer may owe the peer records (e.g. session tickets,
-            // key updates); push them out so the connection stays healthy.
-            if self.conn.wants_write() {
-                self.flush()?;
-            }
+            self.drain_plaintext()?;
         }
         // Drain any frame we did manage to reassemble before reporting EOF, so
         // the last bytes before a close are never lost.
-        if let Some(datagram) = take_frame(&mut self.inbuf) {
-            *out = datagram;
+        if self.inbuf.pop_frame_into(out) {
             return Ok(true);
         }
         if eof {

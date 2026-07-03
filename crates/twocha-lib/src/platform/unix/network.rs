@@ -7,7 +7,41 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::Duration;
-use twocha_protocol::{NetworkError, Result, MAX_PACKET_SIZE};
+use twocha_protocol::{NetworkError, Result};
+
+/// Receive buffer size per datagram. Deliberately larger than
+/// `MAX_PACKET_SIZE` (1500): a datagram that fills the buffer (or carries
+/// `MSG_TRUNC`) was truncated by the kernel and must be dropped, not fed to
+/// the AEAD where it would fail authentication and be miscounted as an
+/// attack. The headroom also tolerates pre-padding-cap peers whose datagrams
+/// could reach 1519 bytes.
+const RECV_BUF_LEN: usize = 2048;
+
+/// Rate-limited (1/s) warning for truncated datagrams so a flood of
+/// oversized packets cannot spam the log.
+fn warn_truncated(len: usize, src: Option<SocketAddr>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARN_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_WARN_SECS.load(Ordering::Relaxed);
+    if now != last
+        && LAST_WARN_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        match src {
+            Some(src) => log::warn!(
+                "dropping truncated datagram (>= {} bytes) from {}",
+                len,
+                src
+            ),
+            None => log::warn!("dropping truncated datagram (>= {} bytes)", len),
+        }
+    }
+}
 
 /// Tunnel configuration
 #[derive(Debug, Clone)]
@@ -18,6 +52,10 @@ pub struct TunnelConfig {
     pub write_timeout: Option<Duration>,
     pub recv_buffer_size: usize,
     pub send_buffer_size: usize,
+    /// Bind with SO_REUSEPORT so several worker sockets share one listen
+    /// address; the kernel then hashes each client's 4-tuple to a fixed
+    /// socket, keeping a client's datagrams on one worker.
+    pub reuse_port: bool,
 }
 
 impl Default for TunnelConfig {
@@ -29,6 +67,7 @@ impl Default for TunnelConfig {
             write_timeout: Some(Duration::from_secs(5)),
             recv_buffer_size: 2 * 1024 * 1024,
             send_buffer_size: 2 * 1024 * 1024,
+            reuse_port: false,
         }
     }
 }
@@ -44,8 +83,12 @@ impl UdpTunnel {
     pub fn new(config: TunnelConfig) -> Result<Self> {
         log::info!("Creating UDP tunnel on {}", config.local_addr);
 
-        let socket = UdpSocket::bind(config.local_addr)
-            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        let socket = if config.reuse_port {
+            Self::bind_reuseport(config.local_addr)?
+        } else {
+            UdpSocket::bind(config.local_addr)
+                .map_err(|e| NetworkError::BindFailed(e.to_string()))?
+        };
 
         socket.set_read_timeout(config.read_timeout)?;
         socket.set_write_timeout(config.write_timeout)?;
@@ -55,8 +98,25 @@ impl UdpTunnel {
         Ok(UdpTunnel {
             socket,
             config,
-            recv_buffer: vec![0u8; MAX_PACKET_SIZE],
+            recv_buffer: vec![0u8; RECV_BUF_LEN],
         })
+    }
+
+    /// Bind with SO_REUSEPORT set before bind (requires building the socket
+    /// via socket2; std's UdpSocket::bind can't set options pre-bind).
+    fn bind_reuseport(addr: SocketAddr) -> Result<UdpSocket> {
+        let domain = if addr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        sock.set_reuse_port(true)
+            .map_err(|e| NetworkError::BindFailed(format!("SO_REUSEPORT: {}", e)))?;
+        sock.bind(&addr.into())
+            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        Ok(sock.into())
     }
 
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {
@@ -89,17 +149,35 @@ impl UdpTunnel {
         Ok(sent)
     }
 
-    /// Receive a datagram from any source
-    pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
+    /// Receive a datagram from any source into `out`, reusing its allocation.
+    /// Returns the source address, or `None` when the socket would block (or
+    /// the datagram was truncated and dropped).
+    pub fn recv_into(&mut self, out: &mut Vec<u8>) -> Result<Option<SocketAddr>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((len, src)) => {
+                // A datagram that fills the whole buffer was (very likely)
+                // truncated by the kernel; decrypting it would only produce
+                // an AEAD failure. Drop it here with a diagnosable warning.
+                if len == self.recv_buffer.len() {
+                    warn_truncated(len, Some(src));
+                    return Ok(None);
+                }
                 log::trace!("Received {} bytes from {}", len, src);
-                Ok(Some((src, self.recv_buffer[..len].to_vec())))
+                out.clear();
+                out.extend_from_slice(&self.recv_buffer[..len]);
+                Ok(Some(src))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Receive a datagram from any source (allocating convenience wrapper
+    /// over [`UdpTunnel::recv_into`]).
+    pub fn recv_from_any(&mut self) -> Result<Option<(SocketAddr, Vec<u8>)>> {
+        let mut out = Vec::new();
+        Ok(self.recv_into(&mut out)?.map(|src| (src, out)))
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
@@ -153,7 +231,15 @@ impl UdpTunnel {
             let r = r as usize;
             for i in 0..r {
                 batch.lens[i] = batch.hdrs[i].msg_len as usize;
-                batch.srcs[i] = decode_sockaddr(&batch.addrs[i]);
+                // Kernel flags a datagram larger than our buffer with
+                // MSG_TRUNC: mark the slot skipped (`get` returns None)
+                // instead of handing garbage to the AEAD.
+                if batch.hdrs[i].msg_hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                    warn_truncated(batch.lens[i], decode_sockaddr(&batch.addrs[i]));
+                    batch.srcs[i] = None;
+                } else {
+                    batch.srcs[i] = decode_sockaddr(&batch.addrs[i]);
+                }
             }
             batch.count = r;
             return Ok(r);
@@ -169,7 +255,14 @@ impl UdpTunnel {
             match self.socket.recv_from(&mut batch.bufs[i]) {
                 Ok((len, src)) => {
                     batch.lens[i] = len;
-                    batch.srcs[i] = Some(src);
+                    // No MSG_TRUNC via std: a datagram filling the whole
+                    // buffer was (very likely) truncated — skip the slot.
+                    if len == batch.bufs[i].len() {
+                        warn_truncated(len, Some(src));
+                        batch.srcs[i] = None;
+                    } else {
+                        batch.srcs[i] = Some(src);
+                    }
                     batch.count += 1;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -264,6 +357,77 @@ impl UdpTunnel {
         }
         Ok(sent)
     }
+
+    /// Send multiple datagrams to a single fixed destination in as few
+    /// syscalls as possible (client hot path: everything goes to the server).
+    #[cfg(target_os = "linux")]
+    pub fn send_batch_to(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
+        if datagrams.is_empty() {
+            return Ok(0);
+        }
+        let (mut storage, addr_len) = encode_sockaddr(addr);
+        let mut iovecs: Vec<libc::iovec> = datagrams
+            .iter()
+            .map(|data| libc::iovec {
+                iov_base: data.as_ptr() as *mut libc::c_void,
+                iov_len: data.len(),
+            })
+            .collect();
+        let mut hdrs: Vec<libc::mmsghdr> = Vec::with_capacity(datagrams.len());
+        for iovec in iovecs.iter_mut() {
+            let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_name = &mut storage as *mut _ as *mut libc::c_void;
+            hdr.msg_hdr.msg_namelen = addr_len;
+            hdr.msg_hdr.msg_iov = iovec;
+            hdr.msg_hdr.msg_iovlen = 1;
+            hdrs.push(hdr);
+        }
+
+        let mut sent = 0;
+        while sent < datagrams.len() {
+            let r = unsafe {
+                libc::sendmmsg(
+                    self.fd(),
+                    hdrs[sent..].as_mut_ptr(),
+                    (datagrams.len() - sent) as libc::c_uint,
+                    0,
+                )
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => break,
+                    _ => {
+                        // Unexpected error: fall back to per-datagram sends
+                        for data in &datagrams[sent..] {
+                            if self.socket.send_to(data, addr).is_ok() {
+                                sent += 1;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if r == 0 {
+                break;
+            }
+            sent += r as usize;
+        }
+        Ok(sent)
+    }
+
+    /// Fallback for non-Linux unix: per-datagram sends.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn send_batch_to(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
+        let mut sent = 0;
+        for data in datagrams {
+            if self.socket.send_to(data, addr).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -289,7 +453,7 @@ impl BatchBuffer {
     pub fn new(batch_size: usize) -> Self {
         let n = batch_size.clamp(1, 64);
         BatchBuffer {
-            bufs: vec![vec![0u8; MAX_PACKET_SIZE]; n],
+            bufs: vec![vec![0u8; RECV_BUF_LEN]; n],
             lens: vec![0; n],
             srcs: vec![None; n],
             count: 0,
@@ -320,8 +484,35 @@ impl BatchBuffer {
         self.count == 0
     }
 
+    /// Reset for manual filling via [`BatchBuffer::push`].
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    /// Append a datagram copied from `data`, tagged with `src`. Returns false
+    /// (without copying) when the batch is full or `data` exceeds a slot.
+    /// Lets non-datagram transports satisfy batch-oriented callers.
+    pub fn push(&mut self, src: SocketAddr, data: &[u8]) -> bool {
+        if self.count >= self.capacity() || data.len() > self.bufs[self.count].len() {
+            return false;
+        }
+        self.bufs[self.count][..data.len()].copy_from_slice(data);
+        self.lens[self.count] = data.len();
+        self.srcs[self.count] = Some(src);
+        self.count += 1;
+        true
+    }
+
+    /// Invalidate slot `i` so [`BatchBuffer::get`] skips it (e.g. a datagram
+    /// from an unexpected source on a point-to-point path).
+    pub fn skip(&mut self, i: usize) {
+        if i < self.count {
+            self.srcs[i] = None;
+        }
+    }
+
     /// Datagram `i` of the last `recv_batch` (None if the source address
-    /// could not be decoded).
+    /// could not be decoded or the datagram was truncated and dropped).
     pub fn get(&self, i: usize) -> Option<(SocketAddr, &[u8])> {
         if i >= self.count {
             return None;
@@ -567,6 +758,48 @@ mod tests {
 
         // Drained socket: next call reports 0, not an error
         assert_eq!(receiver.recv_batch(&mut batch).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_recv_batch_skips_truncated_datagram() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        sender.send_to(b"before", dst).unwrap();
+        // Larger than RECV_BUF_LEN: the kernel truncates it on delivery
+        sender
+            .send_to(&vec![0xEEu8; RECV_BUF_LEN + 500], dst)
+            .unwrap();
+        sender.send_to(b"after", dst).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut batch = BatchBuffer::new(8);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(batch.get(0).unwrap().1, b"before");
+        assert!(batch.get(1).is_none(), "truncated slot must be skipped");
+        assert_eq!(batch.get(2).unwrap().1, b"after");
+    }
+
+    #[test]
+    fn test_recv_from_any_drops_truncated_datagram() {
+        let sender = tunnel_on_loopback();
+        let mut receiver = tunnel_on_loopback();
+        let dst = local_addr(&receiver);
+
+        sender
+            .send_to(&vec![0xEEu8; RECV_BUF_LEN + 500], dst)
+            .unwrap();
+        sender.send_to(b"ok", dst).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Truncated datagram is swallowed (reported as no-data), the intact
+        // one arrives next.
+        assert!(receiver.recv_from_any().unwrap().is_none());
+        let (_, data) = receiver.recv_from_any().unwrap().unwrap();
+        assert_eq!(data, b"ok");
     }
 
     #[test]

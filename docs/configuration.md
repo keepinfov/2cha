@@ -41,14 +41,14 @@ A server config must declare at least one `[[peers]]` entry or it fails validati
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | `"tun0"` | TUN interface name. |
-| `mtu` | integer (u16) | `1420` | Interface MTU. |
+| `mtu` | integer (u16) | `1420` | Interface MTU. Must be `576..=1465`: each packet gains 35 bytes of tunnel overhead (17 header + 2 inner length + 16 AEAD tag) and the finished datagram must fit in a 1500-byte wire packet. |
 | `queue_len` | integer (u32) | `500` | TUN tx queue length. |
 
 ## `[crypto]` — both
 
 | Key | Type | Default | Description | Side |
 |---|---|---|---|---|
-| `cipher` | `"chacha20-poly1305"`\|`"aes-256-gcm"` | `"chacha20-poly1305"` | AEAD cipher suite. | both |
+| `cipher` | `"chacha20-poly1305"`\|`"aes-256-gcm"` | `"chacha20-poly1305"` | AEAD cipher suite. ChaCha20-Poly1305 (the default) is the right choice on ARM phones and small boxes: it is fast in software everywhere, while AES-256-GCM only wins on CPUs with AES instructions (modern x86, ARMv8 with Crypto Extensions). | both |
 | `private_key_file` | string | **required** | Path to this host's X25519 private key (raw 32 bytes, mode `0600`). | both |
 | `server_public_key` | string (base64) | **required (client)** | The server's public key. Get it with `2cha pubkey server.key`. | client only |
 
@@ -134,6 +134,7 @@ off. See [Server Setup](./server-setup.md#5-gateway-mode-internet-access-for-cli
 | `socket_send_buffer` | integer | `2097152` (2 MiB) | Socket send buffer in bytes. |
 | `batch_size` | integer | `32` | Packets processed per batch. |
 | `multi_queue` | bool | `false` | Use multi-queue TUN (Linux). |
+| `worker_threads` | integer | `0` | Data-plane threads. Client: `0` = auto (2-thread split on QUIC), `1` = single-threaded. Server: `0`/`1` = single-threaded loop; `>= 2` = opt-in multi-worker pool (QUIC + Linux only; forces `multi_queue`). |
 | `cpu_affinity` | integer[] | `[]` | CPU cores to pin worker threads to. |
 
 ## `[timeouts]` — both

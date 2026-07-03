@@ -13,7 +13,7 @@ use std::os::unix::io::RawFd;
 
 use twocha_protocol::VpnError;
 
-use super::ClientTransport;
+use super::{BatchBuffer, ClientTransport};
 use crate::platform::unix::network::UdpTunnel;
 
 fn to_io(e: VpnError) -> io::Error {
@@ -30,6 +30,12 @@ impl UdpQuicClientTransport {
     pub fn new(tunnel: UdpTunnel, remote: SocketAddr) -> Self {
         UdpQuicClientTransport { tunnel, remote }
     }
+
+    /// Unwrap the carrier for the threaded client data plane, which drives
+    /// the UDP socket directly (per-thread batch buffers over one socket).
+    pub fn into_parts(self) -> (UdpTunnel, SocketAddr) {
+        (self.tunnel, self.remote)
+    }
 }
 
 impl ClientTransport for UdpQuicClientTransport {
@@ -43,15 +49,34 @@ impl ClientTransport for UdpQuicClientTransport {
         // (and keep draining) anything spoofed from another source — same
         // filter the pre-abstraction client applied.
         loop {
-            match self.tunnel.recv_from_any().map_err(to_io)? {
-                Some((src, data)) if src == self.remote => {
-                    *out = data;
-                    return Ok(true);
-                }
+            match self.tunnel.recv_into(out).map_err(to_io)? {
+                Some(src) if src == self.remote => return Ok(true),
                 Some(_) => continue,
                 None => return Ok(false),
             }
         }
+    }
+
+    fn send_many(&mut self, datagrams: &[Vec<u8>]) -> io::Result<()> {
+        // Fixed destination: one sendmmsg for the whole burst. Under UDP
+        // semantics datagrams the kernel refuses are dropped, like send().
+        self.tunnel
+            .send_batch_to(datagrams, self.remote)
+            .map_err(to_io)?;
+        Ok(())
+    }
+
+    fn recv_batch(&mut self, batch: &mut BatchBuffer) -> io::Result<usize> {
+        let n = self.tunnel.recv_batch(batch).map_err(to_io)?;
+        // Same point-to-point filter as recv(): skip spoofed sources.
+        for i in 0..n {
+            if let Some((src, _)) = batch.get(i) {
+                if src != self.remote {
+                    batch.skip(i);
+                }
+            }
+        }
+        Ok(n)
     }
 
     fn pollfds(&self) -> Vec<RawFd> {
