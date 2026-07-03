@@ -15,7 +15,7 @@
       # Common package attributes
       commonAttrs = {
         pname = "2cha";
-        version = "1.3.0";
+        version = "1.6.0";
         src = ../.;
         cargoLock.lockFile = ../Cargo.lock;
 
