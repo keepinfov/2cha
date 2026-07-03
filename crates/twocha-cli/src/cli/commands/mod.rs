@@ -8,6 +8,7 @@ mod init_wizard;
 mod keys;
 mod peer;
 mod server;
+mod setup;
 mod status;
 mod updown;
 
@@ -18,6 +19,7 @@ pub use init::cmd_init;
 pub use keys::{cmd_genkey, cmd_pubkey};
 pub use peer::{cmd_peer_add, cmd_peer_list, cmd_peer_remove};
 pub use server::cmd_server;
+pub use setup::cmd_setup;
 pub use status::cmd_status;
 pub use updown::{cmd_down, cmd_toggle, cmd_up};
 

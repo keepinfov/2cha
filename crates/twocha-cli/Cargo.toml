@@ -25,6 +25,8 @@ indicatif = { workspace = true }
 log = { workspace = true }
 rpassword = { workspace = true }
 toml_edit = { workspace = true }
+serde_json = { workspace = true }
+qrcode = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 daemonize = { workspace = true }

@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod detect;
+pub mod mobile;
 pub mod render;
 pub mod server;
 pub mod write;
