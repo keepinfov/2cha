@@ -8,6 +8,7 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use twocha_protocol::{Result, VpnError};
 
 use super::detect;
+use super::mobile::{self, MobileExportParams};
 use super::render::{
     client_address, render_client, render_server, server_address, ClientParams, PeerParams,
     ServerParams,
@@ -26,7 +27,18 @@ struct GeneratedClient {
     address: Ipv4Addr,
 }
 
-pub fn run(output_dir: Option<&Path>) -> Result<()> {
+/// A mobile-app peer gathered by the wizard: exported as scannable JSON
+/// rather than a config file (the phone owns its private key).
+struct MobileClient {
+    name: String,
+    json: String,
+    /// Whether the phone's public key was entered (and thus authorized)
+    peer_added: bool,
+}
+
+/// Run the server wizard; returns the written server config path so the
+/// turn-key `2cha setup` can continue with system integration.
+pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
     let theme = ColorfulTheme::default();
 
     println!();
@@ -141,6 +153,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
     // ── Paired clients ───────────────────────────────────────────────────
     let mut peers: Vec<PeerParams> = Vec::new();
     let mut clients: Vec<(GeneratedClient, String)> = Vec::new();
+    let mut mobiles: Vec<MobileClient> = Vec::new();
 
     let mut endpoint_default = detect::endpoint_candidates()
         .first()
@@ -154,7 +167,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         .map_err(wizard_io_err)?;
 
     while add_client {
-        let n = clients.len();
+        let n = clients.len() + mobiles.len();
         let name: String = Input::with_theme(&theme)
             .with_prompt("  Client name")
             .default(format!("client{}", n + 1))
@@ -171,6 +184,20 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
             .interact_text()
             .map_err(wizard_io_err)?;
 
+        // Desktop clients get a generated key + config file; mobile clients
+        // keep their key on the phone and import a scannable JSON instead.
+        let kinds = [
+            "desktop / server (key + config file generated here)",
+            "mobile app (QR code; the phone keeps its own key)",
+        ];
+        let is_mobile = Select::with_theme(&theme)
+            .with_prompt("  Client type")
+            .items(kinds)
+            .default(0)
+            .interact()
+            .map_err(wizard_io_err)?
+            == 1;
+
         let endpoint: String = Input::with_theme(&theme)
             .with_prompt("  Server endpoint as seen by clients (host:port)")
             .default(endpoint_default.clone())
@@ -185,41 +212,87 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
             .interact()
             .map_err(wizard_io_err)?;
 
-        let key_path = dir.join(format!("{}.key", name));
-        let (client_id, _) = load_or_generate_key(&key_path)?;
         let address = client_address(subnet, n);
+        let dns_servers = if route_all {
+            super::default_dns_servers()
+        } else {
+            Vec::new()
+        };
 
-        let client_cfg = render_client(&ClientParams {
-            endpoint,
-            cipher: cipher.clone(),
-            key_file: key_path.display().to_string(),
-            server_public_key: server_public.clone(),
-            address,
-            prefix,
-            route_all,
-            dns_servers: if route_all {
-                super::default_dns_servers()
-            } else {
-                Vec::new()
-            },
-            transport: transport.kind.clone(),
-            tls_sni: transport.sni.clone(),
-        });
+        if is_mobile {
+            // The phone shows its public key under Config in the app;
+            // entering it here authorizes the device right away.
+            let phone_key: String = Input::with_theme(&theme)
+                .with_prompt("  Phone public key (app: Config → copy; empty = add later)")
+                .allow_empty(true)
+                .validate_with(|s: &String| -> std::result::Result<(), String> {
+                    let s = s.trim();
+                    if s.is_empty() {
+                        return Ok(());
+                    }
+                    twocha_core::decode_public_key(s)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+                .interact_text()
+                .map_err(wizard_io_err)?;
+            let phone_key = phone_key.trim().to_string();
 
-        peers.push(PeerParams {
-            public_key: client_id.public_base64(),
-            name: name.clone(),
-        });
-        clients.push((
-            GeneratedClient {
-                config_path: dir.join(format!("{}.toml", name)),
-                public_key: client_id.public_base64(),
-                key_path,
+            let peer_added = !phone_key.is_empty();
+            if peer_added {
+                peers.push(PeerParams {
+                    public_key: phone_key,
+                    name: name.clone(),
+                });
+            }
+            let json = mobile::mobile_config_json(&MobileExportParams {
+                endpoint,
+                cipher: cipher.clone(),
+                server_public_key: server_public.clone(),
                 address,
+                prefix,
+                route_all,
+                dns_servers,
+                transport: transport.kind.clone(),
+                tls_sni: transport.sni.clone(),
+            });
+            mobiles.push(MobileClient {
                 name,
-            },
-            client_cfg,
-        ));
+                json,
+                peer_added,
+            });
+        } else {
+            let key_path = dir.join(format!("{}.key", name));
+            let (client_id, _) = load_or_generate_key(&key_path)?;
+
+            let client_cfg = render_client(&ClientParams {
+                endpoint,
+                cipher: cipher.clone(),
+                key_file: key_path.display().to_string(),
+                server_public_key: server_public.clone(),
+                address,
+                prefix,
+                route_all,
+                dns_servers,
+                transport: transport.kind.clone(),
+                tls_sni: transport.sni.clone(),
+            });
+
+            peers.push(PeerParams {
+                public_key: client_id.public_base64(),
+                name: name.clone(),
+            });
+            clients.push((
+                GeneratedClient {
+                    config_path: dir.join(format!("{}.toml", name)),
+                    public_key: client_id.public_base64(),
+                    key_path,
+                    address,
+                    name,
+                },
+                client_cfg,
+            ));
+        }
 
         add_client = Confirm::with_theme(&theme)
             .with_prompt("Add another client?")
@@ -229,6 +302,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
     }
 
     // ── Render, validate, write ──────────────────────────────────────────
+    let peer_count = peers.len();
     let server_cfg = render_server(&ServerParams {
         listen,
         max_clients,
@@ -292,8 +366,11 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
             ),
         );
     }
+    for mobile in &mobiles {
+        mobile::print_mobile_export(&mobile.name, &mobile.json, mobile.peer_added);
+    }
     println!();
-    if clients.is_empty() {
+    if peer_count == 0 {
         println!(
             " {} No clients configured: the server will not start until a [[peers]] entry is added.",
             icon_warning()
@@ -303,9 +380,15 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         "   Start the server: {}",
         style(format!("sudo 2cha server -c {}", server_cfg_path.display())).cyan()
     );
+    println!(
+        "   {} this wizard wrote configs only — {} also installs the service,",
+        style("Note:").yellow(),
+        style("sudo 2cha setup").cyan()
+    );
+    println!("   enables forwarding and opens the firewall (turn-key).");
     println!();
 
-    Ok(())
+    Ok(server_cfg_path)
 }
 
 /// Parse "a.b.c.d/p" into a normalized network address and prefix

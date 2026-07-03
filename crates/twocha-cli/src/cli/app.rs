@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use super::commands::{
     cmd_config_edit, cmd_config_get, cmd_config_set, cmd_config_show, cmd_config_validate,
     cmd_down, cmd_genkey, cmd_init, cmd_peer_add, cmd_peer_list, cmd_peer_remove, cmd_pubkey,
-    cmd_server, cmd_status, cmd_toggle, cmd_up,
+    cmd_server, cmd_setup, cmd_status, cmd_toggle, cmd_up,
 };
 use super::output;
 use super::print_banner;
@@ -21,7 +21,8 @@ use twocha_protocol::Result;
     about = "High-performance VPN utility with IPv4/IPv6 support",
     long_about = None,
     after_help = "Examples:\n  \
-        2cha init                  (interactive setup wizard)\n  \
+        sudo 2cha setup            (turn-key server: wizard + service + firewall)\n  \
+        2cha init                  (config-only wizard)\n  \
         2cha init client --template > client.toml\n  \
         2cha genkey client.key\n  \
         2cha pubkey client.key\n  \
@@ -134,6 +135,19 @@ enum Commands {
     /// Inspect and edit a config file (validated before every write)
     #[command(subcommand)]
     Config(ConfigCommands),
+
+    /// Turn-key server provisioning: config wizard + systemd + forwarding
+    /// + firewall + start (the `install.sh` one-liner runs this)
+    Setup {
+        /// Assume yes for every system change (unattended mode; still needs
+        /// an existing config or -c)
+        #[arg(short, long)]
+        yes: bool,
+
+        /// Use this server config instead of the wizard/default
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 
     /// Create a config (interactive wizard; use --template for stdout)
     Init {
@@ -356,6 +370,8 @@ pub fn run() -> Result<()> {
                 client,
             } => cmd_config_edit(&config, server, client),
         },
+
+        Commands::Setup { yes, config } => cmd_setup(yes, config.as_deref()),
 
         Commands::Init {
             mode,

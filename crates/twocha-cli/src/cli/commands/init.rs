@@ -62,7 +62,7 @@ pub fn cmd_init(mode: Option<&str>, template: bool, output: Option<&str>) -> Res
 
     let output = output.map(Path::new);
     match mode {
-        "server" => init_wizard::server::run(output),
+        "server" => init_wizard::server::run(output).map(|_| ()),
         _ => init_wizard::client::run(output),
     }
 }
