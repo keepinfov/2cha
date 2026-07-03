@@ -134,6 +134,7 @@ off. See [Server Setup](./server-setup.md#5-gateway-mode-internet-access-for-cli
 | `socket_send_buffer` | integer | `2097152` (2 MiB) | Socket send buffer in bytes. |
 | `batch_size` | integer | `32` | Packets processed per batch. |
 | `multi_queue` | bool | `false` | Use multi-queue TUN (Linux). |
+| `worker_threads` | integer | `0` | Data-plane threads. Client: `0` = auto (2-thread split on QUIC), `1` = single-threaded. Server: `0`/`1` = single-threaded loop; `>= 2` = opt-in multi-worker pool (QUIC + Linux only; forces `multi_queue`). |
 | `cpu_affinity` | integer[] | `[]` | CPU cores to pin worker threads to. |
 
 ## `[timeouts]` — both

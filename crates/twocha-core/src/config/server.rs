@@ -366,6 +366,9 @@ socket_recv_buffer = 2097152
 socket_send_buffer = 2097152
 batch_size = 32
 multi_queue = false
+# Data-plane threads: 0/1 = single-threaded loop (default);
+# >= 2 = opt-in multi-worker pool (QUIC + Linux, forces multi-queue tun)
+worker_threads = 0
 cpu_affinity = []
 
 [timeouts]
