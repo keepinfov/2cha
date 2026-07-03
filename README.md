@@ -30,6 +30,15 @@ DPI classification and active probing.
 
 ## Quick Start
 
+**Server one-liner** — installs the latest release and runs the turn-key setup (config
+wizard, systemd service, forwarding, firewall, QR code for the mobile app):
+
+```bash
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/keepinfov/2cha/master/scripts/install.sh)"
+```
+
+Manual path:
+
 ```bash
 # Build & install
 cargo install --path crates/twocha-cli

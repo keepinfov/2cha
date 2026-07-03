@@ -1,5 +1,10 @@
 # Server Setup
 
+> **Turn-key alternative:** `sudo 2cha setup` (or the
+> [install one-liner](./quickstart.md)) automates steps 2–8 below: config wizard, systemd
+> unit, IP forwarding, firewall, start + verify — plus a QR code for the mobile app.
+> `2cha init server` covers only the config/keys part (steps 2–3).
+
 This guide walks through setting up a 2cha server for the first time: a minimal working
 config, authorizing clients, giving them internet access, and running the server as a
 service. It assumes you've [installed](./installation.md) the binary and read

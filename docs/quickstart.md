@@ -6,6 +6,17 @@ a public IP) and a **client**. It uses the default `quic` transport and a single
 If you haven't built the binary yet, see [Installation](./installation.md). For the full
 explanation of each step, follow the links into the detailed guides.
 
+> **Fastest path (server):** one command installs the latest release and walks you through a
+> turn-key setup — config wizard, systemd service, IP forwarding, firewall, and a QR code for
+> the mobile app:
+>
+> ```bash
+> sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/keepinfov/2cha/master/scripts/install.sh)"
+> ```
+>
+> Already installed? `sudo 2cha setup` does the same. The steps below are the manual
+> equivalent (`2cha init` only writes configs — it does not set the system up).
+
 ## 1. Generate a keypair on each host
 
 `genkey` writes the **private** key to the file (mode `0600`) and prints the **public** key
