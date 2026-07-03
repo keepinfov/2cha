@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use crate::crypto::mac::HeaderMask;
 use crate::crypto::noise::SessionCrypto;
 use twocha_protocol::wire::{self, CID_LEN};
-use twocha_protocol::{CryptoError, ReplayWindow, Result, MAX_PACKET_SIZE, POLY1305_TAG_SIZE};
+use twocha_protocol::{
+    CryptoError, ProtocolError, ReplayWindow, Result, MAX_PACKET_SIZE, POLY1305_TAG_SIZE,
+};
 
 /// Initiate a new handshake after this much session time
 pub const REKEY_AFTER: Duration = Duration::from_secs(120);
@@ -41,6 +43,13 @@ const DATA_PAD_MAX: usize = 64;
 /// determines the on-wire size — keep it wide to kill the size fingerprint
 const KEEPALIVE_PAD_MIN: usize = 24;
 const KEEPALIVE_PAD_MAX: usize = 256;
+
+/// Reusable scratch space for [`Session::seal_data_into`]: holds the inner
+/// plaintext frame between calls so the hot path allocates nothing.
+#[derive(Default)]
+pub struct SealScratch {
+    inner: Vec<u8>,
+}
 
 pub struct Session {
     crypto: SessionCrypto,
@@ -87,9 +96,38 @@ impl Session {
 
     /// Encrypt a payload into a complete on-wire datagram.
     /// An empty payload produces a keepalive (random-size on the wire).
+    ///
+    /// Convenience wrapper over [`Session::seal_data_into`]; hot paths should
+    /// hoist a [`SealScratch`] + output buffer and call the `_into` variant.
     pub fn seal_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+        let mut scratch = SealScratch::default();
+        let mut out = Vec::new();
+        self.seal_data_into(payload, &mut scratch, &mut out)?;
+        Ok(out)
+    }
+
+    /// Encrypt a payload into a complete on-wire datagram written to `out`,
+    /// reusing `scratch` and `out` allocations across calls.
+    ///
+    /// Layout: short header + zeroed counter go into `out` first, the inner
+    /// frame (length + payload + random pad) is built in `scratch` and
+    /// encrypted directly at `out[DATA_HEADER_LEN..]`, then the counter mask
+    /// (which samples the first ciphertext bytes) is patched in.
+    pub fn seal_data_into(
+        &mut self,
+        payload: &[u8],
+        scratch: &mut SealScratch,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         if self.expired() {
             return Err(CryptoError::EncryptionFailed.into());
+        }
+        if payload.len() > u16::MAX as usize {
+            return Err(ProtocolError::PacketTooLarge {
+                max: u16::MAX as usize,
+                got: payload.len(),
+            }
+            .into());
         }
         self.tx_counter += 1;
         let counter = self.tx_counter;
@@ -102,37 +140,73 @@ impl Session {
             let budget = MAX_PACKET_SIZE.saturating_sub(DATA_OVERHEAD + payload.len());
             rng.gen_range(0..=DATA_PAD_MAX.min(budget))
         };
-        let mut padding = vec![0u8; pad_len];
-        rng.fill_bytes(&mut padding);
 
-        let inner = wire::frame_inner(payload, &padding)?;
-        let ciphertext = self.crypto.encrypt(counter, &inner)?;
-        let masked = self.tx_mask.mask_counter(counter, &ciphertext);
+        // Inner framing (u16-BE length + payload + pad), padded in place
+        let inner = &mut scratch.inner;
+        inner.clear();
+        inner.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        inner.extend_from_slice(payload);
+        let pad_start = inner.len();
+        inner.resize(pad_start + pad_len, 0);
+        rng.fill_bytes(&mut inner[pad_start..]);
+
+        out.clear();
+        out.resize(wire::DATA_HEADER_LEN + inner.len() + POLY1305_TAG_SIZE, 0);
+        out[0] = 0x40 | (rng.gen::<u8>() & 0x3F);
+        out[1..1 + CID_LEN].copy_from_slice(&self.remote_cid);
+        // out[9..17] stays zeroed until the mask is derived from the ciphertext
+        let n = self
+            .crypto
+            .encrypt_into(counter, inner, &mut out[wire::DATA_HEADER_LEN..])?;
+        out.truncate(wire::DATA_HEADER_LEN + n);
+        let masked = self
+            .tx_mask
+            .mask_counter(counter, &out[wire::DATA_HEADER_LEN..]);
+        out[1 + CID_LEN..wire::DATA_HEADER_LEN].copy_from_slice(&masked);
 
         self.last_send = Instant::now();
-        Ok(wire::encode_data(
-            &self.remote_cid,
-            &masked,
-            &ciphertext,
-            rng.gen(),
-        ))
+        Ok(())
     }
 
     /// Authenticate and decrypt an inbound data datagram (already parsed),
     /// returning the inner payload (empty for keepalives).
+    ///
+    /// Convenience wrapper over [`Session::open_data_into`]; hot paths should
+    /// hoist the output buffer and call the `_into` variant.
     pub fn open_data(&mut self, masked_counter: [u8; 8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.open_data_into(masked_counter, ciphertext, &mut out)?;
+        Ok(out)
+    }
+
+    /// Authenticate and decrypt an inbound data datagram into `out`, reusing
+    /// its allocation across calls. `out` ends holding exactly the inner
+    /// payload (empty for keepalives).
+    pub fn open_data_into(
+        &mut self,
+        masked_counter: [u8; 8],
+        ciphertext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         if self.created.elapsed() > REJECT_AFTER + KEEPALIVE_INTERVAL * 6 {
             return Err(CryptoError::AuthenticationFailed.into());
         }
         let counter = self.rx_mask.unmask_counter(masked_counter, ciphertext);
-        let plaintext = self.crypto.decrypt(counter, ciphertext)?;
+        out.clear();
+        out.resize(ciphertext.len(), 0);
+        let n = self.crypto.decrypt_into(counter, ciphertext, out)?;
+        out.truncate(n);
         // Replay check AFTER authentication: forged counters must not be able
         // to poison the window.
         if !self.replay.check_and_update(counter) {
             return Err(CryptoError::NonceReuse.into());
         }
+        // Strip the inner framing in place (validates the length prefix)
+        let payload_len = wire::unframe_inner(out)?.len();
+        out.copy_within(2..2 + payload_len, 0);
+        out.truncate(payload_len);
         self.last_recv = Instant::now();
-        Ok(wire::unframe_inner(&plaintext)?.to_vec())
+        Ok(())
     }
 
     /// Initiator should start a new handshake (PFS ratchet)
@@ -236,6 +310,37 @@ mod tests {
                     }
                     other => panic!("wrong variant: {:?}", other),
                 }
+            }
+        }
+    }
+
+    /// The reusable-buffer path must round-trip with shared scratch/out
+    /// buffers across many packets (wrapper tests only cover fresh buffers).
+    #[test]
+    fn seal_open_into_reuses_buffers() {
+        let (mut client, mut server) = session_pair();
+        let mut scratch = SealScratch::default();
+        let mut out = Vec::new();
+        let mut payload_buf = Vec::new();
+        for i in 0..50usize {
+            let payload = vec![i as u8; 64 + i * 7];
+            client
+                .seal_data_into(&payload, &mut scratch, &mut out)
+                .unwrap();
+            assert!(out.len() <= MAX_PACKET_SIZE);
+            match wire::parse(&out).unwrap() {
+                wire::WireMsg::Data {
+                    receiver_cid,
+                    masked_counter,
+                    ciphertext,
+                } => {
+                    assert_eq!(receiver_cid, client.remote_cid);
+                    server
+                        .open_data_into(masked_counter, ciphertext, &mut payload_buf)
+                        .unwrap();
+                    assert_eq!(payload_buf, payload);
+                }
+                other => panic!("wrong variant: {:?}", other),
             }
         }
     }
