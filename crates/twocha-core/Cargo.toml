@@ -20,7 +20,6 @@ log.workspace = true
 
 # Cryptography (RustCrypto - pure Rust, safe, audited)
 chacha20poly1305.workspace = true
-aes-gcm.workspace = true
 zeroize.workspace = true
 snow.workspace = true
 x25519-dalek.workspace = true
