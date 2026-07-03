@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
@@ -173,6 +173,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
         transport,
         session,
         common::flag(),
+        None,
     )?;
 
     let _ = routing_ctx.cleanup();
@@ -234,11 +235,54 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
     Ok(transport)
 }
 
+/// Cumulative payload byte counters, shared by the data-plane threads and
+/// emitted to the host (mobile UI) roughly once per second from the
+/// control-plane timer path.
+#[cfg(unix)]
+pub(crate) struct StatsEmitter<'a> {
+    tx_bytes: AtomicU64,
+    rx_bytes: AtomicU64,
+    emit: &'a (dyn Fn(u64, u64) + Sync),
+}
+
+#[cfg(unix)]
+impl<'a> StatsEmitter<'a> {
+    pub(crate) fn new(emit: &'a (dyn Fn(u64, u64) + Sync)) -> Self {
+        StatsEmitter {
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            emit,
+        }
+    }
+
+    #[inline]
+    fn count_tx(&self, bytes: usize) {
+        self.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn count_rx(&self, bytes: usize) {
+        self.rx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn emit_now(&self) {
+        (self.emit)(
+            self.tx_bytes.load(Ordering::Relaxed),
+            self.rx_bytes.load(Ordering::Relaxed),
+        );
+    }
+}
+
+/// How often the stats callback fires (cheap: one JNA call carrying two u64s)
+#[cfg(unix)]
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Post-handshake dispatch: the QUIC carrier gets the 2-thread split (uplink
 /// seals on one thread, downlink + control plane on the other) unless
 /// `performance.worker_threads = 1` pins the single-threaded loop. TLS always
 /// keeps the single-threaded loop (a TCP stream gains nothing from the split).
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn run_data_plane(
     cfg: &ClientConfig,
     identity: &Identity,
@@ -247,6 +291,7 @@ fn run_data_plane(
     transport: BuiltTransport,
     session: Session,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     // 0 = auto: the split is the default for QUIC
     let threaded = cfg.performance.worker_threads != 1;
@@ -262,6 +307,7 @@ fn run_data_plane(
                 remote,
                 session,
                 running,
+                stats,
             )
         }
         mut other => run_event_loop(
@@ -272,6 +318,7 @@ fn run_data_plane(
             other.as_dyn_mut(),
             session,
             running,
+            stats,
         ),
     }
 }
@@ -281,6 +328,7 @@ fn run_data_plane(
 /// verbatim by the desktop (`run`) and mobile (`run_mobile`) entry points; it
 /// returns when `common::running()` flips false.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     cfg: &ClientConfig,
     identity: &Identity,
@@ -289,6 +337,7 @@ fn run_event_loop(
     transport: &mut dyn ClientTransport,
     mut session: Session,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     let transport_fds = transport.pollfds();
     let tun_fd = tun.fd();
@@ -300,6 +349,7 @@ fn run_event_loop(
 
     let mut bufs = IoBufs::new(cfg);
     let mut next_keepalive = Instant::now() + keepalive_jitter();
+    let mut next_stats = Instant::now() + STATS_INTERVAL;
     let mut pending: Option<(ClientHandshake, Instant)> = None;
 
     while running.load(Ordering::SeqCst) {
@@ -308,14 +358,28 @@ fn run_event_loop(
         for (fd, revents) in events {
             if revents & POLLIN != 0 {
                 if fd == tun_fd {
-                    handle_tun_read(tun, transport, &mut session, &mut bufs)?;
+                    handle_tun_read(tun, transport, &mut session, &mut bufs, stats)?;
                 } else if transport_fds.contains(&fd) {
-                    handle_transport_read(transport, tun, &mut session, &mut pending, &mut bufs)?;
+                    handle_transport_read(
+                        transport,
+                        tun,
+                        &mut session,
+                        &mut pending,
+                        &mut bufs,
+                        stats,
+                    )?;
                 }
             }
         }
 
         let now = Instant::now();
+
+        if let Some(stats) = stats {
+            if now >= next_stats {
+                stats.emit_now();
+                next_stats = now + STATS_INTERVAL;
+            }
+        }
 
         // PFS ratchet: initiate (or retry) a fresh handshake
         let needs_rekey = session.should_rekey() || session.expired();
@@ -362,13 +426,14 @@ fn run_event_loop_threaded(
     remote: SocketAddr,
     session: Session,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     let session = std::sync::RwLock::new(session);
     log::info!("client data plane: 2-thread split (uplink + downlink)");
 
     std::thread::scope(|scope| {
-        let uplink =
-            scope.spawn(|| client_uplink_loop(cfg, &tun, &tunnel, remote, &session, running));
+        let uplink = scope
+            .spawn(|| client_uplink_loop(cfg, &tun, &tunnel, remote, &session, running, stats));
 
         let downlink_result = client_downlink_loop(
             cfg,
@@ -379,6 +444,7 @@ fn run_event_loop_threaded(
             remote,
             &session,
             running,
+            stats,
         );
 
         // The downlink exits only when `running` flips false (or on a poll
@@ -393,6 +459,7 @@ fn run_event_loop_threaded(
 
 /// Uplink half of the threaded client loop: tun → seal → UDP burst.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn client_uplink_loop(
     cfg: &ClientConfig,
     tun: &TunDevice,
@@ -400,6 +467,7 @@ fn client_uplink_loop(
     remote: SocketAddr,
     session: &std::sync::RwLock<Session>,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     let mut event_loop = EventLoop::new();
     event_loop.add_fd(tun.fd(), POLLIN);
@@ -425,6 +493,9 @@ fn client_uplink_loop(
                         .seal_data_into(&tun_buffer[..n], &mut scratch, &mut out)
                         .is_ok();
                     if sealed {
+                        if let Some(stats) = stats {
+                            stats.count_tx(n);
+                        }
                         queue.push(out);
                         if queue.len() >= flush_at {
                             let _ = tunnel.send_batch_to(&queue, remote);
@@ -461,6 +532,7 @@ fn client_downlink_loop(
     remote: SocketAddr,
     session: &std::sync::RwLock<Session>,
     running: &AtomicBool,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     let mut event_loop = EventLoop::new();
     event_loop.add_fd(tunnel.fd(), POLLIN);
@@ -468,6 +540,7 @@ fn client_downlink_loop(
     let mut batch = BatchBuffer::new(cfg.performance.batch_size);
     let mut payload = Vec::new();
     let mut next_keepalive = Instant::now() + keepalive_jitter();
+    let mut next_stats = Instant::now() + STATS_INTERVAL;
     let mut pending: Option<(ClientHandshake, Instant)> = None;
 
     while running.load(Ordering::SeqCst) {
@@ -500,6 +573,9 @@ fn client_downlink_loop(
                             match sess.open_data_into(masked_counter, ciphertext, &mut payload) {
                                 Ok(()) if payload.is_empty() => {} // keepalive
                                 Ok(()) => {
+                                    if let Some(stats) = stats {
+                                        stats.count_rx(payload.len());
+                                    }
                                     let _ = tun.write(&payload);
                                 }
                                 Err(_) => {}
@@ -534,6 +610,13 @@ fn client_downlink_loop(
         }
 
         let now = Instant::now();
+
+        if let Some(stats) = stats {
+            if now >= next_stats {
+                stats.emit_now();
+                next_stats = now + STATS_INTERVAL;
+            }
+        }
 
         // PFS ratchet: initiate (or retry) a fresh handshake
         let needs_rekey = {
@@ -593,6 +676,7 @@ pub unsafe fn run_mobile(
     protect: &dyn Fn(RawFd) -> bool,
     running: &AtomicBool,
     on_connected: &dyn Fn(),
+    on_stats: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<()> {
     let server_addr = cfg
         .server_addr()
@@ -626,6 +710,7 @@ pub unsafe fn run_mobile(
     let tun = TunDevice::from_fd(tun_fd, cfg.tun.mtu)?;
     tun.set_nonblocking(true)?;
 
+    let stats = StatsEmitter::new(on_stats);
     run_data_plane(
         &cfg,
         &identity,
@@ -634,6 +719,7 @@ pub unsafe fn run_mobile(
         transport,
         session,
         running,
+        Some(&stats),
     )
 }
 
@@ -757,6 +843,7 @@ fn handle_tun_read(
     transport: &mut dyn ClientTransport,
     session: &mut Session,
     bufs: &mut IoBufs,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     loop {
         match tun.read(&mut bufs.tun_buffer) {
@@ -768,6 +855,9 @@ fn handle_tun_read(
                     &mut out,
                 ) {
                     Ok(()) => {
+                        if let Some(stats) = stats {
+                            stats.count_tx(n);
+                        }
                         bufs.send_queue.push(out);
                         if bufs.send_queue.len() >= bufs.flush_at {
                             bufs.flush_send_queue(transport);
@@ -792,6 +882,7 @@ fn handle_transport_read(
     session: &mut Session,
     pending: &mut Option<(ClientHandshake, Instant)>,
     bufs: &mut IoBufs,
+    stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     loop {
         let n = match transport.recv_batch(&mut bufs.batch) {
@@ -815,6 +906,9 @@ fn handle_transport_read(
                     match session.open_data_into(masked_counter, ciphertext, &mut bufs.payload) {
                         Ok(()) if bufs.payload.is_empty() => {} // keepalive
                         Ok(()) => {
+                            if let Some(stats) = stats {
+                                stats.count_rx(bufs.payload.len());
+                            }
                             let _ = tun.write(&bufs.payload);
                         }
                         Err(_) => {}
@@ -986,6 +1080,7 @@ mod tests {
                     &protect,
                     &running_in,
                     &on_connected,
+                    &|_, _| {},
                 )
             }
         });
