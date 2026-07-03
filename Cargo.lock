@@ -1944,6 +1944,7 @@ dependencies = [
 name = "twocha-lib"
 version = "1.5.0"
 dependencies = [
+ "console",
  "ctrlc",
  "libc",
  "log",

@@ -68,7 +68,11 @@ enum Commands {
 
     /// Show connection status
     #[command(visible_alias = "s")]
-    Status,
+    Status {
+        /// Live view: refresh in place every second (Ctrl-C to exit)
+        #[arg(short, long)]
+        watch: bool,
+    },
 
     /// Toggle VPN connection on/off
     #[command(visible_alias = "t")]
@@ -113,14 +117,14 @@ enum Commands {
     /// Generate X25519 keypair: private key to file (0600), public key to stdout
     #[command(visible_alias = "key")]
     Genkey {
-        /// Path for the new private key file
-        output: String,
+        /// Path for the new private key file (prompted for if omitted)
+        output: Option<String>,
     },
 
     /// Print the public key for a private key file
     Pubkey {
-        /// Private key file path
-        key_file: String,
+        /// Private key file path (prompted for if omitted)
+        key_file: Option<String>,
     },
 
     /// Manage authorized peers on a running server (no restart needed)
@@ -150,8 +154,8 @@ enum Commands {
 enum PeerCommands {
     /// Authorize a client public key (and persist it to server.toml)
     Add {
-        /// Base64 X25519 public key (from: 2cha pubkey client.key)
-        public_key: String,
+        /// Base64 X25519 public key (prompted for if omitted)
+        public_key: Option<String>,
 
         /// Human-readable label for logs and listings
         #[arg(short, long)]
@@ -160,8 +164,8 @@ enum PeerCommands {
 
     /// Revoke a peer: drops its active session immediately
     Remove {
-        /// Base64 X25519 public key
-        public_key: String,
+        /// Base64 X25519 public key (picked from the peer list if omitted)
+        public_key: Option<String>,
     },
 
     /// List authorized peers and their connection state
@@ -298,7 +302,7 @@ pub fn run() -> Result<()> {
 
         Commands::Down => cmd_down(),
 
-        Commands::Status => cmd_status(),
+        Commands::Status { watch } => cmd_status(watch),
 
         Commands::Toggle {
             config,
@@ -314,13 +318,15 @@ pub fn run() -> Result<()> {
             quiet,
         } => cmd_server(&config, daemon, verbose, quiet),
 
-        Commands::Genkey { output } => cmd_genkey(&output),
+        Commands::Genkey { output } => cmd_genkey(output.as_deref()),
 
-        Commands::Pubkey { key_file } => cmd_pubkey(&key_file),
+        Commands::Pubkey { key_file } => cmd_pubkey(key_file.as_deref()),
 
         Commands::Peer(cmd) => match cmd {
-            PeerCommands::Add { public_key, name } => cmd_peer_add(&public_key, name.as_deref()),
-            PeerCommands::Remove { public_key } => cmd_peer_remove(&public_key),
+            PeerCommands::Add { public_key, name } => {
+                cmd_peer_add(public_key.as_deref(), name.as_deref())
+            }
+            PeerCommands::Remove { public_key } => cmd_peer_remove(public_key.as_deref()),
             PeerCommands::List => cmd_peer_list(),
         },
 

@@ -277,7 +277,7 @@ mod tests {
             address: Ipv4Addr::new(10, 8, 0, 2),
             prefix: 24,
             route_all: true,
-            dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            dns_servers: super::super::default_dns_servers(),
             transport: "quic".into(),
             tls_sni: None,
         });

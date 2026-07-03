@@ -30,6 +30,8 @@ socket2.workspace = true
 # Android VpnService owns the data plane), so neli is excluded there.
 [target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
 neli = "0.7.4"
+# desktop client's connect/disconnect banner (TTY/NO_COLOR-aware styling)
+console.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ctrlc.workspace = true

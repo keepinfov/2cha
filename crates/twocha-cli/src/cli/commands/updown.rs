@@ -35,36 +35,29 @@ pub fn cmd_up(config_path: &str, daemon: bool, verbose: bool, quiet: bool) -> Re
         .to_string_lossy()
         .to_string();
 
-    let spinner = if !quiet {
-        Some(create_spinner("Connecting..."))
-    } else {
-        None
-    };
-
+    // The spinner only makes sense in daemon mode, where it bridges the gap
+    // until the process detaches; in the foreground the blocking engine takes
+    // over the terminal immediately, so the old spinner flashed for
+    // microseconds and vanished.
     if daemon {
-        if let Some(ref sp) = spinner {
+        if !quiet {
+            let spinner = create_spinner("Connecting...");
             #[cfg(unix)]
-            sp.finish_with_message(format!(
+            spinner.finish_with_message(format!(
                 "Connecting in background. Logs: {}",
                 style(log_file()).dim()
             ));
             #[cfg(windows)]
-            sp.finish_with_message("Connecting in background...");
-        }
-        if !quiet {
+            spinner.finish_with_message("Connecting in background...");
             #[cfg(windows)]
             print_windows_note();
             println!("  Use {} to check connection", style("2cha status").cyan());
         }
         daemonize()?;
-    } else {
-        if let Some(ref sp) = spinner {
-            sp.finish_and_clear();
-        }
+    } else if !quiet {
+        println!("  {} Connecting to VPN...", style("●").cyan());
         #[cfg(windows)]
-        if !quiet {
-            print_windows_note();
-        }
+        print_windows_note();
     }
 
     if verbose {

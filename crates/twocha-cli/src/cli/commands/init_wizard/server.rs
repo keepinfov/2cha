@@ -198,7 +198,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
             prefix,
             route_all,
             dns_servers: if route_all {
-                vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]
+                super::default_dns_servers()
             } else {
                 Vec::new()
             },
