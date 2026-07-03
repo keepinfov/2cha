@@ -4,6 +4,8 @@
 //! replay window and rekey bookkeeping for one tunnel session.
 
 use rand::{Rng, RngCore};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::crypto::mac::HeaderMask;
@@ -51,6 +53,11 @@ pub struct SealScratch {
     inner: Vec<u8>,
 }
 
+/// An established session. The data-plane methods (`seal_data*`, `open_data*`)
+/// take `&self` so a session can be driven from multiple threads behind an
+/// `Arc`/`RwLock` read guard: the TX counter is atomic, the replay window sits
+/// behind a tiny post-decrypt mutex, snow's stateless transport is `Sync`, and
+/// activity timestamps are atomic millisecond offsets from `created`.
 pub struct Session {
     crypto: SessionCrypto,
     tx_mask: HeaderMask,
@@ -59,14 +66,22 @@ pub struct Session {
     pub local_cid: [u8; CID_LEN],
     /// CID we put on datagrams addressed to the peer
     pub remote_cid: [u8; CID_LEN],
-    tx_counter: u64,
-    replay: ReplayWindow,
+    tx_counter: AtomicU64,
+    replay: Mutex<ReplayWindow>,
     created: Instant,
-    pub last_send: Instant,
-    pub last_recv: Instant,
+    /// Milliseconds after `created` of the last send/recv
+    last_send_ms: AtomicU64,
+    last_recv_ms: AtomicU64,
     /// True if we initiated the handshake (initiator drives rekeying)
     pub initiator: bool,
 }
+
+// The multithreaded data plane shares `Session` across threads; fail the
+// build (not the runtime) if a field ever loses Send + Sync.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Session>();
+};
 
 impl Session {
     #[allow(clippy::too_many_arguments)]
@@ -78,20 +93,37 @@ impl Session {
         remote_cid: [u8; CID_LEN],
         initiator: bool,
     ) -> Self {
-        let now = Instant::now();
         Session {
             crypto,
             tx_mask,
             rx_mask,
             local_cid,
             remote_cid,
-            tx_counter: 0,
-            replay: ReplayWindow::new(),
-            created: now,
-            last_send: now,
-            last_recv: now,
+            tx_counter: AtomicU64::new(0),
+            replay: Mutex::new(ReplayWindow::new()),
+            created: Instant::now(),
+            last_send_ms: AtomicU64::new(0),
+            last_recv_ms: AtomicU64::new(0),
             initiator,
         }
+    }
+
+    /// Time since the last outbound datagram was sealed
+    pub fn last_send_elapsed(&self) -> Duration {
+        self.created
+            .elapsed()
+            .saturating_sub(Duration::from_millis(
+                self.last_send_ms.load(Ordering::Relaxed),
+            ))
+    }
+
+    /// Time since the last inbound datagram authenticated
+    pub fn last_recv_elapsed(&self) -> Duration {
+        self.created
+            .elapsed()
+            .saturating_sub(Duration::from_millis(
+                self.last_recv_ms.load(Ordering::Relaxed),
+            ))
     }
 
     /// Encrypt a payload into a complete on-wire datagram.
@@ -99,7 +131,7 @@ impl Session {
     ///
     /// Convenience wrapper over [`Session::seal_data_into`]; hot paths should
     /// hoist a [`SealScratch`] + output buffer and call the `_into` variant.
-    pub fn seal_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+    pub fn seal_data(&self, payload: &[u8]) -> Result<Vec<u8>> {
         let mut scratch = SealScratch::default();
         let mut out = Vec::new();
         self.seal_data_into(payload, &mut scratch, &mut out)?;
@@ -114,7 +146,7 @@ impl Session {
     /// encrypted directly at `out[DATA_HEADER_LEN..]`, then the counter mask
     /// (which samples the first ciphertext bytes) is patched in.
     pub fn seal_data_into(
-        &mut self,
+        &self,
         payload: &[u8],
         scratch: &mut SealScratch,
         out: &mut Vec<u8>,
@@ -129,8 +161,7 @@ impl Session {
             }
             .into());
         }
-        self.tx_counter += 1;
-        let counter = self.tx_counter;
+        let counter = self.tx_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
         let mut rng = rand::thread_rng();
         let pad_len = if payload.is_empty() {
@@ -164,7 +195,10 @@ impl Session {
             .mask_counter(counter, &out[wire::DATA_HEADER_LEN..]);
         out[1 + CID_LEN..wire::DATA_HEADER_LEN].copy_from_slice(&masked);
 
-        self.last_send = Instant::now();
+        self.last_send_ms.store(
+            self.created.elapsed().as_millis() as u64,
+            Ordering::Relaxed,
+        );
         Ok(())
     }
 
@@ -173,7 +207,7 @@ impl Session {
     ///
     /// Convenience wrapper over [`Session::open_data_into`]; hot paths should
     /// hoist the output buffer and call the `_into` variant.
-    pub fn open_data(&mut self, masked_counter: [u8; 8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    pub fn open_data(&self, masked_counter: [u8; 8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         self.open_data_into(masked_counter, ciphertext, &mut out)?;
         Ok(out)
@@ -183,7 +217,7 @@ impl Session {
     /// its allocation across calls. `out` ends holding exactly the inner
     /// payload (empty for keepalives).
     pub fn open_data_into(
-        &mut self,
+        &self,
         masked_counter: [u8; 8],
         ciphertext: &[u8],
         out: &mut Vec<u8>,
@@ -197,27 +231,32 @@ impl Session {
         let n = self.crypto.decrypt_into(counter, ciphertext, out)?;
         out.truncate(n);
         // Replay check AFTER authentication: forged counters must not be able
-        // to poison the window.
-        if !self.replay.check_and_update(counter) {
+        // to poison the window. Tiny post-decrypt critical section.
+        if !self.replay.lock().unwrap().check_and_update(counter) {
             return Err(CryptoError::NonceReuse.into());
         }
         // Strip the inner framing in place (validates the length prefix)
         let payload_len = wire::unframe_inner(out)?.len();
         out.copy_within(2..2 + payload_len, 0);
         out.truncate(payload_len);
-        self.last_recv = Instant::now();
+        self.last_recv_ms.store(
+            self.created.elapsed().as_millis() as u64,
+            Ordering::Relaxed,
+        );
         Ok(())
     }
 
     /// Initiator should start a new handshake (PFS ratchet)
     pub fn should_rekey(&self) -> bool {
         self.initiator
-            && (self.created.elapsed() > REKEY_AFTER || self.tx_counter >= REKEY_AFTER_MESSAGES)
+            && (self.created.elapsed() > REKEY_AFTER
+                || self.tx_counter.load(Ordering::Relaxed) >= REKEY_AFTER_MESSAGES)
     }
 
     /// Session keys must no longer be used for sending
     pub fn expired(&self) -> bool {
-        self.created.elapsed() > REJECT_AFTER || self.tx_counter >= u64::MAX - 1
+        self.created.elapsed() > REJECT_AFTER
+            || self.tx_counter.load(Ordering::Relaxed) >= u64::MAX - 1
     }
 
     pub fn age(&self) -> Duration {

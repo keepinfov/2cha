@@ -136,8 +136,8 @@ impl ServerState {
         let mut dead: Vec<[u8; CID_LEN]> = Vec::new();
         for (cid, entry) in &self.sessions {
             let expired = entry.session.expired()
-                && entry.session.last_recv.elapsed() > Duration::from_secs(10);
-            let idled = entry.session.last_recv.elapsed() > idle;
+                && entry.session.last_recv_elapsed() > Duration::from_secs(10);
+            let idled = entry.session.last_recv_elapsed() > idle;
             if expired || idled {
                 dead.push(*cid);
             }
@@ -853,7 +853,7 @@ fn handle_control(req: CtlRequest, state: &mut ServerState, config_path: &str) -
                             b64,
                             name,
                             entry.link,
-                            entry.session.last_recv.elapsed().as_secs()
+                            entry.session.last_recv_elapsed().as_secs()
                         ));
                     }
                     None => out.push_str(&format!("\npeer {} {} offline", b64, name)),
