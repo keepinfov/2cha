@@ -8,6 +8,8 @@ use crate::cli::utils::{format_bytes, is_running};
 use console::{style, Term};
 use twocha_protocol::Result;
 
+use super::peer::PeerInfo;
+
 #[cfg(unix)]
 use twocha_lib::platform::unix::routing;
 #[cfg(windows)]
@@ -23,6 +25,17 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 /// Public IP re-check cadence in watch mode (it's a network round-trip)
 const PUBLIC_IP_TTL: Duration = Duration::from_secs(60);
 
+/// This host's server facts, present only when a local server answers on the
+/// control socket — that's what flips `status` from the client view to the
+/// server view.
+struct ServerInfo {
+    peers: Vec<PeerInfo>,
+    /// Address the running server listens on (best-effort, from its config)
+    listen: Option<String>,
+    /// Obfuscation transport (`quic`/`tls`), best-effort from its config
+    transport: Option<String>,
+}
+
 /// Show VPN status (one-shot, or a live in-place view with `--watch`)
 pub fn cmd_status(watch: bool) -> Result<()> {
     if watch && Term::stdout().is_term() {
@@ -33,7 +46,8 @@ pub fn cmd_status(watch: bool) -> Result<()> {
     } else {
         None
     };
-    print!("{}", render_status(public_ip.as_deref(), None));
+    let server = server_info();
+    print!("{}", render_status(public_ip.as_deref(), server.as_ref()));
     Ok(())
 }
 
@@ -51,8 +65,8 @@ fn watch_loop() -> Result<()> {
             public_ip_at = Some(Instant::now());
         }
 
-        let peers = peers_section();
-        let mut frame = render_status(public_ip.as_deref(), peers.as_deref());
+        let server = server_info();
+        let mut frame = render_status(public_ip.as_deref(), server.as_ref());
         let _ = writeln!(
             frame,
             "  {}",
@@ -83,11 +97,81 @@ fn watch_loop() -> Result<()> {
     }
 }
 
-/// Peer rows from the local server's control socket (server hosts only);
-/// None on client hosts / when no server is running.
+/// If a local server answers on the control socket, gather the facts that make
+/// `status` a server dashboard; `None` on client hosts (and on Windows).
 #[cfg(unix)]
-fn peers_section() -> Option<String> {
+fn server_info() -> Option<ServerInfo> {
+    // A successful peer-list means the control socket is up — i.e. *this* host
+    // is running a 2cha server.
     let peers = super::peer::fetch_peers().ok()?;
+    let (listen, transport) = read_server_listen();
+    Some(ServerInfo {
+        peers,
+        listen,
+        transport,
+    })
+}
+
+#[cfg(windows)]
+fn server_info() -> Option<ServerInfo> {
+    None
+}
+
+/// Best-effort listen address + transport of the running server, read from the
+/// very config it was started with (`-c <path>` in `/proc/<pid>/cmdline`),
+/// falling back to the documented default. Never fails the status render.
+#[cfg(target_os = "linux")]
+fn read_server_listen() -> (Option<String>, Option<String>) {
+    let Some(path) = server_config_path() else {
+        return (None, None);
+    };
+    match twocha_core::ServerConfig::from_file(&path) {
+        Ok(cfg) => (
+            cfg.listen_addr().ok().map(|a| a.to_string()),
+            Some(cfg.server.transport.to_string()),
+        ),
+        Err(_) => (None, None),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_server_listen() -> (Option<String>, Option<String>) {
+    (None, None)
+}
+
+/// The config path the running server was launched with (from its cmdline),
+/// else the documented default if it exists.
+#[cfg(target_os = "linux")]
+fn server_config_path() -> Option<std::path::PathBuf> {
+    use crate::cli::utils::find_pid_file;
+    use std::path::PathBuf;
+
+    let pid = find_pid_file()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    if let Some(pid) = pid {
+        if let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+            let args: Vec<String> = raw
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect();
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(p) = arg.strip_prefix("--config=") {
+                    return Some(PathBuf::from(p));
+                }
+                if (arg == "-c" || arg == "--config") && i + 1 < args.len() {
+                    return Some(PathBuf::from(&args[i + 1]));
+                }
+            }
+        }
+    }
+    let default = PathBuf::from("/etc/2cha/server.toml");
+    default.exists().then_some(default)
+}
+
+/// The `◆ Peers` detail block (server view only).
+fn peers_section(peers: &[PeerInfo]) -> String {
     let mut out = String::new();
     let _ = writeln!(out);
     let _ = writeln!(
@@ -99,20 +183,17 @@ fn peers_section() -> Option<String> {
     if peers.is_empty() {
         let _ = writeln!(out, "    {}", style("none configured").dim());
     }
-    for peer in &peers {
+    for peer in peers {
         let _ = writeln!(out, "    {}", super::peer::render_peer_line(peer));
     }
-    Some(out)
-}
-
-#[cfg(windows)]
-fn peers_section() -> Option<String> {
-    None
+    out
 }
 
 /// Render the full status block into a string (so the watch mode can count
-/// and redraw lines).
-fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
+/// and redraw lines). A `server` value switches the view to the server
+/// dashboard; `None` renders the client tunnel view.
+fn render_status(public_ip: Option<&str>, server: Option<&ServerInfo>) -> String {
+    let is_server = server.is_some();
     let mut out = String::new();
     let o = &mut out;
     let _ = writeln!(o);
@@ -122,27 +203,58 @@ fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
         o,
         "  {} {}",
         style("2cha").cyan().bold(),
-        style("VPN Status").bold()
+        style(if is_server {
+            "Server Status"
+        } else {
+            "VPN Status"
+        })
+        .bold()
     );
     let _ = writeln!(o, "  {}", style("═".repeat(divider_width())).dim());
 
     let connected = is_running();
 
-    // Status
+    // Status — servers "run", clients "connect"
     if connected {
+        let (label, word) = if is_server {
+            (Icons::CONNECTED, "Running")
+        } else {
+            (Icons::CONNECTED, "Connected")
+        };
         let _ = writeln!(
             o,
-            "  {}     {} Connected",
+            "  {}     {} {}",
             style("Status:").dim(),
-            style(Icons::CONNECTED).green().bold()
+            style(label).green().bold(),
+            word
         );
     } else {
+        let word = if is_server { "Stopped" } else { "Disconnected" };
         let _ = writeln!(
             o,
-            "  {}     {} Disconnected",
+            "  {}     {} {}",
             style("Status:").dim(),
-            icon_disconnected()
+            icon_disconnected(),
+            word
         );
+    }
+
+    // Listening address (server view, best-effort)
+    if let Some(srv) = server {
+        if let Some(ref listen) = srv.listen {
+            let transport = srv
+                .transport
+                .as_deref()
+                .map(|t| format!("  {}", style(format!("({})", t)).dim()))
+                .unwrap_or_default();
+            let _ = writeln!(
+                o,
+                "  {} {}{}",
+                style("Listening:").dim(),
+                style(listen).cyan().bold(),
+                transport
+            );
+        }
     }
 
     let routing_status = routing::get_routing_status(TUN_NAME);
@@ -190,43 +302,46 @@ fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
         );
     }
 
-    // Routing
-    if routing_status.is_full_tunnel() {
-        let mode =
-            if routing_status.default_route_v4_via_tun && routing_status.default_route_v6_via_tun {
+    // Routing (client-only concept — a server never tunnels its own traffic)
+    if !is_server {
+        if routing_status.is_full_tunnel() {
+            let mode = if routing_status.default_route_v4_via_tun
+                && routing_status.default_route_v6_via_tun
+            {
                 "(v4+v6)"
             } else if routing_status.default_route_v4_via_tun {
                 "(v4)"
             } else {
                 "(v6)"
             };
-        let _ = writeln!(
-            o,
-            "  {}    {} {} {}",
-            style("Routing:").dim(),
-            style(Icons::CONNECTED).yellow(),
-            style("Full tunnel").yellow(),
-            style(mode).dim()
-        );
-    } else if connected {
-        let _ = writeln!(
-            o,
-            "  {}    {} {}",
-            style("Routing:").dim(),
-            style(Icons::CONNECTED).green(),
-            style("Split tunnel").green()
-        );
-    } else {
-        let _ = writeln!(
-            o,
-            "  {}    {} {}",
-            style("Routing:").dim(),
-            icon_disconnected(),
-            style("Normal").dim()
-        );
+            let _ = writeln!(
+                o,
+                "  {}    {} {} {}",
+                style("Routing:").dim(),
+                style(Icons::CONNECTED).yellow(),
+                style("Full tunnel").yellow(),
+                style(mode).dim()
+            );
+        } else if connected {
+            let _ = writeln!(
+                o,
+                "  {}    {} {}",
+                style("Routing:").dim(),
+                style(Icons::CONNECTED).green(),
+                style("Split tunnel").green()
+            );
+        } else {
+            let _ = writeln!(
+                o,
+                "  {}    {} {}",
+                style("Routing:").dim(),
+                icon_disconnected(),
+                style("Normal").dim()
+            );
+        }
     }
 
-    // Gateway
+    // Gateway / forwarding (relevant to servers and gateway clients)
     if routing_status.ipv4_forwarding || routing_status.ipv6_forwarding {
         let mode = if routing_status.ipv4_forwarding && routing_status.ipv6_forwarding {
             "(v4+v6)"
@@ -242,6 +357,15 @@ fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
             style(Icons::CONNECTED).green(),
             style("Forwarding").green(),
             style(mode).dim()
+        );
+    } else if is_server {
+        // A server that isn't forwarding usually can't route clients anywhere.
+        let _ = writeln!(
+            o,
+            "  {}    {} {}",
+            style("Gateway:").dim(),
+            icon_disconnected(),
+            style("not forwarding — run `2cha setup`").dim()
         );
     }
 
@@ -276,6 +400,20 @@ fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
         );
     }
 
+    // Peer summary + detail (server view)
+    if let Some(srv) = server {
+        let online = srv.peers.iter().filter(|p| p.online).count();
+        let total = srv.peers.len();
+        let _ = writeln!(
+            o,
+            "  {}     {} {} / {} total",
+            style("Peers:").dim(),
+            style(online).green().bold(),
+            style("online").green(),
+            total
+        );
+    }
+
     #[cfg(windows)]
     let _ = writeln!(
         o,
@@ -284,8 +422,8 @@ fn render_status(public_ip: Option<&str>, peers: Option<&str>) -> String {
         style("Windows").blue()
     );
 
-    if let Some(peers) = peers {
-        out.push_str(peers);
+    if let Some(srv) = server {
+        out.push_str(&peers_section(&srv.peers));
     }
 
     out.push('\n');

@@ -68,13 +68,19 @@ else
 fi
 
 tar -xzf "$TMP/2cha.tar.gz" -C "$TMP"
-if [ ! -f "$TMP/2cha" ]; then
-    echo "error: tarball did not contain a '2cha' binary" >&2
+# The universal tarball ships the binary as `2cha-universal` (see
+# .github/workflows/release.yml); accept a plain `2cha` too for robustness.
+if [ -f "$TMP/2cha-universal" ]; then
+    BIN="$TMP/2cha-universal"
+elif [ -f "$TMP/2cha" ]; then
+    BIN="$TMP/2cha"
+else
+    echo "error: tarball did not contain a 2cha binary" >&2
     exit 1
 fi
 
 # ── Install
-install -m 0755 "$TMP/2cha" "$BIN_DIR/2cha"
+install -m 0755 "$BIN" "$BIN_DIR/2cha"
 echo "» installed $("$BIN_DIR/2cha" --version) to $BIN_DIR/2cha"
 
 # ── Hand over to the turn-key wizard (interactive terminals only)
