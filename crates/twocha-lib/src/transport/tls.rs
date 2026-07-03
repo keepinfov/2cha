@@ -147,10 +147,36 @@ impl TlsCarrier {
         self.flush()
     }
 
+    /// Move any plaintext rustls has already decrypted into the reassembly
+    /// buffer, and push out any records the TLS layer owes the peer (session
+    /// tickets, key updates) so the connection stays healthy.
+    fn drain_plaintext(&mut self) -> io::Result<()> {
+        let state = self
+            .conn
+            .process_new_packets()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let pending = state.plaintext_bytes_to_read();
+        if pending > 0 {
+            self.conn
+                .reader()
+                .read_exact(self.inbuf.make_room(pending))?;
+        }
+        if self.conn.wants_write() {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     fn recv(&mut self, out: &mut Vec<u8>) -> io::Result<bool> {
         if self.inbuf.pop_frame_into(out) {
             return Ok(true);
         }
+        // Drain plaintext already buffered inside rustls BEFORE polling the
+        // socket: the blocking handshake's `complete_io` can pull the peer's
+        // first app-data records in the same TCP segment as its final
+        // handshake flight, and a socket-first loop would strand that data
+        // (invisible to poll) until the peer happens to send more.
+        self.drain_plaintext()?;
         // In non-blocking mode `read_tls` returns WouldBlock when the socket is
         // merely drained, so `Ok(0)` genuinely means the peer closed the TCP
         // connection (EOF). We surface that as an error so the poll loop can
@@ -166,21 +192,7 @@ impl TlsCarrier {
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
-            let state = self
-                .conn
-                .process_new_packets()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let pending = state.plaintext_bytes_to_read();
-            if pending > 0 {
-                self.conn
-                    .reader()
-                    .read_exact(self.inbuf.make_room(pending))?;
-            }
-            // The TLS layer may owe the peer records (e.g. session tickets,
-            // key updates); push them out so the connection stays healthy.
-            if self.conn.wants_write() {
-                self.flush()?;
-            }
+            self.drain_plaintext()?;
         }
         // Drain any frame we did manage to reassemble before reporting EOF, so
         // the last bytes before a close are never lost.
