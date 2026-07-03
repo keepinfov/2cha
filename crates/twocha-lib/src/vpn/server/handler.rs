@@ -173,8 +173,20 @@ pub fn run(config_path: &str) -> Result<()> {
     log::info!("Starting 2cha server (protocol v4)...");
     log::info!("Server public key: {}", identity.public_base64());
 
+    // Opt-in worker pool: QUIC + Linux + performance.worker_threads >= 2.
+    // It needs a multi-queue TUN, so force the flag on when active.
+    let workers = if cfg.server.transport == TransportKind::Quic && cfg!(target_os = "linux") {
+        cfg.performance.worker_threads
+    } else {
+        0
+    };
+    let multi_queue = cfg.performance.multi_queue || workers >= 2;
+    if workers >= 2 && !cfg.performance.multi_queue {
+        log::info!("worker_threads = {}: enabling multi-queue tun", workers);
+    }
+
     // Create TUN device
-    let mut tun = TunDevice::create_with_options(&cfg.tun.name, cfg.performance.multi_queue)?;
+    let mut tun = TunDevice::create_with_options(&cfg.tun.name, multi_queue)?;
 
     // Configure IPv4
     if cfg.ipv4.enable {
@@ -276,8 +288,29 @@ pub fn run(config_path: &str) -> Result<()> {
         cfg.server.transport
     );
 
-    let serve_result = match cfg.server.transport {
-        TransportKind::Quic => serve_udp(
+    #[cfg(target_os = "linux")]
+    let serve_result = if workers >= 2 && cfg.server.transport == TransportKind::Quic {
+        // Multi-worker pool consumes the tun (one queue per worker) and
+        // builds its own shared state; `state` stays unused on this path.
+        let ServerState {
+            engine,
+            allowed,
+            peer_names,
+            ..
+        } = state;
+        super::workers::serve_udp_workers(
+            &cfg,
+            config_path,
+            tun,
+            engine,
+            allowed,
+            peer_names,
+            control.as_ref(),
+            listen_addr,
+            workers,
+        )
+    } else {
+        serve_transport(
             &cfg,
             config_path,
             &mut tun,
@@ -285,17 +318,18 @@ pub fn run(config_path: &str) -> Result<()> {
             &mut event_loop,
             control.as_ref(),
             listen_addr,
-        ),
-        TransportKind::Tls => serve_tls(
-            &cfg,
-            config_path,
-            &mut tun,
-            &mut state,
-            &mut event_loop,
-            control.as_ref(),
-            listen_addr,
-        ),
+        )
     };
+    #[cfg(not(target_os = "linux"))]
+    let serve_result = serve_transport(
+        &cfg,
+        config_path,
+        &mut tun,
+        &mut state,
+        &mut event_loop,
+        control.as_ref(),
+        listen_addr,
+    );
 
     // Roll back NAT/forwarding regardless of how the loop exited.
     routing_ctx.cleanup();
@@ -303,6 +337,40 @@ pub fn run(config_path: &str) -> Result<()> {
     serve_result?;
     log::info!("Server shutdown");
     Ok(())
+}
+
+/// Single-threaded transport dispatch (the pre-worker-pool behaviour).
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn serve_transport(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    match cfg.server.transport {
+        TransportKind::Quic => serve_udp(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        ),
+        TransportKind::Tls => serve_tls(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        ),
+    }
 }
 
 /// Periodic maintenance shared by both transport loops: rotate the cookie

@@ -110,20 +110,16 @@ impl Session {
 
     /// Time since the last outbound datagram was sealed
     pub fn last_send_elapsed(&self) -> Duration {
-        self.created
-            .elapsed()
-            .saturating_sub(Duration::from_millis(
-                self.last_send_ms.load(Ordering::Relaxed),
-            ))
+        self.created.elapsed().saturating_sub(Duration::from_millis(
+            self.last_send_ms.load(Ordering::Relaxed),
+        ))
     }
 
     /// Time since the last inbound datagram authenticated
     pub fn last_recv_elapsed(&self) -> Duration {
-        self.created
-            .elapsed()
-            .saturating_sub(Duration::from_millis(
-                self.last_recv_ms.load(Ordering::Relaxed),
-            ))
+        self.created.elapsed().saturating_sub(Duration::from_millis(
+            self.last_recv_ms.load(Ordering::Relaxed),
+        ))
     }
 
     /// Encrypt a payload into a complete on-wire datagram.
@@ -195,10 +191,8 @@ impl Session {
             .mask_counter(counter, &out[wire::DATA_HEADER_LEN..]);
         out[1 + CID_LEN..wire::DATA_HEADER_LEN].copy_from_slice(&masked);
 
-        self.last_send_ms.store(
-            self.created.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.last_send_ms
+            .store(self.created.elapsed().as_millis() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -239,10 +233,8 @@ impl Session {
         let payload_len = wire::unframe_inner(out)?.len();
         out.copy_within(2..2 + payload_len, 0);
         out.truncate(payload_len);
-        self.last_recv_ms.store(
-            self.created.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.last_recv_ms
+            .store(self.created.elapsed().as_millis() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -325,7 +317,7 @@ mod tests {
     /// round-trip through the peer.
     #[test]
     fn seal_data_never_exceeds_max_packet_size() {
-        let (mut client, mut server) = session_pair();
+        let (client, server) = session_pair();
         for payload_len in [1420usize, MAX_TUN_MTU as usize] {
             let payload = vec![0xABu8; payload_len];
             for _ in 0..500 {
@@ -357,7 +349,7 @@ mod tests {
     /// buffers across many packets (wrapper tests only cover fresh buffers).
     #[test]
     fn seal_open_into_reuses_buffers() {
-        let (mut client, mut server) = session_pair();
+        let (client, server) = session_pair();
         let mut scratch = SealScratch::default();
         let mut out = Vec::new();
         let mut payload_buf = Vec::new();
@@ -387,7 +379,7 @@ mod tests {
     /// Small payloads keep their full random pad range.
     #[test]
     fn seal_data_small_payload_pads_vary() {
-        let (mut client, _) = session_pair();
+        let (client, _) = session_pair();
         let sizes: std::collections::HashSet<usize> = (0..200)
             .map(|_| client.seal_data(b"x").unwrap().len())
             .collect();
@@ -402,7 +394,7 @@ mod tests {
     /// always fit in MAX_PACKET_SIZE.
     #[test]
     fn keepalive_sizes_vary_and_fit() {
-        let (mut client, _) = session_pair();
+        let (client, _) = session_pair();
         let sizes: std::collections::HashSet<usize> = (0..200)
             .map(|_| {
                 let dg = client.seal_data(b"").unwrap();

@@ -52,6 +52,10 @@ pub struct TunnelConfig {
     pub write_timeout: Option<Duration>,
     pub recv_buffer_size: usize,
     pub send_buffer_size: usize,
+    /// Bind with SO_REUSEPORT so several worker sockets share one listen
+    /// address; the kernel then hashes each client's 4-tuple to a fixed
+    /// socket, keeping a client's datagrams on one worker.
+    pub reuse_port: bool,
 }
 
 impl Default for TunnelConfig {
@@ -63,6 +67,7 @@ impl Default for TunnelConfig {
             write_timeout: Some(Duration::from_secs(5)),
             recv_buffer_size: 2 * 1024 * 1024,
             send_buffer_size: 2 * 1024 * 1024,
+            reuse_port: false,
         }
     }
 }
@@ -78,8 +83,12 @@ impl UdpTunnel {
     pub fn new(config: TunnelConfig) -> Result<Self> {
         log::info!("Creating UDP tunnel on {}", config.local_addr);
 
-        let socket = UdpSocket::bind(config.local_addr)
-            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        let socket = if config.reuse_port {
+            Self::bind_reuseport(config.local_addr)?
+        } else {
+            UdpSocket::bind(config.local_addr)
+                .map_err(|e| NetworkError::BindFailed(e.to_string()))?
+        };
 
         socket.set_read_timeout(config.read_timeout)?;
         socket.set_write_timeout(config.write_timeout)?;
@@ -91,6 +100,23 @@ impl UdpTunnel {
             config,
             recv_buffer: vec![0u8; RECV_BUF_LEN],
         })
+    }
+
+    /// Bind with SO_REUSEPORT set before bind (requires building the socket
+    /// via socket2; std's UdpSocket::bind can't set options pre-bind).
+    fn bind_reuseport(addr: SocketAddr) -> Result<UdpSocket> {
+        let domain = if addr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        sock.set_reuse_port(true)
+            .map_err(|e| NetworkError::BindFailed(format!("SO_REUSEPORT: {}", e)))?;
+        sock.bind(&addr.into())
+            .map_err(|e| NetworkError::BindFailed(e.to_string()))?;
+        Ok(sock.into())
     }
 
     fn set_socket_buffers(socket: &UdpSocket, recv_size: usize, send_size: usize) {

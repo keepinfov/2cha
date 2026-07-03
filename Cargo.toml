@@ -52,7 +52,8 @@ rpassword = "7.3"
 libc = "0.2"
 daemonize = "0.5"
 signal-hook = "0.3"
-socket2 = "0.5"
+# "all" unlocks SO_REUSEPORT (worker pool binds N sockets to one port)
+socket2 = { version = "0.5", features = ["all"] }
 
 # Windows-specific
 windows = { version = "0.62.2", features = [

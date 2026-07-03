@@ -189,7 +189,8 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 #[cfg(unix)]
 enum BuiltTransport {
     Quic(UdpQuicClientTransport),
-    Tls(TlsClientTransport),
+    // Boxed: the rustls connection dwarfs the UDP carrier
+    Tls(Box<TlsClientTransport>),
 }
 
 #[cfg(unix)]
@@ -197,7 +198,7 @@ impl BuiltTransport {
     fn as_dyn_mut(&mut self) -> &mut dyn ClientTransport {
         match self {
             BuiltTransport::Quic(t) => t,
-            BuiltTransport::Tls(t) => t,
+            BuiltTransport::Tls(t) => t.as_mut(),
         }
     }
 }
@@ -227,7 +228,7 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
         TransportKind::Tls => {
             // TCP connect + real TLS 1.3 handshake (blocking) happen here.
             let t = TlsClientTransport::connect(server_addr, &cfg.tls.sni).map_err(VpnError::Io)?;
-            BuiltTransport::Tls(t)
+            BuiltTransport::Tls(Box::new(t))
         }
     };
     Ok(transport)
@@ -366,17 +367,26 @@ fn run_event_loop_threaded(
     log::info!("client data plane: 2-thread split (uplink + downlink)");
 
     std::thread::scope(|scope| {
-        let uplink = scope.spawn(|| client_uplink_loop(cfg, &tun, &tunnel, remote, &session, running));
+        let uplink =
+            scope.spawn(|| client_uplink_loop(cfg, &tun, &tunnel, remote, &session, running));
 
-        let downlink_result =
-            client_downlink_loop(cfg, identity, server_public, &tun, &tunnel, remote, &session, running);
+        let downlink_result = client_downlink_loop(
+            cfg,
+            identity,
+            server_public,
+            &tun,
+            &tunnel,
+            remote,
+            &session,
+            running,
+        );
 
         // The downlink exits only when `running` flips false (or on a poll
         // error, in which case stop the uplink too instead of leaking it).
         running.store(false, Ordering::SeqCst);
-        let uplink_result = uplink.join().unwrap_or_else(|_| {
-            Err(VpnError::Config("client uplink thread panicked".into()))
-        });
+        let uplink_result = uplink
+            .join()
+            .unwrap_or_else(|_| Err(VpnError::Config("client uplink thread panicked".into())));
         downlink_result.and(uplink_result)
     })
 }
@@ -897,8 +907,7 @@ mod tests {
         let server = thread::spawn(move || {
             let mut buf = [0u8; 2048];
             let (n, src) = server_sock.recv_from(&mut buf).expect("recv init");
-            let mut session = match engine.handle_init(&buf[..n], &src, false, |k| *k == client_pub)
-            {
+            let session = match engine.handle_init(&buf[..n], &src, false, |k| *k == client_pub) {
                 InitOutcome::Established {
                     datagram, session, ..
                 } => {
