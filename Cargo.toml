@@ -32,7 +32,9 @@ toml_edit = "0.23"
 chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
-snow = "0.9"
+# ring-accelerated: AES-GCM/ChaCha20 via ring's assembly kernels; snow's
+# fallback resolver keeps BLAKE2s (unsupported by ring) on the pure-Rust path.
+snow = { version = "0.9", features = ["ring-accelerated"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 blake2 = "0.10"
 subtle = "2.5"
