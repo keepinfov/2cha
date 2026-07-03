@@ -10,6 +10,14 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use twocha_protocol::Result;
 use write::wizard_io_err;
 
+/// Default DNS servers suggested by the wizard (single source of truth)
+pub const DEFAULT_DNS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
+
+/// The wizard's DNS defaults as owned strings (the shape configs want)
+pub fn default_dns_servers() -> Vec<String> {
+    DEFAULT_DNS.iter().map(|s| s.to_string()).collect()
+}
+
 /// Prompt for the cipher suite
 fn prompt_cipher(theme: &ColorfulTheme) -> Result<String> {
     let ciphers = ["chacha20-poly1305", "aes-256-gcm"];

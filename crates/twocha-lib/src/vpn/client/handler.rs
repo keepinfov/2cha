@@ -138,10 +138,14 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     }
 
     if !quiet {
+        // console::style honors TTY detection and NO_COLOR, so redirected
+        // output stays free of escape codes (raw \x1b codes did not).
+        use console::style;
         println!();
         println!(
-            "  \x1b[32m●\x1b[0m Connected to \x1b[36m{}\x1b[0m",
-            server_addr
+            "  {} Connected to {}",
+            style("●").green(),
+            style(server_addr).cyan()
         );
         if let Some(ref gw) = ipv4_gateway {
             println!(
@@ -158,7 +162,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
             );
         }
         if cfg.ipv4.route_all || cfg.ipv6.route_all {
-            println!("  Mode: \x1b[33mFull tunnel\x1b[0m");
+            println!("  Mode: {}", style("Full tunnel").yellow());
         } else {
             println!("  Mode: Split tunnel");
         }
@@ -179,7 +183,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     let _ = routing_ctx.cleanup();
 
     if !quiet {
-        println!("\n  \x1b[32m✓\x1b[0m Disconnected");
+        println!("\n  {} Disconnected", console::style("✓").green());
     }
 
     Ok(())

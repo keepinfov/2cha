@@ -23,6 +23,7 @@ pub use updown::{cmd_down, cmd_toggle, cmd_up};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
+use twocha_protocol::{Result, VpnError};
 
 /// Create a spinner with consistent styling
 fn create_spinner(msg: &str) -> ProgressBar {
@@ -36,4 +37,19 @@ fn create_spinner(msg: &str) -> ProgressBar {
     spinner.set_message(msg.to_string());
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
+}
+
+/// Interactive fallback for a missing argument: run `prompt` when both stdout
+/// and stderr are terminals; otherwise fail like a missing clap argument would
+/// (scripts keep deterministic behavior, humans get asked).
+pub(crate) fn prompt_if_tty<T>(what: &str, prompt: impl FnOnce() -> Result<T>) -> Result<T> {
+    use console::Term;
+    if Term::stdout().is_term() && Term::stderr().is_term() {
+        prompt()
+    } else {
+        Err(VpnError::Config(format!(
+            "missing {} (non-interactive terminal; pass it as an argument)",
+            what
+        )))
+    }
 }
