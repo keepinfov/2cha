@@ -136,6 +136,12 @@ pub struct PerformanceSection {
     pub batch_size: usize,
     #[serde(default)]
     pub multi_queue: bool,
+    /// Data-plane threads. `0` = auto (client: 2-thread split on the QUIC
+    /// transport; server: single-threaded). `1` forces the single-threaded
+    /// loop. On the server, values >= 2 enable the opt-in multi-worker QUIC
+    /// data plane (Linux only; requires `multi_queue = true`).
+    #[serde(default)]
+    pub worker_threads: usize,
     #[serde(default)]
     pub cpu_affinity: Vec<usize>,
 }
@@ -147,6 +153,7 @@ impl Default for PerformanceSection {
             socket_send_buffer: 2 * 1024 * 1024,
             batch_size: 32,
             multi_queue: false,
+            worker_threads: 0,
             cpu_affinity: Vec::new(),
         }
     }

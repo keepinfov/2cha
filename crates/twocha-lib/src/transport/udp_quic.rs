@@ -30,6 +30,12 @@ impl UdpQuicClientTransport {
     pub fn new(tunnel: UdpTunnel, remote: SocketAddr) -> Self {
         UdpQuicClientTransport { tunnel, remote }
     }
+
+    /// Unwrap the carrier for the threaded client data plane, which drives
+    /// the UDP socket directly (per-thread batch buffers over one socket).
+    pub fn into_parts(self) -> (UdpTunnel, SocketAddr) {
+        (self.tunnel, self.remote)
+    }
 }
 
 impl ClientTransport for UdpQuicClientTransport {

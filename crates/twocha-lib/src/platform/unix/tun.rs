@@ -169,8 +169,11 @@ impl TunDevice {
         Ok(())
     }
 
+    // I/O takes &self (tun-rs SyncDevice recv/send already do): the
+    // multithreaded data plane reads and writes one device from two threads
+    // behind an Arc.
     #[inline]
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
         match self.dev.recv(buf) {
             Ok(n) => {
                 log::trace!("TUN read: {} bytes", n);
@@ -182,7 +185,7 @@ impl TunDevice {
     }
 
     #[inline]
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
+    pub fn write(&self, buf: &[u8]) -> Result<usize> {
         let n = self.dev.send(buf)?;
         log::trace!("TUN write: {} bytes", n);
         Ok(n)
@@ -190,6 +193,21 @@ impl TunDevice {
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         self.dev.set_nonblocking(nonblocking).map_err(map_io)
+    }
+
+    /// Open another queue of a multi-queue TUN device (Linux). Requires the
+    /// device to have been created with `multi_queue = true`; each clone is
+    /// an independent fd the kernel hashes flows onto.
+    #[cfg(target_os = "linux")]
+    pub fn clone_queue(&self) -> Result<TunDevice> {
+        let dev = self.dev.try_clone().map_err(map_io)?;
+        Ok(TunDevice {
+            dev,
+            name: self.name.clone(),
+            mtu: self.mtu,
+            ipv4_addr: self.ipv4_addr,
+            ipv6_addr: self.ipv6_addr,
+        })
     }
 }
 
