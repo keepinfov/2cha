@@ -154,6 +154,7 @@ impl ClientConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.tun_ipv4()?;
         self.tun_ipv6()?;
+        validate_tun_mtu(self.tun.mtu)?;
         if self.ipv4.prefix > 32 {
             return Err(ConfigError::Invalid("ipv4.prefix must be 0..=32".into()));
         }

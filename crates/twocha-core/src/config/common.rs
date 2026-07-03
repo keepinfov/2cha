@@ -110,6 +110,21 @@ pub fn decode_config_public_key(value: &str) -> Result<[u8; 32], ConfigError> {
         .map_err(|e| ConfigError::InvalidKey(format!("bad public key: {}", e)))
 }
 
+/// Validate `tun.mtu` against the wire format: a full-MTU packet plus the
+/// 35-byte data-datagram overhead must fit in a 1500-byte wire datagram
+/// ([`crate::v4::session::MAX_TUN_MTU`] = 1465), and IPv4 requires >= 576.
+pub fn validate_tun_mtu(mtu: u16) -> Result<(), ConfigError> {
+    let max = crate::v4::session::MAX_TUN_MTU;
+    if !(576..=max).contains(&mtu) {
+        return Err(ConfigError::Invalid(format!(
+            "tun.mtu must be 576..={} (got {}): each packet gains 35 bytes of \
+             tunnel overhead and must fit in a 1500-byte datagram",
+            max, mtu
+        )));
+    }
+    Ok(())
+}
+
 /// Performance configuration
 #[derive(Debug, Deserialize)]
 pub struct PerformanceSection {
@@ -286,6 +301,16 @@ pub fn prefix_to_netmask_v6(prefix: u8) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_tun_mtu() {
+        assert!(validate_tun_mtu(576).is_ok());
+        assert!(validate_tun_mtu(1420).is_ok());
+        assert!(validate_tun_mtu(1465).is_ok());
+        assert!(validate_tun_mtu(575).is_err());
+        assert!(validate_tun_mtu(1466).is_err());
+        assert!(validate_tun_mtu(1500).is_err());
+    }
 
     #[test]
     fn test_prefix_to_netmask_v4() {

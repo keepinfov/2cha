@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::crypto::mac::HeaderMask;
 use crate::crypto::noise::SessionCrypto;
 use twocha_protocol::wire::{self, CID_LEN};
-use twocha_protocol::{CryptoError, ReplayWindow, Result};
+use twocha_protocol::{CryptoError, ReplayWindow, Result, MAX_PACKET_SIZE, POLY1305_TAG_SIZE};
 
 /// Initiate a new handshake after this much session time
 pub const REKEY_AFTER: Duration = Duration::from_secs(120);
@@ -20,7 +20,22 @@ pub const REKEY_AFTER_MESSAGES: u64 = 1 << 48;
 /// Keepalive base interval (jittered by the caller)
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Max random padding appended inside the AEAD for data packets
+/// Fixed on-wire overhead of a data datagram: short header (17) + inner
+/// length prefix (2) + AEAD tag (16) = 35 bytes.
+pub const DATA_OVERHEAD: usize = wire::DATA_HEADER_LEN + 2 + POLY1305_TAG_SIZE;
+
+/// Largest tun MTU whose full-size packets always fit in [`MAX_PACKET_SIZE`]
+/// even before padding (1500 − 35 = 1465). Config validation rejects larger
+/// MTUs; receive paths size their buffers off `MAX_PACKET_SIZE` and drop
+/// anything bigger as truncated.
+pub const MAX_TUN_MTU: u16 = (MAX_PACKET_SIZE - DATA_OVERHEAD) as u16;
+
+/// Max random padding appended inside the AEAD for data packets.
+///
+/// Padding policy: the pad is additionally capped so the finished datagram
+/// never exceeds [`MAX_PACKET_SIZE`] — an oversized datagram would be
+/// truncated by MAX_PACKET_SIZE-sized receive buffers, fail authentication
+/// and be silently dropped (~29% of full-MTU packets before the cap).
 const DATA_PAD_MAX: usize = 64;
 /// Keepalive padding range: their plaintext is empty, so the padding alone
 /// determines the on-wire size — keep it wide to kill the size fingerprint
@@ -81,9 +96,11 @@ impl Session {
 
         let mut rng = rand::thread_rng();
         let pad_len = if payload.is_empty() {
+            // Keepalives (35 + at most 256 bytes) always fit in MAX_PACKET_SIZE
             rng.gen_range(KEEPALIVE_PAD_MIN..=KEEPALIVE_PAD_MAX)
         } else {
-            rng.gen_range(0..=DATA_PAD_MAX)
+            let budget = MAX_PACKET_SIZE.saturating_sub(DATA_OVERHEAD + payload.len());
+            rng.gen_range(0..=DATA_PAD_MAX.min(budget))
         };
         let mut padding = vec![0u8; pad_len];
         rng.fill_bytes(&mut padding);
@@ -139,4 +156,120 @@ pub fn keepalive_jitter() -> Duration {
     let base = KEEPALIVE_INTERVAL.as_millis() as u64;
     let jitter = rand::thread_rng().gen_range(0..=(base * 6 / 10));
     Duration::from_millis(base * 7 / 10 + jitter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CipherSuite;
+    use crate::crypto::noise::Handshake;
+    use crate::crypto::Identity;
+
+    fn session_pair() -> (Session, Session) {
+        let client_id = Identity::generate();
+        let server_id = Identity::generate();
+
+        let mut client = Handshake::new_initiator(
+            CipherSuite::ChaCha20Poly1305,
+            &client_id.private_bytes(),
+            &server_id.public_bytes(),
+        )
+        .unwrap();
+        let mut server =
+            Handshake::new_responder(CipherSuite::ChaCha20Poly1305, &server_id.private_bytes())
+                .unwrap();
+
+        server
+            .read_message(&client.write_message(b"").unwrap())
+            .unwrap();
+        client
+            .read_message(&server.write_message(b"").unwrap())
+            .unwrap();
+
+        let seed_client = [1u8; 32];
+        let seed_server = [2u8; 32];
+        let client_session = Session::new(
+            client.into_session().unwrap(),
+            HeaderMask::new(&seed_client, &seed_server, 0x01),
+            HeaderMask::new(&seed_client, &seed_server, 0x02),
+            [3; CID_LEN],
+            [4; CID_LEN],
+            true,
+        );
+        let server_session = Session::new(
+            server.into_session().unwrap(),
+            HeaderMask::new(&seed_client, &seed_server, 0x02),
+            HeaderMask::new(&seed_client, &seed_server, 0x01),
+            [4; CID_LEN],
+            [3; CID_LEN],
+            false,
+        );
+        (client_session, server_session)
+    }
+
+    /// Regression for the padding-overflow packet-loss bug: a full-MTU payload
+    /// plus random padding must never exceed MAX_PACKET_SIZE, and must still
+    /// round-trip through the peer.
+    #[test]
+    fn seal_data_never_exceeds_max_packet_size() {
+        let (mut client, mut server) = session_pair();
+        for payload_len in [1420usize, MAX_TUN_MTU as usize] {
+            let payload = vec![0xABu8; payload_len];
+            for _ in 0..500 {
+                let dg = client.seal_data(&payload).unwrap();
+                assert!(
+                    dg.len() <= MAX_PACKET_SIZE,
+                    "datagram {} > MAX_PACKET_SIZE for payload {}",
+                    dg.len(),
+                    payload_len
+                );
+                match wire::parse(&dg).unwrap() {
+                    wire::WireMsg::Data {
+                        masked_counter,
+                        ciphertext,
+                        ..
+                    } => {
+                        assert_eq!(
+                            server.open_data(masked_counter, ciphertext).unwrap(),
+                            payload
+                        )
+                    }
+                    other => panic!("wrong variant: {:?}", other),
+                }
+            }
+        }
+    }
+
+    /// Small payloads keep their full random pad range.
+    #[test]
+    fn seal_data_small_payload_pads_vary() {
+        let (mut client, _) = session_pair();
+        let sizes: std::collections::HashSet<usize> = (0..200)
+            .map(|_| client.seal_data(b"x").unwrap().len())
+            .collect();
+        assert!(
+            sizes.len() > 10,
+            "expected varied pad sizes, got {:?}",
+            sizes
+        );
+    }
+
+    /// Keepalive wire size must stay randomized (traffic-shape defense) and
+    /// always fit in MAX_PACKET_SIZE.
+    #[test]
+    fn keepalive_sizes_vary_and_fit() {
+        let (mut client, _) = session_pair();
+        let sizes: std::collections::HashSet<usize> = (0..200)
+            .map(|_| {
+                let dg = client.seal_data(b"").unwrap();
+                assert!(dg.len() <= MAX_PACKET_SIZE);
+                dg.len()
+            })
+            .collect();
+        assert!(
+            sizes.len() > 20,
+            "expected varied keepalive sizes, got {}",
+            sizes.len()
+        );
+    }
 }

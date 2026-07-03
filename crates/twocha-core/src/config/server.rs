@@ -142,6 +142,7 @@ impl ServerConfig {
         self.listen_addr_v6()?;
         self.tun_ipv4()?;
         self.tun_ipv6()?;
+        validate_tun_mtu(self.tun.mtu)?;
         if self.server.max_clients == 0 {
             return Err(ConfigError::Invalid("max_clients must be > 0".into()));
         }
