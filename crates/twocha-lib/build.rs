@@ -53,13 +53,14 @@ fn main() {
     if goarch == "arm" {
         cmd.env("GOARM", "7"); // armv7 (musleabihf)
     }
-    // cgo's C compiler: cargo-ndk / cross toolchains export it as CC_<target>.
-    // cc-rs (and these tools) accept both the dashed and underscored spellings of
-    // <target> — cargo-ndk uses dashes (CC_aarch64-linux-android), cross uses
-    // underscores — so check both, or cgo falls back to the host cc and fails to
-    // assemble the target's runtime/cgo (e.g. gcc_arm64.S).
+    // cgo's C compiler for the target. cross exports CC_<target>; cargo-ndk does
+    // not, but its linker (CARGO_TARGET_<T>_LINKER) IS the NDK clang wrapper,
+    // which doubles as the C compiler. Fall back to that, or cgo uses the host cc
+    // and fails to assemble the target's runtime/cgo (e.g. gcc_arm64.S).
+    let t_under = target.replace('-', "_");
     if let Ok(cc) = env::var(format!("CC_{target}"))
-        .or_else(|_| env::var(format!("CC_{}", target.replace('-', "_"))))
+        .or_else(|_| env::var(format!("CC_{t_under}")))
+        .or_else(|_| env::var(format!("CARGO_TARGET_{}_LINKER", t_under.to_uppercase())))
     {
         cmd.env("CC", cc);
     }
