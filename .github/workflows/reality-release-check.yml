@@ -52,3 +52,27 @@ jobs:
           "$bin" --version
           "$bin" reality-keygen -o /tmp/reality.key
           echo "OK: binary starts and reality-keygen works"
+
+  # Isolation: same release profile (lto/panic=abort) but glibc instead of
+  # static-musl, built natively so it runs on the runner. Tells us whether the
+  # segfault is musl-static-specific or a release-profile issue.
+  native-gnu-smoke:
+    name: x86_64-gnu release + smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build (reality, release, glibc)
+        run: cargo build --release -p twocha-cli --features reality
+      - name: smoke
+        run: |
+          bin=target/release/2cha
+          file "$bin"
+          "$bin" --version
+          "$bin" reality-keygen -o /tmp/reality.key
+          echo "OK: glibc release binary starts"
