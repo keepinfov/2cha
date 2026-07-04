@@ -165,6 +165,24 @@ impl ServerConfig {
             ));
         }
         self.peer_keys()?;
+        if self.server.transport == super::TransportKind::Reality {
+            if self.reality.private_key_file.is_none() {
+                return Err(ConfigError::Invalid(
+                    "transport = \"reality\" requires reality.private_key_file".into(),
+                ));
+            }
+            if self.reality.dest.is_none() {
+                return Err(ConfigError::Invalid(
+                    "transport = \"reality\" requires reality.dest (a real host:port to borrow)"
+                        .into(),
+                ));
+            }
+            if self.reality.server_names.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "transport = \"reality\" requires a non-empty reality.server_names".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -525,5 +543,23 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.server.transport, TransportKind::Tls);
         assert_eq!(cfg.tls.sni, "example.com");
+    }
+
+    #[test]
+    fn test_reality_server_validation() {
+        let base = format!(
+            "[server]\nlisten = \"0.0.0.0:443\"\ntransport = \"reality\"\n\
+             [tun]\n[crypto]\nprivate_key_file = \"k\"\n[[peers]]\npublic_key = \"{KEY_A}\"\n",
+        );
+        // Missing the whole [reality] section → rejected.
+        assert!(ServerConfig::parse(&base).unwrap().validate().is_err());
+
+        let full = format!(
+            "{base}[reality]\nprivate_key_file = \"r.key\"\ndest = \"example.com:443\"\n\
+             server_names = [\"example.com\"]\nshort_ids = [\"0123456789abcdef\"]\n",
+        );
+        let cfg = ServerConfig::parse(&full).unwrap();
+        assert_eq!(cfg.server.transport, TransportKind::Reality);
+        cfg.validate().expect("complete reality config validates");
     }
 }

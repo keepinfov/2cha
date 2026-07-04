@@ -191,13 +191,51 @@ branch of `accept` is the single swap-in point.
 - [x] Integration decision: Go `xtls/reality` c-archive, mobile in scope
 
 Chosen path (Go c-archive):
-- [ ] `goreality` Go module wrapping `xtls/reality`, C ABI (`gor_client_connect`,
-      `gor_server_new`/`accept`, `gor_close`, `gor_set_protect_callback`)
-- [ ] Rust FFI bindings + build.rs linking `libgoreality.a`; socketpair carrier in
-      `transport/` reusing `FrameBuf`; `TransportKind::Reality` + config surface
-- [ ] Server loop wiring (probe→`dest` fallback lives in Go)
-- [ ] Mobile: per-ABI Go archive build in the cargo-ndk pipeline + `VpnService.protect`
-      callback; uniffi plumbing
-- [ ] Wizard, netns e2e (`openssl s_client` probe check), CI
-- [ ] (Optional) sidecar wrapper for a pure-static-musl server binary
+- [x] `goreality` Go module wrapping `xtls/reality`, C ABI (`gor_x25519_keygen`,
+      `gor_server_new`/`gor_server_handshake`, `gor_client_handshake`, `gor_close`)
+      — `native/goreality/`
+- [x] Rust FFI bindings + `build.rs` linking `libgoreality.a`; socketpair carrier in
+      `transport/reality.rs` reusing `FrameBuf`; `TransportKind::Reality` + `[reality]`
+      config surface (server + client) with validation
+- [x] Server loop wiring `serve_reality` (probe→`dest` fallback lives in Go)
+- [x] CI: `reality-lib.yml` builds `--features reality` and runs an end-to-end tunnel
+      test (Go keys **and** x25519 `Identity` keys, proving keygen interop)
+- [ ] Mobile: per-ABI Go archive build in the cargo-ndk pipeline; uniffi plumbing + UI
+- [ ] Wizard `2cha init` prompt for REALITY
+- [ ] netns e2e (`openssl s_client` probe check)
 - [ ] (Later) iOS/Swift c-archive using the same C ABI
+
+## Usage (manual)
+
+Build with the feature (needs Go 1.24+, a C compiler; the default build is Go-free):
+
+    cargo build -p twocha-cli --features reality --release
+
+Generate the server keypair + a short id:
+
+    2cha reality-keygen            # writes the private key, prints public_key + short_id
+
+Server config:
+
+    [server]
+    transport = "reality"
+
+    [reality]
+    private_key_file = "/etc/2cha/reality.key"
+    dest             = "www.microsoft.com:443"   # real site to borrow / relay probes to
+    server_names     = ["www.microsoft.com"]     # accepted SNIs (others → dest)
+    short_ids        = ["0123456789abcdef"]
+
+Client config:
+
+    [client]
+    transport = "reality"
+
+    [reality]
+    public_key  = "<base64 from reality-keygen>"
+    short_id    = "0123456789abcdef"
+    server_name = "www.microsoft.com"            # SNI to mimic; one of the server's
+    fingerprint = "chrome"                        # chrome|firefox|safari|edge
+
+An unauthenticated probe (wrong/no keys) is transparently handed to `dest` inside the
+Go core, so it completes a genuine handshake with the real site.

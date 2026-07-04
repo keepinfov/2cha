@@ -82,11 +82,13 @@ pub fn cmd_reality_keygen(output: Option<&str>) -> Result<()> {
         icon_success(),
         style(&output).cyan()
     );
-    eprintln!("  Server config: point tls.reality.private_key_file at that file.");
+    eprintln!("  Server (transport = \"reality\"): set reality.private_key_file to that file,");
+    eprintln!("  and add this short id to reality.short_ids:");
+    println!("{}", short_id);
     eprintln!("  Client config values:");
-    eprintln!("    tls.reality.public_key:");
+    eprintln!("    reality.public_key:");
     println!("{}", identity.public_base64());
-    eprintln!("    tls.reality.short_id:");
+    eprintln!("    reality.short_id:");
     println!("{}", short_id);
     Ok(())
 }

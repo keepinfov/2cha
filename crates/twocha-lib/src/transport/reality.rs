@@ -322,20 +322,18 @@ mod tests {
     // Drives a real REALITY tunnel through the FFI carrier: a Go TLS server as
     // Dest, the Go server (RealityServerListener) and the ported Go client
     // (RealityClientTransport) authenticate, and a framed datagram crosses.
-    #[test]
-    fn reality_tunnel_client_to_server() {
+    fn drive_tunnel(server_priv: &[u8; 32], client_pub: &[u8; 32]) {
         // Dest: throwaway Go TLS server (accepts the mirrored uTLS ClientHello).
         let dest_port = unsafe { gor_test_start_tls_dest() };
         assert!(dest_port > 0, "failed to start test TLS dest");
         let dest_addr = format!("127.0.0.1:{dest_port}");
 
-        let (priv_k, pub_k) = keygen().unwrap();
         let short_hex = "0123456789abcdef";
         let short_id = twocha_core::crypto::reality::parse_short_id(short_hex).unwrap();
 
         let server = RealityServerListener::bind(
             "127.0.0.1:0",
-            &priv_k,
+            server_priv,
             &dest_addr,
             &["example.com".to_string()],
             &[short_hex.to_string()],
@@ -359,7 +357,7 @@ mod tests {
         let mut client = RealityClientTransport::connect(
             server_addr,
             "example.com",
-            &pub_k,
+            client_pub,
             &short_id,
             "chrome",
         )
@@ -371,5 +369,23 @@ mod tests {
             .expect("server recv timed out");
         assert_eq!(got, b"reality-carrier-payload");
         srv.join().unwrap();
+    }
+
+    // Keypair from the Go core (gor_x25519_keygen).
+    #[test]
+    fn reality_tunnel_go_keys() {
+        let (priv_k, pub_k) = keygen().unwrap();
+        drive_tunnel(&priv_k, &pub_k);
+    }
+
+    // Keypair from twocha-core's X25519 `Identity` — the exact path `2cha
+    // reality-keygen` and the config use (private_key_file + base64 public_key).
+    // Proves x25519-dalek keys interoperate with the Go REALITY ECDH.
+    #[test]
+    fn reality_tunnel_identity_keys() {
+        let identity = twocha_core::Identity::generate();
+        let priv_k: [u8; 32] = *identity.private_bytes();
+        let pub_k = twocha_core::decode_public_key(&identity.public_base64()).unwrap();
+        drive_tunnel(&priv_k, &pub_k);
     }
 }
