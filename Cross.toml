@@ -24,3 +24,20 @@ pre-build = [
     "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
     "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
 ]
+
+# glibc targets — used for the REALITY builds (tarballs + container image), since
+# Go's runtime can't ride a fully-static musl binary. The cross-rs gnu images
+# target an older glibc, so the tarballs run on mainstream server distros.
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]

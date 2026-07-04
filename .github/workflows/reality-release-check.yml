@@ -1,7 +1,8 @@
 name: reality release check
 
-# Fast iteration on the cross + Go/cgo + musl-static reality build before wiring it
-# into the full release. Starts with x86_64; extend the matrix once green.
+# Iterate on the glibc REALITY build (cross + Go/cgo) that backs the reality
+# tarballs and the container image. Go's runtime can't ride a static-musl binary,
+# so reality ships as glibc.
 
 on:
   push:
@@ -10,6 +11,7 @@ on:
       - 'Cross.toml'
       - 'crates/twocha-lib/build.rs'
       - 'native/goreality/**'
+      - 'Dockerfile'
       - '.github/workflows/reality-release-check.yml'
   workflow_dispatch:
 
@@ -17,20 +19,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  cross-reality:
+  cross-reality-gnu:
     name: cross ${{ matrix.target }} --features reality
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Non-PIE (needed so the embedded Go runtime doesn't segfault) is set per
-    # musl target in .cargo/config.toml, not via global RUSTFLAGS — the latter
-    # would also break host proc-macro (.so) builds.
     strategy:
       fail-fast: false
       matrix:
         target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - armv7-unknown-linux-musleabihf
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,41 +36,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
-      - name: cross build (reality)
+      - name: cross build (reality, glibc)
         run: cross build --release --target ${{ matrix.target }} -p twocha-cli --features reality
-      - name: Inspect binary
-        run: |
-          f=target/${{ matrix.target }}/release/2cha
-          file "$f"
-          ls -lh "$f"
-      - name: Smoke test (x86_64 runs natively; catches Go-init segfault)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Inspect + smoke (x86_64 runs natively)
         run: |
           bin=target/${{ matrix.target }}/release/2cha
-          "$bin" --version
-          "$bin" reality-keygen -o /tmp/reality.key
-          echo "OK: binary starts and reality-keygen works"
-
-  # Isolation: same release profile (lto/panic=abort) but glibc instead of
-  # static-musl, built natively so it runs on the runner. Tells us whether the
-  # segfault is musl-static-specific or a release-profile issue.
-  native-gnu-smoke:
-    name: x86_64-gnu release + smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: false
-      - uses: dtolnay/rust-toolchain@stable
-      - name: build (reality, release, glibc)
-        run: cargo build --release -p twocha-cli --features reality
-      - name: smoke
-        run: |
-          bin=target/release/2cha
           file "$bin"
-          "$bin" --version
-          "$bin" reality-keygen -o /tmp/reality.key
-          echo "OK: glibc release binary starts"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            "$bin" --version
+            "$bin" reality-keygen /tmp/reality.key
+            echo "OK: glibc reality binary starts and reality-keygen works"
+          fi
