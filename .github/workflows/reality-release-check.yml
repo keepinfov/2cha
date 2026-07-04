@@ -21,11 +21,9 @@ jobs:
     name: cross ${{ matrix.target }} --features reality
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # The Go runtime embedded via cgo crashes at init inside a static-PIE musl
-    # binary (x86_64-musl defaults to static-pie). Force a plain non-PIE static
-    # executable so it starts.
-    env:
-      RUSTFLAGS: "-C relocation-model=static"
+    # Non-PIE (needed so the embedded Go runtime doesn't segfault) is set per
+    # musl target in .cargo/config.toml, not via global RUSTFLAGS — the latter
+    # would also break host proc-macro (.so) builds.
     strategy:
       fail-fast: false
       matrix:
