@@ -1,0 +1,50 @@
+name: REALITY FFI spike
+
+# Greenlight gate for the Go xtls/reality integration (see docs/reality-go-design.md).
+# Proves the build mechanics: a cgo c-archive that imports xtls/reality links into a
+# Rust binary, and a Go-created socketpair fd round-trips a byte stream across FFI.
+
+on:
+  push:
+    branches: [feat/reality-transport]
+  pull_request:
+    paths:
+      - 'reality-spike/**'
+      - '.github/workflows/reality-spike.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ffi-spike:
+    name: Go c-archive + Rust FFI round-trip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve xtls/reality
+        working-directory: reality-spike/goreality
+        run: |
+          go get github.com/xtls/reality@latest
+          go mod tidy
+
+      - name: Build Go c-archive
+        working-directory: reality-spike/goreality
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -buildmode=c-archive -o ../rust/libgoreality.a .
+          ls -la ../rust/libgoreality.a ../rust/goreality.h
+
+      - name: Build & run Rust FFI spike
+        working-directory: reality-spike/rust
+        run: cargo run
