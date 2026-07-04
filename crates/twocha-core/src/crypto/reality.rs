@@ -298,6 +298,6 @@ mod tests {
         assert!(parse_short_id("abc").is_none()); // too short
         assert!(parse_short_id(&"a".repeat(SHORT_ID_LEN * 2 + 2)).is_none()); // too long
         assert!(parse_short_id(&"zz".repeat(SHORT_ID_LEN)).is_none()); // non-hex
-        assert_eq!(parse_short_id("00").is_none(), true);
+        assert!(parse_short_id("00").is_none()); // wrong length
     }
 }
