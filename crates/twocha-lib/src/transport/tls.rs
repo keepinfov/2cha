@@ -344,6 +344,10 @@ impl TlsServerListener {
         self.listener.as_raw_fd()
     }
 
+    pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.listener.set_nonblocking(nonblocking)
     }

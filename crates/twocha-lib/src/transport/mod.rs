@@ -19,6 +19,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 
+#[cfg(feature = "reality")]
+pub mod reality;
 pub mod tls;
 pub mod udp_quic;
 

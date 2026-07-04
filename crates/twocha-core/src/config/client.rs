@@ -51,6 +51,8 @@ pub struct ClientConfig {
     #[serde(default)]
     pub tls: TlsSection,
     #[serde(default)]
+    pub reality: super::common::RealitySection,
+    #[serde(default)]
     pub ipv4: Ipv4ClientSection,
     #[serde(default)]
     pub ipv6: Ipv6ClientSection,
@@ -145,7 +147,12 @@ impl ClientConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        super::server::resolve_paths(&mut config.crypto, &mut config.tls, path);
+        super::server::resolve_paths(
+            &mut config.crypto,
+            &mut config.tls,
+            &mut config.reality,
+            path,
+        );
         config.validate()?;
         Ok(config)
     }

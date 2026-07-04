@@ -32,6 +32,8 @@ pub struct ServerConfig {
     pub logging: LoggingSection,
     #[serde(default)]
     pub tls: TlsSection,
+    #[serde(default)]
+    pub reality: super::common::RealitySection,
 }
 
 /// An authorized peer entry
@@ -131,7 +133,7 @@ impl ServerConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        resolve_paths(&mut config.crypto, &mut config.tls, path);
+        resolve_paths(&mut config.crypto, &mut config.tls, &mut config.reality, path);
         config.validate()?;
         Ok(config)
     }
@@ -287,6 +289,7 @@ pub(super) fn resolve_relative_path(path_str: &mut String, config_path: &Path) {
 pub(super) fn resolve_paths(
     crypto: &mut super::common::CryptoSection,
     tls: &mut super::common::TlsSection,
+    reality: &mut super::common::RealitySection,
     config_path: &Path,
 ) {
     resolve_relative_path(&mut crypto.private_key_file, config_path);
@@ -294,6 +297,9 @@ pub(super) fn resolve_paths(
         resolve_relative_path(cert, config_path);
     }
     if let Some(key) = tls.key_file.as_mut() {
+        resolve_relative_path(key, config_path);
+    }
+    if let Some(key) = reality.private_key_file.as_mut() {
         resolve_relative_path(key, config_path);
     }
 }

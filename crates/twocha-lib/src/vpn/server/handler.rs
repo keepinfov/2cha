@@ -10,6 +10,8 @@ use crate::platform::unix::{
 };
 #[cfg(unix)]
 use crate::transport::tls::{TlsServerConn, TlsServerListener};
+#[cfg(feature = "reality")]
+use crate::transport::reality::{RealityServerConn, RealityServerListener};
 
 use crate::vpn::common;
 #[cfg(unix)]
@@ -370,6 +372,41 @@ fn serve_transport(
             control,
             listen_addr,
         ),
+        TransportKind::Reality => serve_reality_dispatch(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        ),
+    }
+}
+
+/// REALITY transport dispatch. Errors cleanly unless compiled with
+/// `--features reality`.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn serve_reality_dispatch(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    #[cfg(feature = "reality")]
+    {
+        serve_reality(cfg, config_path, tun, state, event_loop, control, listen_addr)
+    }
+    #[cfg(not(feature = "reality"))]
+    {
+        let _ = (cfg, config_path, tun, state, event_loop, control, listen_addr);
+        Err(VpnError::Config(
+            "reality transport requires building with --features reality".into(),
+        ))
     }
 }
 
@@ -1019,4 +1056,287 @@ pub fn run(_config_path: &str) -> Result<()> {
 /// Stop the server
 pub fn stop() {
     common::stop();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REALITY transport (Go xtls/reality via FFI). Mirrors the TLS serve loop: a
+// per-connection fd poll loop, sessions pinned via Link::Tls (only one stream
+// transport runs at a time, so the tag is shared). Unauthenticated probes never
+// reach here — the Go core relays them to `dest`. Feature-gated.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(all(unix, feature = "reality"))]
+fn build_reality_listener(
+    cfg: &ServerConfig,
+    listen_addr: SocketAddr,
+) -> Result<RealityServerListener> {
+    let r = &cfg.reality;
+    let key_file = r
+        .private_key_file
+        .as_deref()
+        .ok_or_else(|| VpnError::Config("reality.private_key_file is required".into()))?;
+    let identity = twocha_core::Identity::load(std::path::Path::new(key_file))?;
+    let private = identity.private_bytes();
+    let dest = r
+        .dest
+        .as_deref()
+        .ok_or_else(|| VpnError::Config("reality.dest is required".into()))?;
+    if r.server_names.is_empty() {
+        return Err(VpnError::Config(
+            "reality.server_names must not be empty".into(),
+        ));
+    }
+    RealityServerListener::bind(
+        listen_addr,
+        &private,
+        dest,
+        &r.server_names,
+        &r.short_ids,
+        r.max_time_diff_ms,
+    )
+    .map_err(VpnError::Io)
+}
+
+#[cfg(all(unix, feature = "reality"))]
+#[allow(clippy::too_many_arguments)]
+fn serve_reality(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let listener = build_reality_listener(cfg, listen_addr)?;
+    listener.set_nonblocking(true).map_err(VpnError::Io)?;
+    let listener_fd = listener.pollfd();
+    event_loop.add_fd(listener_fd, POLLIN);
+
+    log::info!("Listening on {} (reality/tcp)", listen_addr);
+
+    let mut conns: HashMap<u64, RealityServerConn> = HashMap::new();
+    let mut fd_to_conn: HashMap<RawFd, u64> = HashMap::new();
+    let mut last_active: HashMap<u64, Instant> = HashMap::new();
+    let mut next_conn_id: u64 = 1;
+
+    let mut last_cleanup = Instant::now();
+    let mut last_cookie_rotate = Instant::now();
+    let mut tun_buffer = vec![0u8; cfg.tun.mtu as usize + 100];
+    let mut seal_scratch = SealScratch::default();
+    let mut seal_out = Vec::new();
+    let mut payload_buf = Vec::new();
+
+    while common::running() {
+        let events = event_loop.poll(100)?;
+        let mut to_drop: Vec<u64> = Vec::new();
+
+        for (fd, revents) in events {
+            if revents & POLLIN == 0 {
+                continue;
+            }
+            if fd == tun.fd() {
+                handle_tun_read_reality(
+                    tun,
+                    &mut tun_buffer,
+                    state,
+                    &mut conns,
+                    &mut seal_scratch,
+                    &mut seal_out,
+                )?;
+            } else if fd == listener_fd {
+                accept_reality(
+                    &listener,
+                    event_loop,
+                    &mut conns,
+                    &mut fd_to_conn,
+                    &mut last_active,
+                    &mut next_conn_id,
+                );
+            } else if let Some(&id) = fd_to_conn.get(&fd) {
+                match handle_reality_conn_read(id, tun, state, &mut conns, &mut payload_buf) {
+                    Ok(true) => {
+                        last_active.insert(id, Instant::now());
+                    }
+                    Ok(false) => {}
+                    Err(_) => to_drop.push(id),
+                }
+            } else if let Some(ctl) = control {
+                if fd == ctl.fd() {
+                    ctl.process(|req| handle_control(req, state, config_path));
+                }
+            }
+        }
+
+        for id in to_drop {
+            log::debug!("reality: closing connection {}", id);
+            drop_reality_conn(
+                id,
+                event_loop,
+                &mut conns,
+                &mut fd_to_conn,
+                &mut last_active,
+                state,
+            );
+        }
+
+        rotate_and_cleanup(state, &mut last_cookie_rotate, &mut last_cleanup);
+
+        let idle = state.idle_timeout;
+        let stale: Vec<u64> = last_active
+            .iter()
+            .filter(|(_, t)| t.elapsed() > idle)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            log::debug!("reality: reaping idle connection {}", id);
+            drop_reality_conn(
+                id,
+                event_loop,
+                &mut conns,
+                &mut fd_to_conn,
+                &mut last_active,
+                state,
+            );
+        }
+
+        let now = Instant::now();
+        for entry in state.sessions.values_mut() {
+            if now >= entry.next_keepalive {
+                if let Link::Tls(id) = entry.link {
+                    if let Some(conn) = conns.get_mut(&id) {
+                        if let Ok(datagram) = entry.session.seal_data(&[]) {
+                            let _ = conn.send(&datagram);
+                        }
+                    }
+                }
+                entry.next_keepalive = now + keepalive_jitter();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "reality"))]
+fn accept_reality(
+    listener: &RealityServerListener,
+    event_loop: &mut EventLoop,
+    conns: &mut HashMap<u64, RealityServerConn>,
+    fd_to_conn: &mut HashMap<RawFd, u64>,
+    last_active: &mut HashMap<u64, Instant>,
+    next_conn_id: &mut u64,
+) {
+    loop {
+        match listener.accept() {
+            Ok(Some(mut conn)) => {
+                if let Err(e) = conn.set_nonblocking(true) {
+                    log::warn!("reality: set_nonblocking failed: {}", e);
+                    continue;
+                }
+                let id = *next_conn_id;
+                *next_conn_id += 1;
+                let cfd = conn.pollfd();
+                event_loop.add_fd(cfd, POLLIN);
+                fd_to_conn.insert(cfd, id);
+                last_active.insert(id, Instant::now());
+                conns.insert(id, conn);
+                log::debug!("reality: accepted connection {} ({} open)", id, conns.len());
+            }
+            // None = nothing waiting, or a probe already relayed to dest by Go.
+            Ok(None) => break,
+            Err(e) => {
+                log::debug!("reality: accept/handshake failed: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "reality"))]
+fn drop_reality_conn(
+    id: u64,
+    event_loop: &mut EventLoop,
+    conns: &mut HashMap<u64, RealityServerConn>,
+    fd_to_conn: &mut HashMap<RawFd, u64>,
+    last_active: &mut HashMap<u64, Instant>,
+    state: &mut ServerState,
+) {
+    if let Some(conn) = conns.remove(&id) {
+        let fd = conn.pollfd();
+        event_loop.remove_fd(fd);
+        fd_to_conn.remove(&fd);
+    }
+    last_active.remove(&id);
+    state.drop_link(Link::Tls(id));
+}
+
+#[cfg(all(unix, feature = "reality"))]
+fn handle_reality_conn_read(
+    id: u64,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    conns: &mut HashMap<u64, RealityServerConn>,
+    payload_buf: &mut Vec<u8>,
+) -> Result<bool> {
+    let mut buf = Vec::new();
+    let mut got_any = false;
+    while let Some(conn) = conns.get_mut(&id) {
+        let peer = conn.peer_addr();
+        let ready = match conn.recv(&mut buf) {
+            Ok(ready) => ready,
+            Err(e) => return Err(VpnError::Io(e)),
+        };
+        if !ready {
+            break;
+        }
+        got_any = true;
+        if let Some(reply) = handle_datagram(tun, state, peer, Link::Tls(id), &buf, payload_buf) {
+            if let Some(conn) = conns.get_mut(&id) {
+                let _ = conn.send(&reply);
+            }
+        }
+    }
+    Ok(got_any)
+}
+
+#[cfg(all(unix, feature = "reality"))]
+fn handle_tun_read_reality(
+    tun: &mut TunDevice,
+    buffer: &mut [u8],
+    state: &mut ServerState,
+    conns: &mut HashMap<u64, RealityServerConn>,
+    scratch: &mut SealScratch,
+    seal_out: &mut Vec<u8>,
+) -> Result<()> {
+    loop {
+        match tun.read(buffer) {
+            Ok(n) if n > 0 => {
+                let packet = &buffer[..n];
+                let Some(dst) = common::inner_dst_ip(packet) else {
+                    continue;
+                };
+                let Some(cid) = state.cid_by_inner_ip.get(&dst).copied() else {
+                    continue;
+                };
+                if let Some(entry) = state.sessions.get_mut(&cid) {
+                    if let Link::Tls(id) = entry.link {
+                        if entry
+                            .session
+                            .seal_data_into(packet, scratch, seal_out)
+                            .is_ok()
+                        {
+                            if let Some(conn) = conns.get_mut(&id) {
+                                let _ = conn.send(seal_out);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => break,
+            Err(e) if is_would_block(&e) => break,
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }

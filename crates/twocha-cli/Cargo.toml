@@ -11,6 +11,10 @@ description = "2cha VPN CLI application"
 name = "2cha"
 path = "src/main.rs"
 
+[features]
+# Build a REALITY-capable `2cha` (links the Go xtls/reality core; needs Go 1.24+).
+reality = ["twocha-lib/reality"]
+
 [dependencies]
 twocha-protocol = { path = "../twocha-protocol" }
 twocha-core = { path = "../twocha-core" }

@@ -10,6 +10,11 @@ repository.workspace = true
 [lib]
 name = "twocha_lib"
 
+[features]
+# REALITY transport: links the Go xtls/reality core (native/goreality) via cgo.
+# Off by default so the standard build stays pure Rust and needs no Go toolchain.
+reality = []
+
 [dependencies]
 twocha-protocol.workspace = true
 twocha-core.workspace = true

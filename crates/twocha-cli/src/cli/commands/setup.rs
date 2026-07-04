@@ -49,7 +49,7 @@ pub fn cmd_setup(yes: bool, config: Option<&str>) -> Result<()> {
         .port();
     let proto = match cfg.server.transport {
         TransportKind::Quic => "udp",
-        TransportKind::Tls => "tcp",
+        TransportKind::Tls | TransportKind::Reality => "tcp",
     };
 
     // ── Phase 2: systemd service ─────────────────────────────────────────
