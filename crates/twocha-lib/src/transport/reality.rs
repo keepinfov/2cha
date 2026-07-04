@@ -371,18 +371,17 @@ mod tests {
         srv.join().unwrap();
     }
 
-    // Keypair from the Go core (gor_x25519_keygen).
+    // One #[test] so the two heavy integration runs stay serial (they share the
+    // Go runtime + real sockets; running in parallel is racy).
     #[test]
-    fn reality_tunnel_go_keys() {
+    fn reality_tunnel_roundtrip() {
+        // Keypair from the Go core (gor_x25519_keygen).
         let (priv_k, pub_k) = keygen().unwrap();
         drive_tunnel(&priv_k, &pub_k);
-    }
 
-    // Keypair from twocha-core's X25519 `Identity` — the exact path `2cha
-    // reality-keygen` and the config use (private_key_file + base64 public_key).
-    // Proves x25519-dalek keys interoperate with the Go REALITY ECDH.
-    #[test]
-    fn reality_tunnel_identity_keys() {
+        // Keypair from twocha-core's X25519 `Identity` — the exact path `2cha
+        // reality-keygen` and the config use (private_key_file + base64 public_key).
+        // Proves x25519-dalek keys interoperate with the Go REALITY ECDH.
         let identity = twocha_core::Identity::generate();
         let priv_k: [u8; 32] = *identity.private_bytes();
         let pub_k = twocha_core::decode_public_key(&identity.public_base64()).unwrap();
