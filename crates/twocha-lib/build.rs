@@ -24,6 +24,11 @@ fn main() {
         .env("CGO_ENABLED", "1")
         .env("GOOS", goos)
         .env("GOARCH", goarch)
+        // Self-resolve deps: with an unpinned go.mod, `-mod=mod` lets `go build`
+        // fetch and record the required modules (utls, reality, x/crypto) instead
+        // of erroring. Keeps the feature buildable anywhere with Go + network,
+        // including the main CI's `clippy --all-features` job.
+        .env("GOFLAGS", "-mod=mod")
         .arg("build")
         .arg("-buildmode=c-archive")
         .arg("-o")
