@@ -26,9 +26,11 @@ pre-build = [
 ]
 
 # glibc targets — used for the REALITY builds (tarballs + container image), since
-# Go's runtime can't ride a fully-static musl binary. The cross-rs gnu images
-# target an older glibc, so the tarballs run on mainstream server distros.
+# Go's runtime can't ride a fully-static musl binary. Pinned to the cross 0.2.5
+# images (Ubuntu 20.04, glibc 2.31) so the binaries run on Debian 11+/Ubuntu
+# 20.04+ instead of demanding the very new glibc of cross's default images.
 [target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
     "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
@@ -36,6 +38,7 @@ pre-build = [
 ]
 
 [target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
     "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
