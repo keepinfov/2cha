@@ -188,9 +188,12 @@ jobs:
     if: github.event_name == 'release'
 
     steps:
-      - name: Download all artifacts
+      - name: Download release tarballs
         uses: actions/download-artifact@v4
         with:
+          # Only the tarball artifacts — skip the raw docker binaries and the
+          # buildx `.dockerbuild` metadata artifact (which flakes on download).
+          pattern: '2cha-*-linux-*'
           path: artifacts
 
       - name: Display structure of downloaded files
