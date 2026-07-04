@@ -306,29 +306,23 @@ impl RealityServerListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::tls::TlsServerListener;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    // Drives a real REALITY tunnel through the FFI carrier: a rustls server as
+    extern "C" {
+        fn gor_test_start_tls_dest() -> i32;
+    }
+
+    // Drives a real REALITY tunnel through the FFI carrier: a Go TLS server as
     // Dest, the Go server (RealityServerListener) and the ported Go client
     // (RealityClientTransport) authenticate, and a framed datagram crosses.
     #[test]
     fn reality_tunnel_client_to_server() {
-        // Dest: throwaway rustls TLS server; accept and hold connections open.
-        let dest = TlsServerListener::bind_self_signed("127.0.0.1:0", "example.com").unwrap();
-        let dest_addr = dest.local_addr().unwrap();
-        thread::spawn(move || {
-            let mut held = Vec::new();
-            loop {
-                match dest.accept() {
-                    Ok(Some(c)) => held.push(c),
-                    Ok(None) => {}
-                    Err(_) => break,
-                }
-            }
-        });
+        // Dest: throwaway Go TLS server (accepts the mirrored uTLS ClientHello).
+        let dest_port = unsafe { gor_test_start_tls_dest() };
+        assert!(dest_port > 0, "failed to start test TLS dest");
+        let dest_addr = format!("127.0.0.1:{dest_port}");
 
         let (priv_k, pub_k) = keygen().unwrap();
         let short_hex = "0123456789abcdef";
@@ -337,7 +331,7 @@ mod tests {
         let server = RealityServerListener::bind(
             "127.0.0.1:0",
             &priv_k,
-            &dest_addr.to_string(),
+            &dest_addr,
             &["example.com".to_string()],
             &[short_hex.to_string()],
             0,
