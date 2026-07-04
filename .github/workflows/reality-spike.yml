@@ -27,6 +27,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -43,7 +44,7 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           go build -buildmode=c-archive -o ../rust/libgoreality.a .
-          ls -la ../rust/libgoreality.a ../rust/goreality.h
+          ls -la ../rust/libgoreality.a ../rust/libgoreality.h
 
       - name: Build & run Rust FFI spike
         working-directory: reality-spike/rust
