@@ -133,7 +133,12 @@ impl ServerConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        resolve_paths(&mut config.crypto, &mut config.tls, &mut config.reality, path);
+        resolve_paths(
+            &mut config.crypto,
+            &mut config.tls,
+            &mut config.reality,
+            path,
+        );
         config.validate()?;
         Ok(config)
     }

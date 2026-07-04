@@ -8,10 +8,10 @@
 use crate::platform::unix::{
     is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
-#[cfg(unix)]
-use crate::transport::tls::{TlsServerConn, TlsServerListener};
 #[cfg(feature = "reality")]
 use crate::transport::reality::{RealityServerConn, RealityServerListener};
+#[cfg(unix)]
+use crate::transport::tls::{TlsServerConn, TlsServerListener};
 
 use crate::vpn::common;
 #[cfg(unix)]
@@ -399,11 +399,27 @@ fn serve_reality_dispatch(
 ) -> Result<()> {
     #[cfg(feature = "reality")]
     {
-        serve_reality(cfg, config_path, tun, state, event_loop, control, listen_addr)
+        serve_reality(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        )
     }
     #[cfg(not(feature = "reality"))]
     {
-        let _ = (cfg, config_path, tun, state, event_loop, control, listen_addr);
+        let _ = (
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        );
         Err(VpnError::Config(
             "reality transport requires building with --features reality".into(),
         ))

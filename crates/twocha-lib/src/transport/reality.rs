@@ -62,7 +62,11 @@ pub fn keygen() -> io::Result<([u8; 32], [u8; 32])> {
 }
 
 fn take_err(buf: &[c_char]) -> String {
-    let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    let bytes: Vec<u8> = buf
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -285,8 +289,9 @@ impl RealityServerListener {
         sock.set_nodelay(true)?;
         let fd = sock.into_raw_fd(); // ownership passes to Go
         let (mut out_fd, mut err) = (0i32, [0 as c_char; 256]);
-        let handle =
-            unsafe { gor_server_handshake(self.server_handle, fd, &mut out_fd, err.as_mut_ptr(), 256) };
+        let handle = unsafe {
+            gor_server_handshake(self.server_handle, fd, &mut out_fd, err.as_mut_ptr(), 256)
+        };
         if handle == GOR_FALLBACK {
             return Ok(None); // probe: Go handled it (relayed to dest)
         }
@@ -351,12 +356,19 @@ mod tests {
             tx.send(out).unwrap();
         });
 
-        let mut client =
-            RealityClientTransport::connect(server_addr, "example.com", &pub_k, &short_id, "chrome")
-                .unwrap();
+        let mut client = RealityClientTransport::connect(
+            server_addr,
+            "example.com",
+            &pub_k,
+            &short_id,
+            "chrome",
+        )
+        .unwrap();
         client.send(b"reality-carrier-payload").unwrap();
 
-        let got = rx.recv_timeout(Duration::from_secs(20)).expect("server recv timed out");
+        let got = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("server recv timed out");
         assert_eq!(got, b"reality-carrier-payload");
         srv.join().unwrap();
     }

@@ -67,7 +67,10 @@ pub fn cmd_reality_keygen(output: Option<&str>) -> Result<()> {
     let output = match output {
         Some(path) => path.to_string(),
         None => super::prompt_if_tty("output path for the REALITY private key", || {
-            prompt_path("Where to save the REALITY private key", Some(default_reality_key_path()))
+            prompt_path(
+                "Where to save the REALITY private key",
+                Some(default_reality_key_path()),
+            )
         })?,
     };
     let identity = Identity::generate();

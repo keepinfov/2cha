@@ -13,8 +13,7 @@ pub use client::{
 pub use common::{
     decode_config_public_key, prefix_to_netmask_v4, prefix_to_netmask_v6, CipherSuite, ConfigError,
     CryptoSection, LoggingSection, PerformanceSection, RealitySection, TimeoutsSection, TlsSection,
-    TransportKind,
-    TunSection,
+    TransportKind, TunSection,
 };
 pub use edit::{get_value, set_value};
 pub use server::{
