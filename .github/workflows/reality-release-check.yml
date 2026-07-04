@@ -1,0 +1,44 @@
+name: reality release check
+
+# Fast iteration on the cross + Go/cgo + musl-static reality build before wiring it
+# into the full release. Starts with x86_64; extend the matrix once green.
+
+on:
+  push:
+    branches: [feat/reality-transport]
+    paths:
+      - 'Cross.toml'
+      - 'crates/twocha-lib/build.rs'
+      - 'native/goreality/**'
+      - '.github/workflows/reality-release-check.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-reality:
+    name: cross ${{ matrix.target }} --features reality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: cross build (reality)
+        run: cross build --release --target ${{ matrix.target }} -p twocha-cli --features reality
+      - name: Inspect binary
+        run: |
+          f=target/${{ matrix.target }}/release/2cha
+          file "$f"
+          ls -lh "$f"

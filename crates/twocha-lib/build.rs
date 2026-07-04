@@ -31,11 +31,18 @@ fn main() {
         // the main CI's `clippy --all-features` job.
         .env("GOFLAGS", "-mod=mod")
         .env("GOTOOLCHAIN", "auto")
+        // Keep Go's caches inside OUT_DIR so the build works in cross/CI
+        // containers where $HOME may be unset or read-only.
+        .env("GOCACHE", out_dir.join("go-cache"))
+        .env("GOPATH", out_dir.join("go-path"))
         .arg("build")
         .arg("-buildmode=c-archive")
         .arg("-o")
         .arg(&archive)
         .arg(".");
+    if goarch == "arm" {
+        cmd.env("GOARM", "7"); // armv7 (musleabihf)
+    }
     // cargo-ndk / cross toolchains export a target CC; forward it to cgo.
     if let Ok(cc) = env::var(format!("CC_{}", target.replace('-', "_"))) {
         cmd.env("CC", cc);
@@ -48,8 +55,11 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=goreality");
-    // Go runtime link needs (Linux; on Android these live in Bionic libc).
-    if goos == "linux" {
+    // The Go runtime pulls in pthread/dl/resolv. glibc splits these into their
+    // own libs; musl folds them into libc (and its static stubs would clash with
+    // crt-static), and Android's Bionic libc provides them — so only glibc needs
+    // the explicit dynamic links.
+    if goos == "linux" && target.contains("gnu") {
         println!("cargo:rustc-link-lib=dylib=pthread");
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=resolv");
