@@ -21,16 +21,21 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
+	gotls "crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"reflect"
@@ -319,6 +324,54 @@ func gor_echo_fd() C.int {
 		}
 	}()
 	return C.int(cEnd)
+}
+
+// ── test support: a hermetic local TLS server to act as Dest ─────────────────
+
+func genSelfSigned(host string) (gotls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return gotls.Certificate{}, err
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: host},
+		DNSNames:     []string{host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		return gotls.Certificate{}, err
+	}
+	return gotls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
+}
+
+// gor_test_start_tls_dest starts a throwaway TLS 1.3 server on localhost for tests
+// to point Dest at, and returns its port (or <0). Test-only.
+//
+//export gor_test_start_tls_dest
+func gor_test_start_tls_dest() C.int {
+	cert, err := genSelfSigned("example.com")
+	if err != nil {
+		return -1
+	}
+	ln, err := gotls.Listen("tcp", "127.0.0.1:0", &gotls.Config{Certificates: []gotls.Certificate{cert}})
+	if err != nil {
+		return -1
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { io.Copy(io.Discard, c); c.Close() }(c)
+		}
+	}()
+	return C.int(ln.Addr().(*net.TCPAddr).Port)
 }
 
 // ── ported REALITY client (from XTLS/Xray-core UClient, MPL-2.0) ─────────────
