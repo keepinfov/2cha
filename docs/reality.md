@@ -58,6 +58,68 @@ minimal TLS 1.3 client path — a substantial, correctness-critical effort. This
 matches `transport/tls.rs`'s own note that REALITY is "deferred pending a mature
 uTLS-equivalent in Rust."
 
+## Integration decision: reuse Go `xtls/reality` via c-archive (chosen)
+
+Rather than fork or hand-roll a Rust TLS 1.3 stack, we reuse the maintained Go
+implementation (`github.com/xtls/reality` + uTLS) and link it into 2cha. This
+inherits the correct, up-to-date handshake surgery, browser fingerprints, and PQ
+key exchange, and — unlike any pure-Rust path — gives **full certificate borrowing
+(Stage B) for free**. REALITY is in scope for mobile, so integration is in-process.
+
+**Architecture — one Go core, thin C ABI, socketpair seam:**
+
+- A single Go module `goreality` wraps `xtls/reality`, exposing a small, stable,
+  portable C ABI (cgo `//export`):
+  - `gor_client_connect(cfg) -> (handle, fd, err)` — dials, runs the REALITY
+    *client* handshake, returns a **socketpair fd** carrying the decrypted app-data.
+  - `gor_server_new(cfg) -> handle`, `gor_server_accept(handle) -> (conn, fd, peer)`
+    — accepts + runs the REALITY *server* handshake, with the probe→`dest` fallback
+    handled **inside Go** (that is REALITY's job). Returns a decrypted-stream fd.
+  - `gor_close(handle)`.
+  - `gor_set_protect_callback(fn)` — see mobile note below.
+- **Seam = socketpair.** Go owns the whole TLS+REALITY connection and pumps
+  decrypted plaintext over a socketpair; Rust reads/writes the fd inside its existing
+  poll loop and reassembles v4 datagrams with `FrameBuf`, exactly like the `tls`
+  carrier. Go is confined to the obfuscation envelope; **Noise_IK inside stays the
+  Rust-side trust anchor** (defence in depth even though REALITY now secures the
+  outer TLS).
+
+**Mobile (Android, in scope now):**
+
+- `go build -buildmode=c-archive` → `libgoreality.a` + header, built **per ABI**
+  (arm64-v8a, armeabi-v7a, x86_64, x86) with the NDK clang as `CC`, alongside the
+  existing cargo-ndk Rust build; linked into the `twocha-mobile` cdylib.
+- **Socket-protect callback is mandatory.** The outbound TCP now originates in Go, so
+  each dial fd must be passed to the Android `VpnService.protect()` (via the
+  `gor_set_protect_callback` hook) *before connect*, or the tunnel's own transport
+  would route back into the tunnel. This is the trickiest mobile piece; sing-box/v2ray
+  solve it exactly this way.
+- Go runtime (GC/scheduler/signal handlers) coexists with Rust and Android ART —
+  known-solved but validate early (cgo signal forwarding, `GODEBUG`).
+
+**iOS/Swift (later):** the same c-archive builds for `arm64` iOS; the same C ABI and
+protect callback apply (protect via `NEPacketTunnelProvider`). Designing the ABI
+portable now makes the iOS path largely free.
+
+**Server/desktop:** default to the same in-process c-archive. The **sidecar** (same
+Go core wrapped in a `main()` that bridges over a unix socket instead of a socketpair)
+remains the escape hatch if a fully-static-musl server binary must stay pure Rust.
+
+**Implications (honest):**
+
+- This **supersedes** the pure-Rust `crypto/reality.rs` auth primitive on the data
+  path — Go performs the real REALITY handshake and auth. The Rust primitive is kept
+  only for `reality-keygen`, documentation, and as a pure-Rust fallback; it is not
+  load-bearing under this plan. (REALITY uses X25519 keys like ours, so
+  `reality-keygen` output can feed the Go config.)
+- `xtls/reality` / Project X is **MPL-2.0**: link-compatible with 2cha's MIT, but the
+  MPL'd sources (and any modifications) must remain available and MPL-licensed.
+- The Go runtime adds a few MB to every REALITY-enabled artifact; keep REALITY an
+  opt-in build so the default pure-Rust static-musl binary is unaffected.
+
+The Stage A/B split below was the *pure-Rust* framing; with Go, both land together.
+It is retained for context and for the fallback path.
+
 ## Stage A — auth-in-ClientHello + probe redirection (target deliverable)
 
 Authenticated clients get the tunnel; every non-authenticated connection is
@@ -123,9 +185,19 @@ branch of `accept` is the single swap-in point.
 ## Status
 
 - [x] A0 spike (this document's feasibility finding)
-- [x] `crypto/reality.rs` auth primitive + short-id helpers (unit-tested)
+- [x] `crypto/reality.rs` auth primitive + short-id helpers (unit-tested; now a
+      fallback/keygen aid — superseded on the data path by the Go decision)
 - [x] `2cha reality-keygen` CLI
-- [ ] Config surface + transport module + `serve_reality`
-- [ ] Client ClientHello crafting (blocked on the A0 dependency choice)
-- [ ] Wizard, netns e2e, CI
-- [ ] Stage B
+- [x] Integration decision: Go `xtls/reality` c-archive, mobile in scope
+
+Chosen path (Go c-archive):
+- [ ] `goreality` Go module wrapping `xtls/reality`, C ABI (`gor_client_connect`,
+      `gor_server_new`/`accept`, `gor_close`, `gor_set_protect_callback`)
+- [ ] Rust FFI bindings + build.rs linking `libgoreality.a`; socketpair carrier in
+      `transport/` reusing `FrameBuf`; `TransportKind::Reality` + config surface
+- [ ] Server loop wiring (probe→`dest` fallback lives in Go)
+- [ ] Mobile: per-ABI Go archive build in the cargo-ndk pipeline + `VpnService.protect`
+      callback; uniffi plumbing
+- [ ] Wizard, netns e2e (`openssl s_client` probe check), CI
+- [ ] (Optional) sidecar wrapper for a pure-static-musl server binary
+- [ ] (Later) iOS/Swift c-archive using the same C ABI
