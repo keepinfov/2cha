@@ -21,6 +21,11 @@ jobs:
     name: cross ${{ matrix.target }} --features reality
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The Go runtime embedded via cgo crashes at init inside a static-PIE musl
+    # binary (x86_64-musl defaults to static-pie). Force a plain non-PIE static
+    # executable so it starts.
+    env:
+      RUSTFLAGS: "-C relocation-model=static"
     strategy:
       fail-fast: false
       matrix:
@@ -42,3 +47,10 @@ jobs:
           f=target/${{ matrix.target }}/release/2cha
           file "$f"
           ls -lh "$f"
+      - name: Smoke test (x86_64 runs natively; catches Go-init segfault)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          bin=target/${{ matrix.target }}/release/2cha
+          "$bin" --version
+          "$bin" reality-keygen -o /tmp/reality.key
+          echo "OK: binary starts and reality-keygen works"
