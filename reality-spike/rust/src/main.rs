@@ -73,7 +73,11 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    // Server side: accept, run the REALITY server handshake, echo one message.
+    const N: usize = 30;
+    let msg = b"tunnel-payload-through-realityX"; // 31; we send/recv N=30
+    let payload = &msg[..N];
+
+    // Server side: accept, run the REALITY server handshake, read N bytes, return them.
     let server = thread::spawn(move || {
         let (tcp, _) = listener.accept().unwrap();
         let fd = tcp.into_raw_fd();
@@ -81,13 +85,13 @@ fn main() {
         let ch = unsafe { gor_server_handshake(sh, fd, &mut out, e.as_mut_ptr(), 256) };
         assert!(ch >= 0, "gor_server_handshake rc={ch}: {}", errstr(&e));
         let mut s = unsafe { UnixStream::from_raw_fd(out) };
-        let mut buf = [0u8; 128];
-        let n = s.read(&mut buf).unwrap();
-        s.write_all(&buf[..n]).unwrap();
-        ch
+        let mut buf = [0u8; N];
+        s.read_exact(&mut buf).unwrap();
+        unsafe { gor_close(ch) };
+        buf
     });
 
-    // Client side: connect, run the REALITY client handshake, round-trip a payload.
+    // Client side: connect, run the REALITY client handshake, write the payload.
     let name = CString::new("example.com").unwrap();
     let fp = CString::new("chrome").unwrap();
     let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -100,16 +104,10 @@ fn main() {
     assert!(ch >= 0, "gor_client_handshake rc={ch}: {}", errstr(&e));
 
     let mut s = unsafe { UnixStream::from_raw_fd(out) };
-    let msg = b"tunnel-payload-through-reality";
-    s.write_all(msg).unwrap();
-    let mut buf = vec![0u8; msg.len()];
-    s.read_exact(&mut buf).unwrap();
-    assert_eq!(&buf[..], &msg[..], "tunnel round-trip mismatch");
+    s.write_all(payload).unwrap();
 
-    let server_ch = server.join().unwrap();
-    unsafe {
-        gor_close(ch);
-        gor_close(server_ch);
-    }
-    println!("goreality handshake OK: authenticated REALITY tunnel round-trip works");
+    let got = server.join().unwrap(); // blocks until server has read N bytes
+    assert_eq!(&got[..], payload, "tunnel payload mismatch");
+    unsafe { gor_close(ch) };
+    println!("goreality handshake OK: authenticated REALITY tunnel carries data (client->server)");
 }
