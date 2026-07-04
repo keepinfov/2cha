@@ -211,6 +211,26 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 | MPL-2.0 obligations | High (understood) | Vendor with notice; keep sources available |
 | API drift in xtls/reality | High | Pin a commit; wrapper isolates our surface to 4 functions |
 
+## Implementation status (CI-proven)
+
+The `goreality` core is implemented in `reality-spike/goreality/` and proven green in CI
+(`.github/workflows/reality-spike.yml`), in layers:
+
+1. **Build+link** — `xtls/reality` (go 1.24 + uTLS + circl) → 24–27 MB c-archive → linked
+   into a Rust binary.
+2. **ABI + FFI mechanics** — `gor_x25519_keygen` works; a Go socketpair fd round-trips
+   bytes across the boundary.
+3. **Real authenticated handshake** — `gor_server_new`/`gor_server_handshake`
+   (`reality.Server`, `DetectPostHandshakeRecordsLens` called since we don't use REALITY's
+   listener, `DialContext` set for `Dest`) + `gor_client_handshake` (ported Xray `UClient`
+   uTLS auth) complete a real client↔server handshake — negotiating **X25519MLKEM768**
+   (post-quantum) — and application data flows through the socketpair bridge
+   (`goreality handshake OK: ... tunnel carries data`).
+
+Remaining before production: promote `reality-spike/goreality` → `native/goreality`; wire
+`transport/reality.rs` + `serve_reality` + config into `twocha-lib` (feature-gated); probe
+(fallback-to-`Dest`) test; per-ABI mobile build; strip test-only `gor_test_start_tls_dest`.
+
 ## Greenlight criterion — MET
 
 The §9.2 build+FFI spike passed in CI on linux (`reality-spike/` +

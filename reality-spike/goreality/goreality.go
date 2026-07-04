@@ -180,7 +180,6 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 	shortIdsCSV *C.char, maxTimeDiffMs C.int64_t, err *C.char, errlen C.int) C.int64_t {
 
 	cfg := &reality.Config{
-		Show:        true, // TEMP: print server-side auth decision for the spike
 		Type:        "tcp",
 		Dest:        C.GoString(dest),
 		ServerNames: map[string]bool{},
