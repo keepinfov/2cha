@@ -8,12 +8,14 @@ real `github.com/xtls/reality` API (read from source), not from memory.
 - **High confidence (paper-complete):** the architecture, the exact Go API we call,
   the C ABI, the socketpair seam, config mapping, and how it slots into 2cha's
   existing `serve_tls`/transport structure. These are pinned to real source below.
-- **Confirm with one spike (build mechanics):** `go build -buildmode=c-archive` with
-  go 1.24 + cgo, cross-compiled for the 4 Android ABIs (NDK clang as `CC`) and for
-  linux, then linked into a Rust binary, with a socketpair fd crossing the boundary.
-  This cannot be validated in the current sandbox (Termux `go` is broken: GOROOT
-  unset/trimmed) — it must run in CI or a real Go env. **Greenlight implementation
-  once this spike links and round-trips bytes.**
+- **Build mechanics — PROVEN in CI (linux/amd64).** `.github/workflows/reality-spike.yml`
+  builds `reality-spike/` on GitHub's runners: `xtls/reality` (go 1.24 + utls + circl)
+  links into a 15 MB `-buildmode=c-archive`, that archive links into a Rust binary, and
+  a Go-created socketpair fd round-trips a byte stream Rust→Go→Rust (log:
+  `REALITY FFI spike OK`). This retires the one medium-risk unknown. **Greenlight met.**
+  Still to confirm during implementation: the same build cross-compiled for the 4
+  Android ABIs (NDK clang as `CC`) — mechanically the same c-archive path, validated by
+  the mobile smoke test (§9.5).
 
 ## 1. Grounding: the real xtls/reality API
 
@@ -209,9 +211,9 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 | MPL-2.0 obligations | High (understood) | Vendor with notice; keep sources available |
 | API drift in xtls/reality | High | Pin a commit; wrapper isolates our surface to 4 functions |
 
-## Greenlight criterion
+## Greenlight criterion — MET
 
-Implement once the §9.2 build+FFI spike **links `libgoreality.a` into a Rust binary
-and round-trips bytes over a socketpair** on at least one target (android-arm64 or
-linux). Everything above is paper-complete; that spike retires the only medium-risk
-unknown.
+The §9.2 build+FFI spike passed in CI on linux (`reality-spike/` +
+`.github/workflows/reality-spike.yml`): `libgoreality.a` (with `xtls/reality`) links
+into a Rust binary and round-trips bytes over a socketpair. The design is paper-complete
+and the only medium-risk unknown is retired — implementation is greenlit.
