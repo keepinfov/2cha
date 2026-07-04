@@ -205,9 +205,22 @@ Chosen path (Go c-archive):
 - [ ] netns e2e (`openssl s_client` probe check)
 - [ ] (Later) iOS/Swift c-archive using the same C ABI
 
+## Shipping
+
+REALITY embeds a Go runtime (cgo), which **cannot run in a fully-static musl
+binary** (it segfaults at init). So the standard `2cha-*-linux-*.tar.gz` release
+binaries stay static-musl and **Go-free**, and REALITY ships as **glibc**:
+
+- `2cha-reality-linux-{x86_64,aarch64}.tar.gz` — glibc dynamic, runs natively on
+  mainstream server distros (Debian, Ubuntu, RHEL, …).
+- `ghcr.io/keepinfov/2cha:<tag>` — multi-arch container image; runs anywhere with
+  a container runtime, including NixOS and Alpine where a raw glibc binary would
+  not (no `/lib64` loader). Needs `--cap-add NET_ADMIN --device /dev/net/tun`.
+
 ## Usage (manual)
 
-Build with the feature (needs Go 1.24+, a C compiler; the default build is Go-free):
+Build with the feature (needs Go 1.24+, a C compiler; **glibc target** — the
+default build is Go-free):
 
     cargo build -p twocha-cli --features reality --release
 

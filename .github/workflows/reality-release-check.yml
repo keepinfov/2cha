@@ -47,3 +47,12 @@ jobs:
             "$bin" reality-keygen /tmp/reality.key
             echo "OK: glibc reality binary starts and reality-keygen works"
           fi
+
+      - name: Container image smoke (amd64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          mkdir -p dist/amd64
+          cp target/${{ matrix.target }}/release/2cha dist/amd64/2cha
+          docker build --build-arg TARGETARCH=amd64 -t 2cha-reality-test .
+          docker run --rm 2cha-reality-test --version
+          echo "OK: container image runs the reality binary"
