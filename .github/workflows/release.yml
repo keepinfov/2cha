@@ -61,7 +61,9 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build universal binary
-        run: cross build --release --target ${{ matrix.target }}
+        # `-p twocha-cli --features reality` links the Go xtls/reality c-archive
+        # into the `2cha` binary (Cross.toml provides Go in the container).
+        run: cross build --release --target ${{ matrix.target }} -p twocha-cli --features reality
 
       - name: Create release artifacts
         run: |
