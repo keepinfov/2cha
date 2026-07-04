@@ -16,7 +16,7 @@ pub use config::{
     cmd_config_edit, cmd_config_get, cmd_config_set, cmd_config_show, cmd_config_validate,
 };
 pub use init::cmd_init;
-pub use keys::{cmd_genkey, cmd_pubkey};
+pub use keys::{cmd_genkey, cmd_pubkey, cmd_reality_keygen};
 pub use peer::{cmd_peer_add, cmd_peer_list, cmd_peer_remove};
 pub use server::cmd_server;
 pub use setup::cmd_setup;

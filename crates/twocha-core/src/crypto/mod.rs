@@ -9,6 +9,7 @@
 pub mod identity;
 pub mod mac;
 pub mod noise;
+pub mod reality;
 
 pub use identity::{decode_public_key, encode_public_key, Identity};
 pub use noise::{Handshake, SessionCrypto};
