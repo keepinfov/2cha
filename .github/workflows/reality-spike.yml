@@ -48,4 +48,6 @@ jobs:
 
       - name: Build & run Rust FFI spike
         working-directory: reality-spike/rust
-        run: cargo run
+        run: |
+          cargo build
+          timeout 90 ./target/debug/reality-ffi-spike

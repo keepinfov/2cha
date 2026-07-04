@@ -180,6 +180,7 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 	shortIdsCSV *C.char, maxTimeDiffMs C.int64_t, err *C.char, errlen C.int) C.int64_t {
 
 	cfg := &reality.Config{
+		Show:        true, // TEMP: print server-side auth decision for the spike
 		Type:        "tcp",
 		Dest:        C.GoString(dest),
 		ServerNames: map[string]bool{},
@@ -211,6 +212,8 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 		copy(id[:], raw)
 		cfg.ShortIds[id] = true
 	}
+	// Required when not using REALITY's own listener (per reality.Server docs).
+	reality.DetectPostHandshakeRecordsLens(cfg)
 	return C.int64_t(store(cfg))
 }
 
