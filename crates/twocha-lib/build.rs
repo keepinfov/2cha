@@ -14,10 +14,20 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let go_dir = manifest.join("../../native/goreality");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let archive = out_dir.join("libgoreality.a");
 
     let target = env::var("TARGET").unwrap();
     let (goos, goarch) = map_target(&target);
+
+    // Go can't emit a c-archive for android (`-buildmode=c-archive not supported
+    // on android/*`), so on Android we build a c-shared `.so` and link it
+    // dynamically; everywhere else we keep the self-contained static archive.
+    let is_android = goos == "android";
+    let (buildmode, lib_file) = if is_android {
+        ("-buildmode=c-shared", "libgoreality.so")
+    } else {
+        ("-buildmode=c-archive", "libgoreality.a")
+    };
+    let lib_path = out_dir.join(lib_file);
 
     let mut cmd = Command::new("go");
     cmd.current_dir(&go_dir)
@@ -36,9 +46,9 @@ fn main() {
         .env("GOCACHE", out_dir.join("go-cache"))
         .env("GOPATH", out_dir.join("go-path"))
         .arg("build")
-        .arg("-buildmode=c-archive")
+        .arg(buildmode)
         .arg("-o")
-        .arg(&archive)
+        .arg(&lib_path)
         .arg(".");
     if goarch == "arm" {
         cmd.env("GOARM", "7"); // armv7 (musleabihf)
@@ -54,15 +64,24 @@ fn main() {
     assert!(status.success(), "go build of native/goreality failed");
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=goreality");
-    // The Go runtime pulls in pthread/dl/resolv. glibc splits these into their
-    // own libs; musl folds them into libc (and its static stubs would clash with
-    // crt-static), and Android's Bionic libc provides them — so only glibc needs
-    // the explicit dynamic links.
-    if goos == "linux" && target.contains("gnu") {
-        println!("cargo:rustc-link-lib=dylib=pthread");
-        println!("cargo:rustc-link-lib=dylib=dl");
-        println!("cargo:rustc-link-lib=dylib=resolv");
+    if is_android {
+        // Dynamic link against libgoreality.so; it must ship in the same jniLibs
+        // ABI dir as the app's own .so. Copy it up to target/<triple>/release/ so
+        // the gradle `copyGorealitySo` step can pick it up per ABI.
+        println!("cargo:rustc-link-lib=dylib=goreality");
+        if let Some(triple_release) = out_dir.ancestors().nth(3) {
+            let _ = std::fs::copy(&lib_path, triple_release.join(lib_file));
+        }
+    } else {
+        println!("cargo:rustc-link-lib=static=goreality");
+        // The Go runtime pulls in pthread/dl/resolv. glibc splits these into
+        // their own libs; musl folds them into libc (and its static stubs would
+        // clash with crt-static) — so only glibc needs the explicit links.
+        if goos == "linux" && target.contains("gnu") {
+            println!("cargo:rustc-link-lib=dylib=pthread");
+            println!("cargo:rustc-link-lib=dylib=dl");
+            println!("cargo:rustc-link-lib=dylib=resolv");
+        }
     }
     println!("cargo:rerun-if-changed={}/goreality.go", go_dir.display());
     println!("cargo:rerun-if-changed={}/go.mod", go_dir.display());
