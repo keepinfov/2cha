@@ -185,6 +185,10 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 		ServerNames: map[string]bool{},
 		ShortIds:    map[[8]byte]bool{},
 		MaxTimeDiff: time.Duration(maxTimeDiffMs) * time.Millisecond,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
 	}
 	cfg.PrivateKey = append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(privateKey)), 32)...)
 
