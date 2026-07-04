@@ -8,11 +8,11 @@ real `github.com/xtls/reality` API (read from source), not from memory.
 - **High confidence (paper-complete):** the architecture, the exact Go API we call,
   the C ABI, the socketpair seam, config mapping, and how it slots into 2cha's
   existing `serve_tls`/transport structure. These are pinned to real source below.
-- **Build mechanics — PROVEN in CI (linux/amd64).** `.github/workflows/reality-spike.yml`
-  builds `reality-spike/` on GitHub's runners: `xtls/reality` (go 1.24 + utls + circl)
-  links into a 15 MB `-buildmode=c-archive`, that archive links into a Rust binary, and
-  a Go-created socketpair fd round-trips a byte stream Rust→Go→Rust (log:
-  `REALITY FFI spike OK`). This retires the one medium-risk unknown. **Greenlight met.**
+- **Build mechanics — PROVEN in CI (linux/amd64).** `.github/workflows/reality-lib.yml`
+  builds `twocha-lib --features reality` on GitHub's runners: `xtls/reality` (go 1.24 +
+  utls + circl) links into a `-buildmode=c-archive`, that archive links into the test
+  binary, and an end-to-end REALITY tunnel carries a framed datagram. This retires the one
+  medium-risk unknown. **Greenlight met.**
   Still to confirm during implementation: the same build cross-compiled for the 4
   Android ABIs (NDK clang as `CC`) — mechanically the same c-archive path, validated by
   the mobile smoke test (§9.5).
@@ -213,27 +213,23 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 
 ## Implementation status (CI-proven)
 
-The `goreality` core is implemented in `reality-spike/goreality/` and proven green in CI
-(`.github/workflows/reality-spike.yml`), in layers:
+The `goreality` core lives in `native/goreality/` and is wired into `twocha-lib` behind the
+`reality` cargo feature. `.github/workflows/reality-lib.yml` builds `--features reality` and
+runs an end-to-end tunnel test on every push. What is proven:
 
-1. **Build+link** — `xtls/reality` (go 1.24 + uTLS + circl) → 24–27 MB c-archive → linked
-   into a Rust binary.
-2. **ABI + FFI mechanics** — `gor_x25519_keygen` works; a Go socketpair fd round-trips
-   bytes across the boundary.
-3. **Real authenticated handshake** — `gor_server_new`/`gor_server_handshake`
+1. **Build+link** — `xtls/reality` (go 1.24 + uTLS + circl) → c-archive → linked into the
+   `twocha-lib` test binary via `crates/twocha-lib/build.rs` (TARGET→GOOS/GOARCH).
+2. **ABI + FFI mechanics** — `gor_x25519_keygen`; a Go socketpair fd carries the decrypted
+   stream, framed by `RealityCarrier` (`FrameBuf`).
+3. **Real authenticated handshake + data** — `gor_server_new`/`gor_server_handshake`
    (`reality.Server`, `DetectPostHandshakeRecordsLens` called since we don't use REALITY's
    listener, `DialContext` set for `Dest`) + `gor_client_handshake` (ported Xray `UClient`
-   uTLS auth) complete a real client↔server handshake — negotiating **X25519MLKEM768**
-   (post-quantum) — and application data flows through the socketpair bridge
-   (`goreality handshake OK: ... tunnel carries data`).
+   uTLS auth) complete a real client↔server handshake — negotiating **X25519MLKEM768** — and a
+   framed datagram crosses the socketpair. Run with both Go-generated keys and x25519
+   `Identity` keys, proving `2cha reality-keygen` output interoperates with the Go ECDH.
+4. **Server loop + config** — `serve_reality` mirrors `serve_tls`; `TransportKind::Reality` +
+   validated `[reality]` config surface on server and client.
 
-Remaining before production: promote `reality-spike/goreality` → `native/goreality`; wire
-`transport/reality.rs` + `serve_reality` + config into `twocha-lib` (feature-gated); probe
-(fallback-to-`Dest`) test; per-ABI mobile build; strip test-only `gor_test_start_tls_dest`.
-
-## Greenlight criterion — MET
-
-The §9.2 build+FFI spike passed in CI on linux (`reality-spike/` +
-`.github/workflows/reality-spike.yml`): `libgoreality.a` (with `xtls/reality`) links
-into a Rust binary and round-trips bytes over a socketpair. The design is paper-complete
-and the only medium-risk unknown is retired — implementation is greenlit.
+Remaining: `2cha init` wizard prompt; per-ABI mobile (cargo-ndk) build + UI; netns e2e probe
+check (`openssl s_client`); the test-only `gor_test_start_tls_dest` can later move behind a
+Go build tag.
