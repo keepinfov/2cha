@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-cli"
-version = "1.8.0-rc2"
+version = "1.8.0-rc3"
 dependencies = [
  "clap",
  "console",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-core"
-version = "1.8.0-rc2"
+version = "1.8.0-rc3"
 dependencies = [
  "base64",
  "blake2",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-lib"
-version = "1.8.0-rc2"
+version = "1.8.0-rc3"
 dependencies = [
  "console",
  "ctrlc",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-mobile"
-version = "1.8.0-rc2"
+version = "1.8.0-rc3"
 dependencies = [
  "android_logger",
  "log",
@@ -1981,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "twocha-protocol"
-version = "1.8.0-rc2"
+version = "1.8.0-rc3"
 
 [[package]]
 name = "typenum"
