@@ -201,7 +201,7 @@ Chosen path (Go c-archive):
 - [x] CI: `reality-lib.yml` builds `--features reality` and runs an end-to-end tunnel
       test (Go keys **and** x25519 `Identity` keys, proving keygen interop)
 - [ ] Mobile: per-ABI Go archive build in the cargo-ndk pipeline; uniffi plumbing + UI
-- [ ] Wizard `2cha init` prompt for REALITY
+- [x] Wizard `2cha init` / `2cha setup` prompt for REALITY (feature-gated)
 - [ ] netns e2e (`openssl s_client` probe check)
 - [ ] (Later) iOS/Swift c-archive using the same C ABI
 
@@ -216,6 +216,26 @@ binaries stay static-musl and **Go-free**, and REALITY ships as **glibc**:
 - `ghcr.io/keepinfov/2cha:<tag>` — multi-arch container image; runs anywhere with
   a container runtime, including NixOS and Alpine where a raw glibc binary would
   not (no `/lib64` loader). Needs `--cap-add NET_ADMIN --device /dev/net/tun`.
+
+## Usage (wizard)
+
+The turn-key setup wizard offers REALITY as a Transport choice **only when the
+binary was built with the `reality` feature** — the default static universal
+binary is Go-free, so it lists just `quic`/`tls`. Install a REALITY-capable build
+first, then run the wizard:
+
+    # glibc tarball (x86_64/aarch64), then the wizard
+    TWOCHA_REALITY=1 sh -c "$(curl -fsSL https://raw.githubusercontent.com/keepinfov/2cha/master/scripts/install.sh)"
+
+    # or the container image
+    docker run --rm -it --cap-add NET_ADMIN --device /dev/net/tun \
+      -v /etc/2cha:/etc/2cha ghcr.io/keepinfov/2cha:latest setup
+
+Picking **reality** in the Transport prompt generates the REALITY keypair + short
+id, asks for the site to borrow (SNI) and the probe-fallback `dest`, and writes a
+matching `[reality]` block into both the server config and every generated desktop
+client config. (Mobile QR export has no REALITY support yet, so REALITY servers
+only hand out desktop configs.)
 
 ## Usage (manual)
 

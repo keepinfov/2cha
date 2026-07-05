@@ -14,8 +14,8 @@
 
 Minimalist anti-censorship VPN with IPv4/IPv6 dual-stack support. Protocol v4: a Noise_IK
 handshake (X25519 + ChaCha20-Poly1305, forward secrecy, per-client keys) carried inside an
-obfuscation transport — UDP with QUIC mimicry by default, or real TLS 1.3 over TCP — to resist
-DPI classification and active probing.
+obfuscation transport — UDP with QUIC mimicry by default, real TLS 1.3 over TCP, or REALITY
+(probes are handed to a real HTTPS site) — to resist DPI classification and active probing.
 
 ## Features
 
@@ -35,6 +35,14 @@ wizard, systemd service, forwarding, firewall, QR code for the mobile app):
 
 ```bash
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/keepinfov/2cha/master/scripts/install.sh)"
+```
+
+For the [REALITY](docs/reality.md) transport, install the REALITY build instead (glibc,
+x86_64/aarch64) — the default universal binary is static and REALITY-free, so its wizard
+only offers `quic`/`tls`:
+
+```bash
+sudo TWOCHA_REALITY=1 sh -c "$(curl -fsSL https://raw.githubusercontent.com/keepinfov/2cha/master/scripts/install.sh)"
 ```
 
 Manual path:
@@ -76,7 +84,8 @@ Full documentation lives in [`docs/`](docs/README.md):
 - **[Config CLI](docs/config-cli.md)** — inspect/edit configs with `2cha config`, validated and atomic
 - **[NixOS](docs/nixos.md)** — declarative `services.twocha` server/client
 - **[Configuration Reference](docs/configuration.md)** — every config key, type, and default
-- **[Transports](docs/transports.md)** — `quic` vs `tls`
+- **[Transports](docs/transports.md)** — `quic` vs `tls` vs `reality`
+- **[REALITY](docs/reality.md)** — anti-probe transport: probes see a real HTTPS site
 - **[Routing](docs/routing.md)** — full vs split tunnel, DNS
 - **[Troubleshooting](docs/troubleshooting.md)** — common failures and fixes
 - **[Testing](docs/testing.md)** — the end-to-end network-namespace harness

@@ -32,42 +32,63 @@ fn prompt_cipher(theme: &ColorfulTheme) -> Result<String> {
 }
 
 /// The obfuscation transport choice gathered from the wizard.
+#[derive(Default)]
 pub struct TransportChoice {
     pub kind: String,
     pub sni: Option<String>,
     pub cert_file: Option<String>,
     pub key_file: Option<String>,
+    /// REALITY: the real HTTPS site to borrow/mimic (server_names + client SNI).
+    pub reality_server_name: Option<String>,
+    /// REALITY server-side: real `host:port` that non-clients are proxied to.
+    pub reality_dest: Option<String>,
+    /// REALITY client-side: the server's REALITY public key (base64).
+    pub reality_public_key: Option<String>,
+    /// REALITY client-side: the shared short id (hex).
+    pub reality_short_id: Option<String>,
 }
 
 impl TransportChoice {
     fn quic() -> Self {
         TransportChoice {
             kind: "quic".to_string(),
-            sni: None,
-            cert_file: None,
-            key_file: None,
+            ..Default::default()
         }
     }
 }
 
 /// Prompt for the obfuscation transport. When `server` is true and TLS is
 /// chosen, also offer to supply a custom certificate/key (otherwise the server
-/// auto-generates a self-signed cert for the SNI at startup).
+/// auto-generates a self-signed cert for the SNI at startup). The REALITY
+/// option is only offered when the binary was built with the `reality` feature.
 fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
+    // `items` is only mutated when the reality feature adds a third option.
+    #[cfg_attr(not(feature = "reality"), allow(unused_mut))]
+    let mut items = vec![
+        "quic  — UDP, QUIC-mimicry framing (default)",
+        "tls   — TCP, real TLS 1.3 with Noise inside (e.g. on :443)",
+    ];
+    #[cfg(feature = "reality")]
+    items.push("reality — TCP :443; borrows a real site's TLS, probes see that site");
+
     let idx = Select::with_theme(theme)
         .with_prompt("Transport")
-        .items([
-            "quic  — UDP, QUIC-mimicry framing (default)",
-            "tls   — TCP, real TLS 1.3 with Noise inside (e.g. on :443)",
-        ])
+        .items(&items)
         .default(0)
         .interact()
         .map_err(wizard_io_err)?;
 
-    if idx == 0 {
-        return Ok(TransportChoice::quic());
+    match idx {
+        0 => Ok(TransportChoice::quic()),
+        1 => prompt_tls(theme, server),
+        #[cfg(feature = "reality")]
+        2 => prompt_reality(theme, server),
+        _ => unreachable!("transport selection out of range"),
     }
+}
 
+/// TLS transport prompts (SNI + optional server certificate).
+fn prompt_tls(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
     let sni: String = Input::with_theme(theme)
         .with_prompt("  TLS SNI (hostname to blend in as)")
         .default("www.cloudflare.com".to_string())
@@ -102,7 +123,61 @@ fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoi
         sni: Some(sni),
         cert_file,
         key_file,
+        ..Default::default()
     })
+}
+
+/// REALITY transport prompts. The server side generates keys later (in the
+/// server wizard) and only needs the borrowed site + probe fallback; the client
+/// side takes the server's REALITY public key and short id.
+#[cfg(feature = "reality")]
+fn prompt_reality(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
+    let server_name: String = Input::with_theme(theme)
+        .with_prompt("  REALITY site to borrow (a real HTTPS host, e.g. www.microsoft.com)")
+        .default("www.microsoft.com".to_string())
+        .interact_text()
+        .map_err(wizard_io_err)?;
+
+    if server {
+        let dest: String = Input::with_theme(theme)
+            .with_prompt("  Probe fallback target (host:port non-clients are proxied to)")
+            .default(format!("{}:443", server_name))
+            .validate_with(|s: &String| validate_endpoint(s))
+            .interact_text()
+            .map_err(wizard_io_err)?;
+        Ok(TransportChoice {
+            kind: "reality".to_string(),
+            reality_server_name: Some(server_name),
+            reality_dest: Some(dest),
+            ..Default::default()
+        })
+    } else {
+        let public_key: String = Input::with_theme(theme)
+            .with_prompt("  Server REALITY public key (base64, from 2cha reality-keygen)")
+            .validate_with(|s: &String| -> std::result::Result<(), String> {
+                twocha_core::decode_public_key(s.trim())
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .interact_text()
+            .map_err(wizard_io_err)?;
+        let short_id: String = Input::with_theme(theme)
+            .with_prompt("  REALITY short id (hex)")
+            .validate_with(|s: &String| -> std::result::Result<(), String> {
+                twocha_core::crypto::reality::parse_short_id(s.trim())
+                    .map(|_| ())
+                    .ok_or_else(|| "expected 1–16 hex digits".to_string())
+            })
+            .interact_text()
+            .map_err(wizard_io_err)?;
+        Ok(TransportChoice {
+            kind: "reality".to_string(),
+            reality_server_name: Some(server_name),
+            reality_public_key: Some(public_key.trim().to_string()),
+            reality_short_id: Some(short_id.trim().to_string()),
+            ..Default::default()
+        })
+    }
 }
 
 /// Validate a "host:port" endpoint (domain names allowed)
