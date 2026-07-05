@@ -9,7 +9,9 @@ on:
     branches: [feat/reality-transport]
     paths:
       - 'Cross.toml'
-      - 'crates/twocha-lib/build.rs'
+      - 'crates/twocha-lib/**'
+      - 'crates/twocha-core/**'
+      - 'crates/twocha-cli/**'
       - 'native/goreality/**'
       - 'Dockerfile'
       - '.github/workflows/reality-release-check.yml'
