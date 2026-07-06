@@ -170,9 +170,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Compute image ref
         id: meta
+        env:
+          # Never interpolate ${{ }} values from event payloads directly into a
+          # run: script — pass them through env so they're a shell *value*, not
+          # substituted text (github.event.release.tag_name is release-creator
+          # controlled and unconstrained by git's ref-name character blocklist).
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           repo=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "tag=$repo:${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          echo "tag=$repo:$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - name: Build + push image
         uses: docker/build-push-action@v6
         with:
@@ -185,7 +191,10 @@ jobs:
     name: Create Release
     needs: [build-linux, build-reality]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    # Publish whatever built even if the fragile glibc/cgo build-reality job
+    # fails — the stable musl tarballs from build-linux have nothing to do with
+    # REALITY and shouldn't be held hostage by it.
+    if: always() && github.event_name == 'release' && needs.build-linux.result == 'success'
 
     steps:
       - name: Download release tarballs
