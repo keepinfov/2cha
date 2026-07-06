@@ -197,15 +197,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
         .map(|ip| format!("{}:{}", ip, listen_port))
         .unwrap_or_else(|| format!("vpn.example.com:{}", listen_port));
 
-    if reality.is_some() {
-        println!(
-            "{} {}",
-            style("i").cyan().bold(),
-            style("REALITY has no mobile client yet — paired clients will all be desktop configs.")
-                .dim()
-        );
-    }
-
     let mut add_client = Confirm::with_theme(&theme)
         .with_prompt("Generate a paired client config now?")
         .default(true)
@@ -232,23 +223,17 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
 
         // Desktop clients get a generated key + config file; mobile clients
         // keep their key on the phone and import a scannable JSON instead.
-        // The mobile app has no REALITY transport yet, so REALITY servers only
-        // hand out desktop configs.
-        let is_mobile = if reality.is_some() {
-            false
-        } else {
-            let kinds = [
-                "desktop / server (key + config file generated here)",
-                "mobile app (QR code; the phone keeps its own key)",
-            ];
-            Select::with_theme(&theme)
-                .with_prompt("  Client type")
-                .items(kinds)
-                .default(0)
-                .interact()
-                .map_err(wizard_io_err)?
-                == 1
-        };
+        let kinds = [
+            "desktop / server (key + config file generated here)",
+            "mobile app (QR code; the phone keeps its own key)",
+        ];
+        let is_mobile = Select::with_theme(&theme)
+            .with_prompt("  Client type")
+            .items(kinds)
+            .default(0)
+            .interact()
+            .map_err(wizard_io_err)?
+            == 1;
 
         let endpoint: String = Input::with_theme(&theme)
             .with_prompt("  Server endpoint as seen by clients (host:port)")
@@ -307,6 +292,12 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
                 dns_servers,
                 transport: transport.kind.clone(),
                 tls_sni: transport.sni.clone(),
+                reality: reality.as_ref().map(|r| mobile::RealityMobileParams {
+                    public_key: r.public_key.clone(),
+                    short_id: r.short_id.clone(),
+                    server_name: r.server_name.clone(),
+                    fingerprint: "chrome".to_string(),
+                }),
             });
             mobiles.push(MobileClient {
                 name,

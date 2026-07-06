@@ -154,6 +154,15 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 
 ## 6. Mobile (Android now, iOS later)
 
+Android app-side work already exists as a draft in `2cha-mobile` (PR #48, `feat/reality-transport`):
+`Transport.REALITY` + a `RealitySection` (`public_key`/`short_id`/`server_name`/`fingerprint`) in
+`VpnConfig`, transport picker + input fields in `ConfigScreen`, and the per-ABI `libgoreality.so`
+(Go `c-shared`, since Android has no `c-archive` support) built alongside the app's native `.so`.
+Its own `ConfigParser.parseJson` decodes `VpnConfig` generically, so it already accepts a `reality`
+JSON block with no app-side changes needed — that PR is draft only because its `native/2cha`
+submodule points at this branch and needs to move to `master` once this lands. The `2cha` wizard's
+mobile QR export (`init_wizard/mobile.rs`) emits that exact `reality` block for REALITY servers.
+
 - Build `libgoreality.a` per ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`) with
   `CGO_ENABLED=1`, `GOOS=android`, `GOARCH=<abi>`, `CC=<NDK clang>`, alongside the
   existing cargo-ndk Rust build; link into the `twocha-mobile` cdylib. Add a Go build
