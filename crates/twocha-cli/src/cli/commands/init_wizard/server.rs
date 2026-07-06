@@ -197,6 +197,15 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
         .map(|ip| format!("{}:{}", ip, listen_port))
         .unwrap_or_else(|| format!("vpn.example.com:{}", listen_port));
 
+    if reality.is_some() {
+        println!(
+            "{} {}",
+            style("i").cyan().bold(),
+            style("REALITY has no mobile client yet — paired clients will all be desktop configs.")
+                .dim()
+        );
+    }
+
     let mut add_client = Confirm::with_theme(&theme)
         .with_prompt("Generate a paired client config now?")
         .default(true)
