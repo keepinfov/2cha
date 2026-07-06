@@ -274,7 +274,6 @@ impl RealityServerListener {
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.listener.set_nonblocking(nonblocking)
     }
-
 }
 
 impl super::StreamServerConn for RealityServerConn {
@@ -315,7 +314,11 @@ impl super::StreamServerListener for RealityServerListener {
     /// inside Go — there is nothing for us to carry. This call can block for
     /// as long as that relay stays open (an attacker-controlled duration), so
     /// callers must run it off the reactor thread.
-    fn handshake(&self, stream: TcpStream, peer: SocketAddr) -> io::Result<Option<RealityServerConn>> {
+    fn handshake(
+        &self,
+        stream: TcpStream,
+        peer: SocketAddr,
+    ) -> io::Result<Option<RealityServerConn>> {
         let fd = stream.into_raw_fd(); // ownership passes to Go
         let (mut out_fd, mut err) = (0i32, [0 as c_char; 256]);
         let handle = unsafe {

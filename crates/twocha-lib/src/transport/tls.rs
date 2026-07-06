@@ -351,7 +351,6 @@ impl TlsServerListener {
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.listener.set_nonblocking(nonblocking)
     }
-
 }
 
 impl super::StreamServerConn for TlsServerConn {
