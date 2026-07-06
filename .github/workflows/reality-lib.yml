@@ -48,3 +48,16 @@ jobs:
         # (native/goreality/testdest.go) that the integration test needs;
         # production builds use --features reality alone and never link it.
         run: cargo test -p twocha-lib --features reality-test-support reality -- --nocapture
+
+      - name: TEMP debug reality transport (remove before merge)
+        env:
+          GOREALITY_DEBUG: "1"
+        run: |
+          set +e
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "::group::attempt $i"
+            cargo test -p twocha-lib --features reality-test-support reality -- --nocapture --test-threads=1
+            echo "exit=$?"
+            echo "::endgroup::"
+          done
+          true
