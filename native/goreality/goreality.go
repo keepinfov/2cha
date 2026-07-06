@@ -114,6 +114,12 @@ func fdToConn(fd C.int) (net.Conn, error) {
 }
 
 func bridge(rc net.Conn) (C.int, int64, error) {
+	// The handshake libraries (REALITY's server auth loop, uTLS on the client)
+	// may leave a deadline set on rc to bound handshake time. rc now enters a
+	// long-lived bidirectional relay, so any leftover deadline must be
+	// cleared first — otherwise the first post-handshake Read/Write can
+	// spuriously fail as soon as (or before) that stale deadline expires.
+	rc.SetDeadline(time.Time{})
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		rc.Close()
