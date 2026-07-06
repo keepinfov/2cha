@@ -15,6 +15,10 @@
 #   TWOCHA_VERSION   release tag to install (default: latest)
 #   TWOCHA_URL       full tarball URL (overrides arch/version detection)
 #   TWOCHA_BIN_DIR   install directory (default: /usr/local/bin)
+#   TWOCHA_REALITY   set to 1 to install the REALITY build (glibc; x86_64/aarch64
+#                    only). The default "universal" build is static and omits the
+#                    REALITY transport; on musl distros (Alpine) or armv7 use the
+#                    container image instead: ghcr.io/keepinfov/2cha
 set -eu
 
 REPO="keepinfov/2cha"
@@ -45,12 +49,29 @@ case "$(uname -m)" in
         ;;
 esac
 
+# ── Asset selection: default static "universal" build, or the glibc REALITY
+# build when TWOCHA_REALITY is set (REALITY needs cgo/glibc, so it is not part
+# of the static universal binary and ships only for x86_64/aarch64).
+if [ -n "${TWOCHA_REALITY:-}" ]; then
+    case "$ARCH" in
+        x86_64 | aarch64) ;;
+        *)
+            echo "error: REALITY build is only prebuilt for x86_64/aarch64" >&2
+            echo "use the container image instead: ghcr.io/keepinfov/2cha" >&2
+            exit 1
+            ;;
+    esac
+    ASSET="2cha-reality-linux-$ARCH.tar.gz"
+else
+    ASSET="2cha-universal-linux-$ARCH.tar.gz"
+fi
+
 if [ -n "${TWOCHA_URL:-}" ]; then
     URL="$TWOCHA_URL"
 elif [ -n "${TWOCHA_VERSION:-}" ]; then
-    URL="https://github.com/$REPO/releases/download/$TWOCHA_VERSION/2cha-universal-linux-$ARCH.tar.gz"
+    URL="https://github.com/$REPO/releases/download/$TWOCHA_VERSION/$ASSET"
 else
-    URL="https://github.com/$REPO/releases/latest/download/2cha-universal-linux-$ARCH.tar.gz"
+    URL="https://github.com/$REPO/releases/latest/download/$ASSET"
 fi
 
 # ── Fetch (curl or wget, whichever exists)

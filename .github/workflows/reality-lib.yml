@@ -1,0 +1,50 @@
+name: REALITY lib
+
+# Builds twocha-lib with the `reality` feature (links the Go xtls/reality core via
+# build.rs) and runs the transport integration test on Linux.
+
+on:
+  push:
+    branches: [feat/reality-transport]
+  pull_request:
+    paths:
+      - 'crates/twocha-lib/**'
+      - 'crates/twocha-core/src/config/**'
+      - 'native/goreality/**'
+      - '.github/workflows/reality-lib.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  reality-lib:
+    name: build + test twocha-lib --features reality
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve goreality deps
+        working-directory: native/goreality
+        run: |
+          go get github.com/xtls/reality@latest
+          go mod tidy
+
+      - name: Build twocha-lib (reality)
+        run: cargo build -p twocha-lib --features reality
+
+      - name: Test reality transport
+        # reality-test-support pulls in the throwaway Go TLS "dest" server
+        # (native/goreality/testdest.go) that the integration test needs;
+        # production builds use --features reality alone and never link it.
+        run: cargo test -p twocha-lib --features reality-test-support reality -- --nocapture

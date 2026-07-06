@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use super::commands::{
     cmd_config_edit, cmd_config_get, cmd_config_set, cmd_config_show, cmd_config_validate,
     cmd_down, cmd_genkey, cmd_init, cmd_peer_add, cmd_peer_list, cmd_peer_remove, cmd_pubkey,
-    cmd_server, cmd_setup, cmd_status, cmd_toggle, cmd_up,
+    cmd_reality_keygen, cmd_server, cmd_setup, cmd_status, cmd_toggle, cmd_up,
 };
 use super::output;
 use super::print_banner;
@@ -126,6 +126,12 @@ enum Commands {
     Pubkey {
         /// Private key file path (prompted for if omitted)
         key_file: Option<String>,
+    },
+
+    /// Generate a REALITY keypair + short id for the anti-probe TLS gate
+    RealityKeygen {
+        /// Path for the new REALITY private key file (prompted for if omitted)
+        output: Option<String>,
     },
 
     /// Manage authorized peers on a running server (no restart needed)
@@ -335,6 +341,8 @@ pub fn run() -> Result<()> {
         Commands::Genkey { output } => cmd_genkey(output.as_deref()),
 
         Commands::Pubkey { key_file } => cmd_pubkey(key_file.as_deref()),
+
+        Commands::RealityKeygen { output } => cmd_reality_keygen(output.as_deref()),
 
         Commands::Peer(cmd) => match cmd {
             PeerCommands::Add { public_key, name } => {

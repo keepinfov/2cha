@@ -10,6 +10,7 @@ env:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build-linux:
@@ -61,6 +62,8 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build universal binary
+        # Static musl, no REALITY (Go can't ride a static-musl binary). REALITY
+        # ships as glibc via the `build-reality` job + the container image.
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Create release artifacts
@@ -95,16 +98,111 @@ jobs:
           name: 2cha-universal-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/2cha-universal-linux-${{ matrix.arch }}.tar.gz
 
-  release:
-    name: Create Release
-    needs: [build-linux]
+  # REALITY binaries — glibc (Go's runtime can't ride a static-musl binary).
+  # Cross's gnu images target an older glibc, so the tarballs run on mainstream
+  # server distros; NixOS/Alpine users take the container image below.
+  build-reality:
+    name: Build REALITY glibc binary (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            docker_arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            docker_arch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build REALITY binary (glibc)
+        run: cross build --release --target ${{ matrix.target }} -p twocha-cli --features reality
+      - name: Package tarball
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf 2cha-reality-linux-${{ matrix.arch }}.tar.gz 2cha
+      - name: Upload reality tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2cha-reality-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/2cha-reality-linux-${{ matrix.arch }}.tar.gz
+      - name: Upload raw binary (for the image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2cha-reality-bin-${{ matrix.docker_arch }}
+          path: target/${{ matrix.target }}/release/2cha
+
+  docker:
+    name: Build + push container image
+    needs: [build-reality]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
-
     steps:
-      - name: Download all artifacts
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Download REALITY binaries
         uses: actions/download-artifact@v4
         with:
+          pattern: 2cha-reality-bin-*
+          path: bins
+      - name: Stage binaries for Docker
+        run: |
+          mkdir -p dist/amd64 dist/arm64
+          cp bins/2cha-reality-bin-amd64/2cha dist/amd64/2cha
+          cp bins/2cha-reality-bin-arm64/2cha dist/arm64/2cha
+          chmod +x dist/amd64/2cha dist/arm64/2cha
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image ref
+        id: meta
+        env:
+          # Never interpolate ${{ }} values from event payloads directly into a
+          # run: script — pass them through env so they're a shell *value*, not
+          # substituted text (github.event.release.tag_name is release-creator
+          # controlled and unconstrained by git's ref-name character blocklist).
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          repo=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "tag=$repo:$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tag }}
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-reality]
+    runs-on: ubuntu-latest
+    # Publish whatever built even if the fragile glibc/cgo build-reality job
+    # fails — the stable musl tarballs from build-linux have nothing to do with
+    # REALITY and shouldn't be held hostage by it.
+    if: always() && github.event_name == 'release' && needs.build-linux.result == 'success'
+
+    steps:
+      - name: Download release tarballs
+        uses: actions/download-artifact@v4
+        with:
+          # Only the tarball artifacts — skip the raw docker binaries and the
+          # buildx `.dockerbuild` metadata artifact (which flakes on download).
+          pattern: '2cha-*-linux-*'
           path: artifacts
 
       - name: Display structure of downloaded files

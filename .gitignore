@@ -3,3 +3,10 @@
 /result
 *.key
 /.claude
+
+# reality-spike build artifacts (generated in CI)
+/reality-spike/rust/target
+/reality-spike/rust/libgoreality.a
+/reality-spike/rust/libgoreality.h
+/reality-spike/rust/Cargo.lock
+/reality-spike/goreality/go.sum

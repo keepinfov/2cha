@@ -50,6 +50,49 @@ pub fn cmd_genkey(output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Default location for a fresh REALITY private key.
+fn default_reality_key_path() -> String {
+    super::init_wizard::write::default_config_dir()
+        .join("reality.key")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Generate a REALITY keypair (X25519) plus a random short id for the anti-probe
+/// TLS gate. The private key is written to a 0600 file; the public key and short
+/// id are printed for embedding in client configs.
+pub fn cmd_reality_keygen(output: Option<&str>) -> Result<()> {
+    use twocha_core::crypto::reality;
+
+    let output = match output {
+        Some(path) => path.to_string(),
+        None => super::prompt_if_tty("output path for the REALITY private key", || {
+            prompt_path(
+                "Where to save the REALITY private key",
+                Some(default_reality_key_path()),
+            )
+        })?,
+    };
+    let identity = Identity::generate();
+    identity.save(Path::new(&output))?;
+    let short_id = reality::short_id_hex(&reality::generate_short_id());
+
+    eprintln!(
+        "  {} REALITY private key saved to {}",
+        icon_success(),
+        style(&output).cyan()
+    );
+    eprintln!("  Server (transport = \"reality\"): set reality.private_key_file to that file,");
+    eprintln!("  and add this short id to reality.short_ids:");
+    println!("{}", short_id);
+    eprintln!("  Client config values:");
+    eprintln!("    reality.public_key:");
+    println!("{}", identity.public_base64());
+    eprintln!("    reality.short_id:");
+    println!("{}", short_id);
+    Ok(())
+}
+
 /// Print the public key derived from a private key file
 pub fn cmd_pubkey(key_file: Option<&str>) -> Result<()> {
     let key_file = match key_file {

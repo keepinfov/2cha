@@ -8,8 +8,12 @@
 use crate::platform::unix::{
     is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
+#[cfg(feature = "reality")]
+use crate::transport::reality::RealityServerListener;
 #[cfg(unix)]
-use crate::transport::tls::{TlsServerConn, TlsServerListener};
+use crate::transport::tls::TlsServerListener;
+#[cfg(unix)]
+use crate::transport::{StreamServerConn, StreamServerListener};
 
 use crate::vpn::common;
 #[cfg(unix)]
@@ -23,6 +27,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
+#[cfg(unix)]
+use std::sync::{mpsc, Arc};
+#[cfg(unix)]
+use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
@@ -45,12 +53,13 @@ const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How a session's packets reach the peer. UDP carries the peer's address
-/// (which can roam); TLS pins the session to a specific accepted connection.
+/// (which can roam); a stream transport (TLS or REALITY) pins the session to
+/// a specific accepted connection, identified by its per-listener id.
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Link {
     Udp(SocketAddr),
-    Tls(u64),
+    Stream(u64),
 }
 
 #[cfg(unix)]
@@ -58,7 +67,7 @@ impl std::fmt::Display for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Link::Udp(addr) => write!(f, "{}", addr),
-            Link::Tls(id) => write!(f, "tls#{}", id),
+            Link::Stream(id) => write!(f, "stream#{}", id),
         }
     }
 }
@@ -370,6 +379,57 @@ fn serve_transport(
             control,
             listen_addr,
         ),
+        TransportKind::Reality => serve_reality_dispatch(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        ),
+    }
+}
+
+/// REALITY transport dispatch. Errors cleanly unless compiled with
+/// `--features reality`.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn serve_reality_dispatch(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    #[cfg(feature = "reality")]
+    {
+        serve_reality(
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        )
+    }
+    #[cfg(not(feature = "reality"))]
+    {
+        let _ = (
+            cfg,
+            config_path,
+            tun,
+            state,
+            event_loop,
+            control,
+            listen_addr,
+        );
+        Err(VpnError::Config(
+            "reality transport requires building with --features reality".into(),
+        ))
     }
 }
 
@@ -496,11 +556,64 @@ fn build_tls_listener(cfg: &ServerConfig, listen_addr: SocketAddr) -> Result<Tls
     }
 }
 
-/// TLS-over-TCP transport loop. Each client is a separate TCP connection with
-/// its own poll fd; sessions are pinned to a connection (no address roaming).
+/// Outcome of a background handshake thread, fed back to the reactor over a
+/// channel so a slow or adversarial handshake never blocks it.
+#[cfg(unix)]
+enum HandshakeOutcome<C> {
+    Established(C),
+    /// Peer was rejected and already handled (e.g. a REALITY probe relayed to
+    /// its decoy `dest`) — nothing to register.
+    Rejected,
+    Failed(SocketAddr, std::io::Error),
+}
+
+/// Drain the listener's accept backlog (cheap and non-blocking) and hand each
+/// accepted TCP stream to a fresh thread to run the transport handshake.
+///
+/// The handshake itself can block for a long time: a REALITY probe that fails
+/// auth gets relayed to a decoy `dest` inside the Go core, and the call
+/// doesn't return until that connection closes — a duration an attacker
+/// controls. Even a real TLS handshake is an attacker-paced network round
+/// trip. Running either inline on the single-threaded reactor would stall
+/// every other connection for as long as it takes.
+#[cfg(unix)]
+fn spawn_accepts<L: StreamServerListener>(
+    listener: &Arc<L>,
+    tx: &mpsc::Sender<HandshakeOutcome<L::Conn>>,
+    proto: &str,
+) {
+    loop {
+        match listener.accept_raw() {
+            Ok(Some((stream, peer))) => {
+                let listener = Arc::clone(listener);
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let outcome = match listener.handshake(stream, peer) {
+                        Ok(Some(conn)) => HandshakeOutcome::Established(conn),
+                        Ok(None) => HandshakeOutcome::Rejected,
+                        Err(e) => HandshakeOutcome::Failed(peer, e),
+                    };
+                    let _ = tx.send(outcome);
+                });
+            }
+            Ok(None) => break,
+            // A failed raw TCP accept is not fatal: log and keep serving.
+            Err(e) => {
+                log::debug!("{proto}: accept failed: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// Stream-oriented transport loop shared by TLS and REALITY: each client is a
+/// separate TCP connection with its own poll fd; sessions are pinned to a
+/// connection (no address roaming).
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-fn serve_tls(
+fn serve_stream<L: StreamServerListener>(
+    proto: &str,
+    listener: L,
     cfg: &ServerConfig,
     config_path: &str,
     tun: &mut TunDevice,
@@ -509,18 +622,14 @@ fn serve_tls(
     control: Option<&ControlListener>,
     listen_addr: SocketAddr,
 ) -> Result<()> {
-    let listener = build_tls_listener(cfg, listen_addr)?;
     listener.set_nonblocking(true).map_err(VpnError::Io)?;
     let listener_fd = listener.pollfd();
     event_loop.add_fd(listener_fd, POLLIN);
+    let listener = Arc::new(listener);
 
-    log::info!(
-        "Listening on {} (tls/tcp, sni={})",
-        listen_addr,
-        cfg.tls.sni
-    );
+    log::info!("Listening on {} ({})", listen_addr, proto);
 
-    let mut conns: HashMap<u64, TlsServerConn> = HashMap::new();
+    let mut conns: HashMap<u64, L::Conn> = HashMap::new();
     let mut fd_to_conn: HashMap<RawFd, u64> = HashMap::new();
     let mut last_active: HashMap<u64, Instant> = HashMap::new();
     let mut next_conn_id: u64 = 1;
@@ -531,6 +640,7 @@ fn serve_tls(
     let mut seal_scratch = SealScratch::default();
     let mut seal_out = Vec::new();
     let mut payload_buf = Vec::new();
+    let (handshake_tx, handshake_rx) = mpsc::channel::<HandshakeOutcome<L::Conn>>();
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -541,7 +651,7 @@ fn serve_tls(
                 continue;
             }
             if fd == tun.fd() {
-                handle_tun_read_tls(
+                handle_tun_read_stream(
                     tun,
                     &mut tun_buffer,
                     state,
@@ -550,16 +660,9 @@ fn serve_tls(
                     &mut seal_out,
                 )?;
             } else if fd == listener_fd {
-                accept_tls(
-                    &listener,
-                    event_loop,
-                    &mut conns,
-                    &mut fd_to_conn,
-                    &mut last_active,
-                    &mut next_conn_id,
-                );
+                spawn_accepts(&listener, &handshake_tx, proto);
             } else if let Some(&id) = fd_to_conn.get(&fd) {
-                match handle_tls_conn_read(id, tun, state, &mut conns, &mut payload_buf) {
+                match handle_conn_read(id, tun, state, &mut conns, &mut payload_buf) {
                     Ok(true) => {
                         last_active.insert(id, Instant::now());
                     }
@@ -573,9 +676,34 @@ fn serve_tls(
             }
         }
 
+        // Register connections whose handshake finished on a background
+        // thread since the last iteration (bounded by the 100ms poll above).
+        while let Ok(outcome) = handshake_rx.try_recv() {
+            match outcome {
+                HandshakeOutcome::Established(mut conn) => {
+                    if let Err(e) = conn.set_nonblocking(true) {
+                        log::warn!("{proto}: set_nonblocking failed: {}", e);
+                        continue;
+                    }
+                    let id = next_conn_id;
+                    next_conn_id += 1;
+                    let cfd = conn.pollfd();
+                    event_loop.add_fd(cfd, POLLIN);
+                    fd_to_conn.insert(cfd, id);
+                    last_active.insert(id, Instant::now());
+                    conns.insert(id, conn);
+                    log::debug!("{proto}: accepted connection {} ({} open)", id, conns.len());
+                }
+                HandshakeOutcome::Rejected => {}
+                HandshakeOutcome::Failed(peer, e) => {
+                    log::debug!("{proto}: handshake with {} failed: {}", peer, e);
+                }
+            }
+        }
+
         for id in to_drop {
-            log::debug!("tls: closing connection {}", id);
-            drop_tls_conn(
+            log::debug!("{proto}: closing connection {}", id);
+            drop_conn(
                 id,
                 event_loop,
                 &mut conns,
@@ -596,8 +724,8 @@ fn serve_tls(
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
-            log::debug!("tls: reaping idle connection {}", id);
-            drop_tls_conn(
+            log::debug!("{proto}: reaping idle connection {}", id);
+            drop_conn(
                 id,
                 event_loop,
                 &mut conns,
@@ -610,7 +738,7 @@ fn serve_tls(
         let now = Instant::now();
         for entry in state.sessions.values_mut() {
             if now >= entry.next_keepalive {
-                if let Link::Tls(id) = entry.link {
+                if let Link::Stream(id) = entry.link {
                     if let Some(conn) = conns.get_mut(&id) {
                         if let Ok(datagram) = entry.session.seal_data(&[]) {
                             let _ = conn.send(&datagram);
@@ -625,51 +753,41 @@ fn serve_tls(
     Ok(())
 }
 
-/// Drain all pending TCP connections off the listener, completing each TLS
-/// handshake and registering the resulting connection in the poll loop.
+/// TLS-over-TCP transport loop: builds the listener and hands it to the
+/// stream-transport loop shared with REALITY.
 #[cfg(unix)]
-fn accept_tls(
-    listener: &TlsServerListener,
+#[allow(clippy::too_many_arguments)]
+fn serve_tls(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
     event_loop: &mut EventLoop,
-    conns: &mut HashMap<u64, TlsServerConn>,
-    fd_to_conn: &mut HashMap<RawFd, u64>,
-    last_active: &mut HashMap<u64, Instant>,
-    next_conn_id: &mut u64,
-) {
-    loop {
-        match listener.accept() {
-            Ok(Some(mut conn)) => {
-                if let Err(e) = conn.set_nonblocking(true) {
-                    log::warn!("tls: set_nonblocking failed: {}", e);
-                    continue;
-                }
-                let id = *next_conn_id;
-                *next_conn_id += 1;
-                let cfd = conn.pollfd();
-                event_loop.add_fd(cfd, POLLIN);
-                fd_to_conn.insert(cfd, id);
-                last_active.insert(id, Instant::now());
-                conns.insert(id, conn);
-                log::debug!("tls: accepted connection {} ({} open)", id, conns.len());
-            }
-            Ok(None) => break,
-            // A failed TCP accept or TLS handshake (e.g. a plain probe) is not
-            // fatal: log and keep serving other clients.
-            Err(e) => {
-                log::debug!("tls: accept/handshake failed: {}", e);
-                break;
-            }
-        }
-    }
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let listener = build_tls_listener(cfg, listen_addr)?;
+    let proto = format!("tls/tcp, sni={}", cfg.tls.sni);
+    serve_stream(
+        &proto,
+        listener,
+        cfg,
+        config_path,
+        tun,
+        state,
+        event_loop,
+        control,
+        listen_addr,
+    )
 }
 
-/// Close a TLS connection: deregister its fd, forget it, and drop any session
+/// Close a connection: deregister its fd, forget it, and drop any session
 /// pinned to it. Idempotent.
 #[cfg(unix)]
-fn drop_tls_conn(
+fn drop_conn<C: StreamServerConn>(
     id: u64,
     event_loop: &mut EventLoop,
-    conns: &mut HashMap<u64, TlsServerConn>,
+    conns: &mut HashMap<u64, C>,
     fd_to_conn: &mut HashMap<RawFd, u64>,
     last_active: &mut HashMap<u64, Instant>,
     state: &mut ServerState,
@@ -680,18 +798,18 @@ fn drop_tls_conn(
         fd_to_conn.remove(&fd);
     }
     last_active.remove(&id);
-    state.drop_link(Link::Tls(id));
+    state.drop_link(Link::Stream(id));
 }
 
-/// Read all available datagrams off one TLS connection. Returns whether any
+/// Read all available datagrams off one connection. Returns whether any
 /// datagram was processed; an `Err` means the connection is dead (EOF / error)
 /// and should be dropped.
 #[cfg(unix)]
-fn handle_tls_conn_read(
+fn handle_conn_read<C: StreamServerConn>(
     id: u64,
     tun: &mut TunDevice,
     state: &mut ServerState,
-    conns: &mut HashMap<u64, TlsServerConn>,
+    conns: &mut HashMap<u64, C>,
     payload_buf: &mut Vec<u8>,
 ) -> Result<bool> {
     let mut buf = Vec::new();
@@ -706,7 +824,8 @@ fn handle_tls_conn_read(
             break;
         }
         got_any = true;
-        if let Some(reply) = handle_datagram(tun, state, peer, Link::Tls(id), &buf, payload_buf) {
+        if let Some(reply) = handle_datagram(tun, state, peer, Link::Stream(id), &buf, payload_buf)
+        {
             if let Some(conn) = conns.get_mut(&id) {
                 let _ = conn.send(&reply);
             }
@@ -776,14 +895,14 @@ fn handle_tun_read(
     Ok(())
 }
 
-/// TUN -> TLS: seal each inbound packet for its session and write it down the
-/// pinned connection. The TLS layer handles its own framing.
+/// TUN -> stream transport: seal each inbound packet for its session and
+/// write it down the pinned connection. The transport handles its own framing.
 #[cfg(unix)]
-fn handle_tun_read_tls(
+fn handle_tun_read_stream<C: StreamServerConn>(
     tun: &mut TunDevice,
     buffer: &mut [u8],
     state: &mut ServerState,
-    conns: &mut HashMap<u64, TlsServerConn>,
+    conns: &mut HashMap<u64, C>,
     scratch: &mut SealScratch,
     seal_out: &mut Vec<u8>,
 ) -> Result<()> {
@@ -799,9 +918,9 @@ fn handle_tun_read_tls(
                     continue;
                 };
                 if let Some(entry) = state.sessions.get_mut(&cid) {
-                    if let Link::Tls(id) = entry.link {
-                        // seal_out is copied into rustls' internal buffer by
-                        // send(), so reusing it across packets is safe.
+                    if let Link::Stream(id) = entry.link {
+                        // seal_out is copied into the transport's internal
+                        // buffer by send(), so reusing it across packets is safe.
                         if entry
                             .session
                             .seal_data_into(packet, scratch, seal_out)
@@ -1019,4 +1138,72 @@ pub fn run(_config_path: &str) -> Result<()> {
 /// Stop the server
 pub fn stop() {
     common::stop();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REALITY transport (Go xtls/reality via FFI). Shares the stream-transport
+// loop with TLS (`serve_stream`, above) via the StreamServerListener /
+// StreamServerConn traits — sessions are pinned via Link::Stream (only one
+// stream transport runs at a time, so the id namespace can't collide).
+// Unauthenticated probes never reach here — the Go core relays them to
+// `dest`. Feature-gated.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(all(unix, feature = "reality"))]
+fn build_reality_listener(
+    cfg: &ServerConfig,
+    listen_addr: SocketAddr,
+) -> Result<RealityServerListener> {
+    let r = &cfg.reality.server;
+    let key_file = r
+        .private_key_file
+        .as_deref()
+        .ok_or_else(|| VpnError::Config("reality.private_key_file is required".into()))?;
+    let identity = twocha_core::Identity::load(std::path::Path::new(key_file))?;
+    let private = identity.private_bytes();
+    let dest = r
+        .dest
+        .as_deref()
+        .ok_or_else(|| VpnError::Config("reality.dest is required".into()))?;
+    if r.server_names.is_empty() {
+        return Err(VpnError::Config(
+            "reality.server_names must not be empty".into(),
+        ));
+    }
+    RealityServerListener::bind(
+        listen_addr,
+        &private,
+        dest,
+        &r.server_names,
+        &r.short_ids,
+        r.max_time_diff_ms,
+    )
+    .map_err(VpnError::Io)
+}
+
+/// REALITY transport loop: builds the listener and hands it to the
+/// stream-transport loop shared with TLS.
+#[cfg(all(unix, feature = "reality"))]
+#[allow(clippy::too_many_arguments)]
+fn serve_reality(
+    cfg: &ServerConfig,
+    config_path: &str,
+    tun: &mut TunDevice,
+    state: &mut ServerState,
+    event_loop: &mut EventLoop,
+    control: Option<&ControlListener>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let listener = build_reality_listener(cfg, listen_addr)?;
+    serve_stream(
+        "reality/tcp",
+        listener,
+        cfg,
+        config_path,
+        tun,
+        state,
+        event_loop,
+        control,
+        listen_addr,
+    )
 }

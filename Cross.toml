@@ -1,0 +1,46 @@
+# Release builds link the Go xtls/reality c-archive (the `reality` feature), so the
+# cross containers need a Go toolchain. cgo is pointed at each target's musl C
+# compiler, which the cross-rs *-musl images already provide and export as
+# CC_<target> (picked up by crates/twocha-lib/build.rs). Go itself runs on the
+# amd64 build host and cross-compiles via GOOS/GOARCH.
+
+[target.x86_64-unknown-linux-musl]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+[target.aarch64-unknown-linux-musl]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+[target.armv7-unknown-linux-musleabihf]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+# glibc targets — used for the REALITY builds (tarballs + container image), since
+# Go's runtime can't ride a fully-static musl binary. Pinned to the cross 0.2.5
+# images (Ubuntu 20.04, glibc 2.31) so the binaries run on Debian 11+/Ubuntu
+# 20.04+ instead of demanding the very new glibc of cross's default images.
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates",
+    "curl -fsSL https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar -C /usr/local -xz",
+    "ln -sf /usr/local/go/bin/go /usr/local/bin/go",
+]

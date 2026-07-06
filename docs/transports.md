@@ -1,19 +1,26 @@
 # Transports
 
-2cha carries the same Noise_IK-encrypted protocol inside one of two **obfuscation
+2cha carries the same Noise_IK-encrypted protocol inside one of three **obfuscation
 transports**. The transport only changes what the traffic *looks like* on the wire — the
 cryptographic core (handshake, per-client keys, forward secrecy) is identical either way.
 
 Set it with `transport` under `[server]` and `[client]`. **Both ends must use the same
 value.** The default is `quic`.
 
-| | `quic` (default) | `tls` |
-|---|---|---|
-| Layer 4 | UDP | TCP |
-| Looks like | QUIC v1 traffic | a real HTTPS/TLS 1.3 session |
-| Handshake on the wire | QUIC-mimicry framing (no real TLS) | a genuine TLS 1.3 handshake (ServerHello, certificate) |
-| Anti-DoS | MAC1 + stateless cookie; unauthenticated packets dropped with zero reply | TCP handshake + rate limiting |
-| Best when | UDP is allowed and unthrottled | UDP is blocked/throttled, or active probing is a concern |
+| | `quic` (default) | `tls` | `reality` |
+|---|---|---|---|
+| Layer 4 | UDP | TCP | TCP |
+| Looks like | QUIC v1 traffic | a real HTTPS/TLS 1.3 session | a real HTTPS/TLS 1.3 session |
+| Handshake on the wire | QUIC-mimicry framing (no real TLS) | a genuine TLS 1.3 handshake (ServerHello, certificate) | a genuine TLS 1.3 handshake |
+| Certificate a prober sees | none (silent drop) | server's own (self-signed) cert | the **real borrowed site's** cert |
+| Anti-DoS | MAC1 + stateless cookie; unauthenticated packets dropped with zero reply | TCP handshake + rate limiting | unauthenticated probes proxied to a real site |
+| Best when | UDP is allowed and unthrottled | UDP is blocked/throttled, or active probing is a concern | active probing is a concern and you want probes to see a genuine site |
+| Build | always | always | `reality` feature only (glibc/container build) |
+
+`reality` is the strongest anti-probe option: an unauthenticated connection is transparently
+handed to a real HTTPS site, so a censor's active probe completes a genuine handshake and
+sees that site's real certificate and content. It needs the `reality` build (not in the
+static universal binary) — see **[REALITY](./reality.md)** for setup.
 
 ## How the crypto relates to the transport
 
@@ -79,12 +86,14 @@ A genuine handshake returns a `BEGIN CERTIFICATE` block. The self-signed cert wi
 verification — that is expected and not an error for 2cha. The end-to-end
 [test harness](./testing.md) automates this check in `--tls` mode.
 
-## Future work: REALITY
+## REALITY
 
-The TLS server is built with a seam for a future **REALITY**-style mode (borrowing a real
-upstream site's certificate and proxying non-authenticated clients to it). That work is not
-implemented yet — it's documented as future work and depends on the maturity of uTLS-like
-tooling in Rust.
+`transport = "reality"` implements the anti-probe mode the TLS seam was built for: a
+provisioned client proves itself inside the ClientHello, and every unauthenticated
+connection is proxied to a real HTTPS site (`reality.dest`) so a prober sees that site's
+genuine certificate and content. It is built on the Go `xtls/reality` core, so it ships only
+in the `reality` build (glibc tarball or container image), not the static universal binary.
+Full setup, keys and config are in **[REALITY](./reality.md)**.
 
 ---
 

@@ -1,0 +1,60 @@
+name: reality release check
+
+# Iterate on the glibc REALITY build (cross + Go/cgo) that backs the reality
+# tarballs and the container image. Go's runtime can't ride a static-musl binary,
+# so reality ships as glibc.
+
+on:
+  push:
+    branches: [feat/reality-transport]
+    paths:
+      - 'Cross.toml'
+      - 'crates/twocha-lib/**'
+      - 'crates/twocha-core/**'
+      - 'crates/twocha-cli/**'
+      - 'native/goreality/**'
+      - 'Dockerfile'
+      - '.github/workflows/reality-release-check.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-reality-gnu:
+    name: cross ${{ matrix.target }} --features reality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: cross build (reality, glibc)
+        run: cross build --release --target ${{ matrix.target }} -p twocha-cli --features reality
+      - name: Inspect + smoke (x86_64 runs natively)
+        run: |
+          bin=target/${{ matrix.target }}/release/2cha
+          file "$bin"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            "$bin" --version
+            "$bin" reality-keygen /tmp/reality.key
+            echo "OK: glibc reality binary starts and reality-keygen works"
+          fi
+
+      - name: Container image smoke (amd64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          mkdir -p dist/amd64
+          cp target/${{ matrix.target }}/release/2cha dist/amd64/2cha
+          docker build --build-arg TARGETARCH=amd64 -t 2cha-reality-test .
+          docker run --rm 2cha-reality-test --version
+          echo "OK: container image runs the reality binary"

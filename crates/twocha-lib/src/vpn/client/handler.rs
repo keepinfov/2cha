@@ -196,6 +196,8 @@ enum BuiltTransport {
     Quic(UdpQuicClientTransport),
     // Boxed: the rustls connection dwarfs the UDP carrier
     Tls(Box<TlsClientTransport>),
+    #[cfg(feature = "reality")]
+    Reality(Box<crate::transport::reality::RealityClientTransport>),
 }
 
 #[cfg(unix)]
@@ -204,6 +206,8 @@ impl BuiltTransport {
         match self {
             BuiltTransport::Quic(t) => t,
             BuiltTransport::Tls(t) => t.as_mut(),
+            #[cfg(feature = "reality")]
+            BuiltTransport::Reality(t) => t.as_mut(),
         }
     }
 }
@@ -235,8 +239,53 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
             let t = TlsClientTransport::connect(server_addr, &cfg.tls.sni).map_err(VpnError::Io)?;
             BuiltTransport::Tls(Box::new(t))
         }
+        TransportKind::Reality => build_reality_client(cfg, server_addr)?,
     };
     Ok(transport)
+}
+
+/// Build the REALITY client carrier (Go xtls/reality via FFI). Errors cleanly
+/// unless compiled with `--features reality`.
+#[cfg(unix)]
+fn build_reality_client(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
+    #[cfg(feature = "reality")]
+    {
+        let r = &cfg.reality.client;
+        let public_key = r
+            .public_key
+            .as_deref()
+            .ok_or_else(|| VpnError::Config("reality.public_key is required".into()))?;
+        let public_key = twocha_core::decode_public_key(public_key)
+            .map_err(|e| VpnError::Config(format!("reality.public_key: {e}")))?;
+        let short_id_hex = r
+            .short_id
+            .as_deref()
+            .ok_or_else(|| VpnError::Config("reality.short_id is required".into()))?;
+        let short_id = twocha_core::crypto::reality::parse_short_id(short_id_hex)
+            .ok_or_else(|| VpnError::Config("reality.short_id must be hex (<=16 chars)".into()))?;
+        let server_name = r.server_name.as_deref().unwrap_or(&cfg.tls.sni);
+        let fingerprint = if r.fingerprint.is_empty() {
+            "chrome"
+        } else {
+            &r.fingerprint
+        };
+        let t = crate::transport::reality::RealityClientTransport::connect(
+            server_addr,
+            server_name,
+            &public_key,
+            &short_id,
+            fingerprint,
+        )
+        .map_err(VpnError::Io)?;
+        Ok(BuiltTransport::Reality(Box::new(t)))
+    }
+    #[cfg(not(feature = "reality"))]
+    {
+        let _ = (cfg, server_addr);
+        Err(VpnError::Config(
+            "reality transport requires building with --features reality".into(),
+        ))
+    }
 }
 
 /// Cumulative payload byte counters, shared by the data-plane threads and
