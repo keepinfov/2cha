@@ -34,6 +34,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -185,7 +186,56 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 	}
 	// Required when not using REALITY's own listener (per reality.Server docs).
 	reality.DetectPostHandshakeRecordsLens(cfg)
+	awaitRecordDetection(cfg)
 	return C.int64_t(store(cfg))
+}
+
+// detectTimeout bounds how long gor_server_new waits for
+// DetectPostHandshakeRecordsLens's background probing of the decoy `dest` to
+// finish before returning — long enough to cover its worst case (CCS probing
+// sleeps up to ~3s, plus real network round trips), short enough that an
+// unreachable or slow dest can't hang server startup.
+const detectTimeout = 10 * time.Second
+const detectPollInterval = 50 * time.Millisecond
+
+// awaitRecordDetection blocks until reality's background detection of the
+// decoy dest's post-handshake record shape (kicked off by
+// DetectPostHandshakeRecordsLens, above) has produced a result for every
+// (dest, SNI, ALPN) combination this server can see, or detectTimeout elapses.
+//
+// Without this, a client that authenticates before detection finishes hits
+// reality.Server()'s own completion loop, which retries every 5 seconds while
+// the result isn't ready — so the very first connection after startup (or
+// after a config reload) can stall for several extra seconds, or fail
+// outright if it races the detection unfavorably. Detection always completes
+// eventually (even a failed probe stores an empty result via defer), so this
+// only narrows the window instead of introducing a new failure mode.
+func awaitRecordDetection(cfg *reality.Config) {
+	keys := make([]string, 0, len(cfg.ServerNames)*3)
+	for sni := range cfg.ServerNames {
+		for alpn := 0; alpn < 3; alpn++ {
+			keys = append(keys, cfg.Dest+" "+sni+" "+strconv.Itoa(alpn))
+		}
+	}
+	deadline := time.Now().Add(detectTimeout)
+	for {
+		ready := true
+		for _, key := range keys {
+			val, ok := reality.GlobalPostHandshakeRecordsLens.Load(key)
+			if !ok {
+				ready = false
+				break
+			}
+			if _, ok := val.([]int); !ok {
+				ready = false
+				break
+			}
+		}
+		if ready || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(detectPollInterval)
+	}
 }
 
 //export gor_server_handshake

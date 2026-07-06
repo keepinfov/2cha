@@ -232,8 +232,17 @@ runs an end-to-end tunnel test on every push. What is proven:
    (`reality.Server`, `DetectPostHandshakeRecordsLens` called since we don't use REALITY's
    listener, `DialContext` set for `Dest`) + `gor_client_handshake` (ported Xray `UClient`
    uTLS auth) complete a real client↔server handshake — negotiating **X25519MLKEM768** — and a
-   framed datagram crosses the socketpair. Run with both Go-generated keys and x25519
-   `Identity` keys, proving `2cha reality-keygen` output interoperates with the Go ECDH.
+   framed datagram crosses the socketpair. Interoperates with x25519 `Identity` keys, proving
+   `2cha reality-keygen` output works with the Go ECDH.
+
+   `DetectPostHandshakeRecordsLens` is fire-and-forget: it dials `dest` in background
+   goroutines (real network I/O, plus up to ~3s of deliberate CCS-probe sleeps) and
+   `gor_server_new` used to return before that finished. A client authenticating in that
+   window hit `reality.Server()`'s own completion loop, which retries every 5s while the
+   precomputed data isn't ready — so the first connection right after startup could stall
+   or fail outright. `gor_server_new` now polls `reality.GlobalPostHandshakeRecordsLens`
+   for every configured `(dest, SNI, ALPN)` and blocks (bounded at 10s, so an unreachable
+   `dest` can't hang startup) until detection has actually finished before returning.
 4. **Server loop + config** — `serve_reality` mirrors `serve_tls`; `TransportKind::Reality` +
    validated `[reality]` config surface on server and client.
 
