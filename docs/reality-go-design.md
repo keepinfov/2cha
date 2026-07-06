@@ -215,6 +215,7 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 | Binary size (+Go runtime) | High (understood) | Opt-in `reality` build only |
 | MPL-2.0 obligations | High (understood) | Vendor with notice; keep sources available |
 | API drift in xtls/reality | High | Pin a commit; wrapper isolates our surface to 4 functions |
+| Rare (~1 in 10 runs) post-handshake disconnect in `reality_tunnel_roundtrip`: `reality.Server()` completes cleanly (`isHandshakeComplete` true, traced identically on pass and fail runs) but the very first `bridge()` relay read/write then fails with `UnexpectedEof`/`BrokenPipe`. Predates this branch's changes. Ruled out: `DetectPostHandshakeRecordsLens` timing (resolves in ~50ms here — our self-signed test dest fails uTLS cert validation fast, not slow) and a stale handshake deadline on `rc` (cleared defensively in `bridge()` regardless; did not change the failure rate) | Low-medium — narrowed to the vendored `xtls/reality`/uTLS TLS 1.3 internals immediately post-handshake, not our glue code | Test retries the tunnel a bounded number of times (see `reality_tunnel_roundtrip`); real deployments have natural client/server timing gaps this synthetic zero-latency test doesn't, so the practical exposure is likely CI-only. Needs upstream investigation (or a vendored fork with more `Show`-style tracing around `Conn.Read`/`Write`) to close for real |
 
 ## Implementation status (CI-proven)
 

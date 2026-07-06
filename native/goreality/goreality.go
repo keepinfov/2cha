@@ -168,7 +168,6 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 			var d net.Dialer
 			return d.DialContext(ctx, network, addr)
 		},
-		Show: os.Getenv("GOREALITY_DEBUG") != "", // TEMP diagnostic, remove before merge
 	}
 	cfg.PrivateKey = append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(privateKey)), 32)...)
 
@@ -218,33 +217,27 @@ const detectPollInterval = 50 * time.Millisecond
 // eventually (even a failed probe stores an empty result via defer), so this
 // only narrows the window instead of introducing a new failure mode.
 func awaitRecordDetection(cfg *reality.Config) {
-	debug := os.Getenv("GOREALITY_DEBUG") != "" // TEMP diagnostic, remove before merge
 	keys := make([]string, 0, len(cfg.ServerNames)*3)
 	for sni := range cfg.ServerNames {
 		for alpn := 0; alpn < 3; alpn++ {
 			keys = append(keys, cfg.Dest+" "+sni+" "+strconv.Itoa(alpn))
 		}
 	}
-	start := time.Now()
-	deadline := start.Add(detectTimeout)
+	deadline := time.Now().Add(detectTimeout)
 	for {
 		ready := true
-		var pending string
 		for _, key := range keys {
 			val, ok := reality.GlobalPostHandshakeRecordsLens.Load(key)
 			if !ok {
-				ready, pending = false, key+" (absent)"
+				ready = false
 				break
 			}
 			if _, ok := val.([]int); !ok {
-				ready, pending = false, fmt.Sprintf("%s (type %T)", key, val)
+				ready = false
 				break
 			}
 		}
 		if ready || time.Now().After(deadline) {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[goreality debug] awaitRecordDetection: ready=%v after %v (pending=%q)\n", ready, time.Since(start), pending)
-			}
 			return
 		}
 		time.Sleep(detectPollInterval)
