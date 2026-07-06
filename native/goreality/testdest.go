@@ -1,6 +1,11 @@
+//go:build reality_test_support
+
 // Test-only: a throwaway local TLS server to point Dest at from integration
-// tests. gor_test_start_tls_dest is never called by the production transport.
-// (Kept unconditionally for now; can move behind a build tag later.)
+// tests. gor_test_start_tls_dest is never called by the production transport,
+// and this file (self-signed cert generation + a TLS listener) is excluded
+// from production builds by the `reality_test_support` build tag above —
+// build.rs only passes that tag when Cargo's `reality-test-support` feature
+// is enabled (test builds).
 package main
 
 /*

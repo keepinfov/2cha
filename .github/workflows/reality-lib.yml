@@ -44,4 +44,7 @@ jobs:
         run: cargo build -p twocha-lib --features reality
 
       - name: Test reality transport
-        run: cargo test -p twocha-lib --features reality reality -- --nocapture
+        # reality-test-support pulls in the throwaway Go TLS "dest" server
+        # (native/goreality/testdest.go) that the integration test needs;
+        # production builds use --features reality alone and never link it.
+        run: cargo test -p twocha-lib --features reality-test-support reality -- --nocapture

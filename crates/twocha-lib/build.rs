@@ -46,10 +46,14 @@ fn main() {
         .env("GOCACHE", out_dir.join("go-cache"))
         .env("GOPATH", out_dir.join("go-path"))
         .arg("build")
-        .arg(buildmode)
-        .arg("-o")
-        .arg(&lib_path)
-        .arg(".");
+        .arg(buildmode);
+    // testdest.go (a throwaway TLS server backing the Rust integration test)
+    // only compiles in when this feature is on, keeping it out of every
+    // production archive built with just `--features reality`.
+    if env::var("CARGO_FEATURE_REALITY_TEST_SUPPORT").is_ok() {
+        cmd.arg("-tags").arg("reality_test_support");
+    }
+    cmd.arg("-o").arg(&lib_path).arg(".");
     if goarch == "arm" {
         cmd.env("GOARM", "7"); // armv7 (musleabihf)
     }
@@ -91,7 +95,9 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-changed={}/goreality.go", go_dir.display());
+    println!("cargo:rerun-if-changed={}/testdest.go", go_dir.display());
     println!("cargo:rerun-if-changed={}/go.mod", go_dir.display());
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_REALITY_TEST_SUPPORT");
 }
 
 fn map_target(target: &str) -> (&'static str, &'static str) {
