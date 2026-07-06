@@ -185,14 +185,16 @@ branch of `accept` is the single swap-in point.
 ## Status
 
 - [x] A0 spike (this document's feasibility finding)
-- [x] `crypto/reality.rs` auth primitive + short-id helpers (unit-tested; now a
-      fallback/keygen aid — superseded on the data path by the Go decision)
+- [x] `crypto/reality.rs` short-id helpers (unit-tested). Its original
+      seal/open auth primitive was superseded by the Go decision below (the
+      Go core's HKDF-SHA256+AES-GCM ClientHello auth is the real wire
+      protocol) and, being dead and wire-incompatible with it, was removed.
 - [x] `2cha reality-keygen` CLI
 - [x] Integration decision: Go `xtls/reality` c-archive, mobile in scope
 
 Chosen path (Go c-archive):
-- [x] `goreality` Go module wrapping `xtls/reality`, C ABI (`gor_x25519_keygen`,
-      `gor_server_new`/`gor_server_handshake`, `gor_client_handshake`, `gor_close`)
+- [x] `goreality` Go module wrapping `xtls/reality`, C ABI
+      (`gor_server_new`/`gor_server_handshake`, `gor_client_handshake`, `gor_close`)
       — `native/goreality/`
 - [x] Rust FFI bindings + `build.rs` linking `libgoreality.a`; socketpair carrier in
       `transport/reality.rs` reusing `FrameBuf`; `TransportKind::Reality` + `[reality]`
