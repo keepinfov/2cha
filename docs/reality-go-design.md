@@ -124,12 +124,16 @@ error returns so a Go panic never unwinds into Rust.
   emit `cargo:rustc-link-lib=static=goreality` + the Go runtime's link needs
   (`-lresolv`/`-lpthread` etc. per platform). Gate the whole thing behind a
   `reality` cargo feature so default builds stay pure Rust.
-- Server loop `serve_reality` in `server/handler.rs`: a near-copy of `serve_tls`.
-  `accept_reality` accepts the TCP fd and calls `gor_server_handshake` on a small
-  worker thread (handshake is blocking); on `>=0` it inserts a `RealityServerConn`
-  built from `out_fd` into `conns`/`fd_to_conn` and the existing poll loop drives it
-  via `handle_reality_conn_read` → `handle_datagram` (unchanged); on `GOR_FALLBACK`
-  it forgets the conn (Go owns the relay). Idle reaper / keepalive paths unchanged.
+- Server loop `serve_reality` in `server/handler.rs` builds a `RealityServerListener`
+  and hands it to `serve_stream`, the stream-transport loop shared with TLS (both
+  implement `StreamServerListener`/`StreamServerConn` in `transport/mod.rs`).
+  `spawn_accepts` drains the listener's TCP backlog (cheap, non-blocking) and spawns
+  one thread per accepted connection to run `gor_server_handshake` (blocking — REALITY's
+  probe fallback can hold it open as long as an attacker keeps the decoy connection
+  alive) and feed the result back over a channel; on `Ok(Some(conn))` the reactor
+  inserts a `RealityServerConn` into `conns`/`fd_to_conn` and drives it via
+  `handle_conn_read` → `handle_datagram` (unchanged); on `GOR_FALLBACK`/`Ok(None)` it
+  forgets the conn (Go owns the relay). Idle reaper / keepalive paths unchanged.
 - Client `build_transport`: a `Reality` arm connects the TCP (mobile: app-protected),
   calls `gor_client_handshake`, and wraps `out_fd` in `RealityClientTransport`.
 
@@ -165,9 +169,10 @@ a REALITY branch mirroring the TLS branch plus `dest`/`server_names`.
 
 ## 7. Threading, lifecycle, backpressure, errors
 
-- One Go handshake blocks; Rust runs it on a worker thread (bounded pool) so the
-  single-threaded poll loop never stalls. After success the socketpair fd is
-  non-blocking and lives in the poll loop like any other conn fd.
+- One Go handshake blocks; Rust runs it on its own spawned thread (one per accepted
+  connection, fed back to the reactor over a channel) so the single-threaded poll
+  loop never stalls. After success the socketpair fd is non-blocking and lives in
+  the poll loop like any other conn fd.
 - Backpressure is the socketpair buffer: if Rust stops reading, Go's copy blocks,
   which backpressures the REALITY conn — correct, no unbounded buffering.
 - Teardown: Rust closes its fd on EOF/idle and calls `gor_close`; Go's goroutines see
@@ -219,8 +224,10 @@ runs an end-to-end tunnel test on every push. What is proven:
 
 1. **Build+link** — `xtls/reality` (go 1.24 + uTLS + circl) → c-archive → linked into the
    `twocha-lib` test binary via `crates/twocha-lib/build.rs` (TARGET→GOOS/GOARCH).
-2. **ABI + FFI mechanics** — `gor_x25519_keygen`; a Go socketpair fd carries the decrypted
-   stream, framed by `RealityCarrier` (`FrameBuf`).
+2. **ABI + FFI mechanics** — a Go socketpair fd carries the decrypted stream, framed by
+   `RealityCarrier` (`FrameBuf`). Keys are generated Rust-side by `twocha_core::Identity`
+   (the same X25519 primitive `2cha reality-keygen` uses); the integration test proves it
+   interoperates with the Go core's own ECDH.
 3. **Real authenticated handshake + data** — `gor_server_new`/`gor_server_handshake`
    (`reality.Server`, `DetectPostHandshakeRecordsLens` called since we don't use REALITY's
    listener, `DialContext` set for `Dest`) + `gor_client_handshake` (ported Xray `UClient`

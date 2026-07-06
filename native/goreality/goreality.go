@@ -23,13 +23,13 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -42,7 +42,6 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"github.com/xtls/reality"
-	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -94,6 +93,18 @@ func setErr(buf *C.char, buflen C.int, msg string) {
 	dst[len(b)] = 0
 }
 
+// recoverInto reports a panic (from malformed input, a uTLS/reality library
+// edge case, the unsafe peer-certificate reflection hack, etc.) as an error
+// instead of letting it unwind across the cgo boundary — a panic escaping an
+// `//export`-ed function is fatal to the whole process. Call via `defer` as
+// the first statement of every exported function, passing its named return.
+func recoverInto(errBuf *C.char, errlen C.int, ret *C.int64_t, failVal C.int64_t) {
+	if r := recover(); r != nil {
+		setErr(errBuf, errlen, fmt.Sprintf("panic: %v", r))
+		*ret = failVal
+	}
+}
+
 func fdToConn(fd C.int) (net.Conn, error) {
 	f := os.NewFile(uintptr(fd), "tcp")
 	c, err := net.FileConn(f)
@@ -135,27 +146,10 @@ func fingerprintByName(name string) utls.ClientHelloID {
 	}
 }
 
-//export gor_x25519_keygen
-func gor_x25519_keygen(outPriv *C.uint8_t, outPub *C.uint8_t) C.int {
-	var priv [32]byte
-	if _, err := rand.Read(priv[:]); err != nil {
-		return -1
-	}
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
-	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
-	if err != nil {
-		return -1
-	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(outPriv)), 32), priv[:])
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(outPub)), 32), pub)
-	return 0
-}
-
 //export gor_server_new
 func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
-	shortIdsCSV *C.char, maxTimeDiffMs C.int64_t, err *C.char, errlen C.int) C.int64_t {
+	shortIdsCSV *C.char, maxTimeDiffMs C.int64_t, err *C.char, errlen C.int) (ret C.int64_t) {
+	defer recoverInto(err, errlen, &ret, -2)
 
 	cfg := &reality.Config{
 		Type:        "tcp",
@@ -196,7 +190,8 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 
 //export gor_server_handshake
 func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
-	errBuf *C.char, errlen C.int) C.int64_t {
+	errBuf *C.char, errlen C.int) (ret C.int64_t) {
+	defer recoverInto(errBuf, errlen, &ret, -2)
 
 	cfg, ok := loadHandle(int64(serverHandle)).(*reality.Config)
 	if !ok {
@@ -223,7 +218,8 @@ func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
 
 //export gor_client_handshake
 func gor_client_handshake(tcpFd C.int, serverName *C.char, publicKey *C.uint8_t,
-	shortID *C.uint8_t, fingerprint *C.char, outFd *C.int, errBuf *C.char, errlen C.int) C.int64_t {
+	shortID *C.uint8_t, fingerprint *C.char, outFd *C.int, errBuf *C.char, errlen C.int) (ret C.int64_t) {
+	defer recoverInto(errBuf, errlen, &ret, -2)
 
 	conn, err := fdToConn(tcpFd)
 	if err != nil {
@@ -250,6 +246,7 @@ func gor_client_handshake(tcpFd C.int, serverName *C.char, publicKey *C.uint8_t,
 
 //export gor_close
 func gor_close(handle C.int64_t) {
+	defer func() { _ = recover() }()
 	v := loadHandle(int64(handle))
 	drop(int64(handle))
 	if e, ok := v.(*entry); ok {
@@ -271,7 +268,13 @@ type uConnWrap struct {
 }
 
 func (c *uConnWrap) verifyPeerCertificate(_ [][]byte, _ [][]*x509.Certificate) error {
-	p, _ := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
+	p, ok := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
+	if !ok {
+		// crypto/tls renamed or relaid out its private Conn struct; reading at
+		// a stale/zero offset would be memory corruption, so fail closed
+		// instead of dereferencing garbage.
+		return errors.New("REALITY: peerCertificates field not found (crypto/tls layout changed)")
+	}
 	certs := *(*[]*x509.Certificate)(unsafe.Pointer(uintptr(unsafe.Pointer(c.Conn)) + p.Offset))
 	if len(certs) == 0 {
 		return errors.New("REALITY: no peer certificate")
@@ -306,8 +309,19 @@ func clientHandshake(ctx context.Context, conn net.Conn, serverName string,
 		return nil, err
 	}
 	hello := wrap.HandshakeState.Hello
-	hello.SessionId = make([]byte, 32)
-	copy(hello.Raw[39:], hello.SessionId)
+	// The forged SessionId is written at a fixed byte offset in the serialized
+	// ClientHello (legacy_version(2) + random(32) + session_id_len(1) = 35,
+	// plus this fingerprint's fixed prefix before session_id starts at 39).
+	// Every uTLS fingerprint this package selects (fingerprintByName) serializes
+	// that fixed prefix, but fail closed instead of a slice-bounds panic or a
+	// silent short copy if a future fingerprint ever doesn't.
+	const sessionIDOffset = 39
+	const sessionIDLen = 32
+	if len(hello.Raw) < sessionIDOffset+sessionIDLen {
+		return nil, errors.New("REALITY: ClientHello too short for this fingerprint")
+	}
+	hello.SessionId = make([]byte, sessionIDLen)
+	copy(hello.Raw[sessionIDOffset:], hello.SessionId)
 	hello.SessionId[0] = 1
 	hello.SessionId[1] = 8
 	hello.SessionId[2] = 2
@@ -339,7 +353,7 @@ func clientHandshake(ctx context.Context, conn net.Conn, serverName string,
 		return nil, err
 	}
 	aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
-	copy(hello.Raw[39:], hello.SessionId)
+	copy(hello.Raw[sessionIDOffset:], hello.SessionId)
 	wrap.authKey = authKey
 
 	if err := wrap.HandshakeContext(ctx); err != nil {

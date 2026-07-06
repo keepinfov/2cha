@@ -21,7 +21,6 @@ use super::{push_frame, ClientTransport, FrameBuf};
 const GOR_FALLBACK: i64 = -1;
 
 extern "C" {
-    fn gor_x25519_keygen(out_priv: *mut u8, out_pub: *mut u8) -> i32;
     fn gor_server_new(
         private_key: *const u8,
         dest: *const c_char,
@@ -49,16 +48,6 @@ extern "C" {
         errlen: i32,
     ) -> i64;
     fn gor_close(handle: i64);
-}
-
-/// Generate a REALITY X25519 keypair `(private, public)` via the Go core.
-pub fn keygen() -> io::Result<([u8; 32], [u8; 32])> {
-    let (mut priv_k, mut pub_k) = ([0u8; 32], [0u8; 32]);
-    let rc = unsafe { gor_x25519_keygen(priv_k.as_mut_ptr(), pub_k.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(io::Error::other("gor_x25519_keygen failed"));
-    }
-    Ok((priv_k, pub_k))
 }
 
 fn take_err(buf: &[c_char]) -> String {
@@ -240,6 +229,15 @@ impl RealityServerListener {
         let dest_c = CString::new(dest).map_err(io::Error::other)?;
         let names_c = CString::new(server_names.join(",")).map_err(io::Error::other)?;
         let ids_c = CString::new(short_ids.join(",")).map_err(io::Error::other)?;
+        // The Go side takes a signed 64-bit millisecond duration; reject values
+        // that would silently wrap negative and disable the freshness check
+        // instead of passing them through.
+        let max_time_diff_ms = i64::try_from(max_time_diff_ms).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reality.max_time_diff_ms is too large",
+            )
+        })?;
         let mut err = [0 as c_char; 256];
         let handle = unsafe {
             gor_server_new(
@@ -247,7 +245,7 @@ impl RealityServerListener {
                 dest_c.as_ptr(),
                 names_c.as_ptr(),
                 ids_c.as_ptr(),
-                max_time_diff_ms as i64,
+                max_time_diff_ms,
                 err.as_mut_ptr(),
                 256,
             )
@@ -277,17 +275,48 @@ impl RealityServerListener {
         self.listener.set_nonblocking(nonblocking)
     }
 
-    /// Accept one pending connection and run the REALITY server handshake.
-    /// `Ok(None)` = nothing waiting, or the peer was an unauthenticated probe
-    /// (already relayed to `dest` inside Go — there is nothing for us to carry).
-    pub fn accept(&self) -> io::Result<Option<RealityServerConn>> {
+}
+
+impl super::StreamServerConn for RealityServerConn {
+    fn send(&mut self, datagram: &[u8]) -> io::Result<()> {
+        self.send(datagram)
+    }
+    fn recv(&mut self, out: &mut Vec<u8>) -> io::Result<bool> {
+        self.recv(out)
+    }
+    fn pollfd(&self) -> RawFd {
+        self.pollfd()
+    }
+    fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr()
+    }
+    fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
+        self.set_nonblocking(nonblocking)
+    }
+}
+
+impl super::StreamServerListener for RealityServerListener {
+    type Conn = RealityServerConn;
+
+    /// Accept one pending raw TCP connection. `Ok(None)` if none is waiting
+    /// (non-blocking listener).
+    fn accept_raw(&self) -> io::Result<Option<(TcpStream, SocketAddr)>> {
         let (sock, peer) = match self.listener.accept() {
             Ok(pair) => pair,
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(e),
         };
         sock.set_nodelay(true)?;
-        let fd = sock.into_raw_fd(); // ownership passes to Go
+        Ok(Some((sock, peer)))
+    }
+
+    /// Run the REALITY server handshake on an accepted stream. `Ok(None)`
+    /// means the peer was an unauthenticated probe, already relayed to `dest`
+    /// inside Go — there is nothing for us to carry. This call can block for
+    /// as long as that relay stays open (an attacker-controlled duration), so
+    /// callers must run it off the reactor thread.
+    fn handshake(&self, stream: TcpStream, peer: SocketAddr) -> io::Result<Option<RealityServerConn>> {
+        let fd = stream.into_raw_fd(); // ownership passes to Go
         let (mut out_fd, mut err) = (0i32, [0 as c_char; 256]);
         let handle = unsafe {
             gor_server_handshake(self.server_handle, fd, &mut out_fd, err.as_mut_ptr(), 256)
@@ -306,11 +335,34 @@ impl RealityServerListener {
             peer,
         }))
     }
+
+    fn pollfd(&self) -> RawFd {
+        self.pollfd()
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.set_nonblocking(nonblocking)
+    }
 }
 
-#[cfg(test)]
+impl Drop for RealityServerListener {
+    fn drop(&mut self) {
+        // Unlike Carrier's handle (a live connection), server_handle only owns
+        // a Go-side *reality.Config (private key + server names) — but it still
+        // occupies an entry in the Go handles map until released, so every
+        // bind() without this leaks that entry (and the private key bytes) for
+        // the life of the process.
+        unsafe { gor_close(self.server_handle) };
+    }
+}
+
+// Needs `gor_test_start_tls_dest`, which only exists in the archive when
+// built with `--features reality-test-support` (see native/goreality/testdest.go
+// and build.rs) — plain `cargo test --features reality` skips this module.
+#[cfg(all(test, feature = "reality-test-support"))]
 mod tests {
     use super::*;
+    use crate::transport::StreamServerListener;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -345,8 +397,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let srv = thread::spawn(move || {
             let mut conn = loop {
-                if let Some(c) = server.accept().unwrap() {
-                    break c;
+                if let Some((stream, peer)) = server.accept_raw().unwrap() {
+                    if let Some(c) = server.handshake(stream, peer).unwrap() {
+                        break c;
+                    }
                 }
             };
             let mut out = Vec::new();
@@ -371,14 +425,8 @@ mod tests {
         srv.join().unwrap();
     }
 
-    // One #[test] so the two heavy integration runs stay serial (they share the
-    // Go runtime + real sockets; running in parallel is racy).
     #[test]
     fn reality_tunnel_roundtrip() {
-        // Keypair from the Go core (gor_x25519_keygen).
-        let (priv_k, pub_k) = keygen().unwrap();
-        drive_tunnel(&priv_k, &pub_k);
-
         // Keypair from twocha-core's X25519 `Identity` — the exact path `2cha
         // reality-keygen` and the config use (private_key_file + base64 public_key).
         // Proves x25519-dalek keys interoperate with the Go REALITY ECDH.

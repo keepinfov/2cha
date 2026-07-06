@@ -16,14 +16,14 @@
 //! the server's static private key, so the tunnel fails closed. Pinning the
 //! TLS cert would add nothing and would leak a stable fingerprint.
 //!
-//! ## REALITY-readiness seam
+//! ## REALITY
 //!
-//! The server path is structured so a future REALITY-style gate can slot in
-//! between `accept()` and the Noise handshake: inspect the ClientHello, and for
-//! unauthenticated probes transparently proxy to a real backend while borrowing
-//! its certificate. See [`TlsServerListener::accept`] for the hook point. The
-//! actual REALITY/uTLS work is deferred (tracked as future work) pending a
-//! mature uTLS-equivalent in Rust.
+//! The anti-probe gate this module's docs used to defer is implemented as its
+//! own transport, [`super::reality`]: a Go `xtls/reality` core (via FFI)
+//! inspects the ClientHello and relays unauthenticated probes to a real
+//! backend while borrowing its certificate. This module's TLS sessions all
+//! proceed unconditionally — REALITY is a separate `TransportKind`, not a mode
+//! of this one.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -352,28 +352,67 @@ impl TlsServerListener {
         self.listener.set_nonblocking(nonblocking)
     }
 
-    /// Accept one pending connection and complete its TLS handshake. Returns
-    /// `Ok(None)` if no connection is waiting (non-blocking listener).
-    ///
-    /// REALITY seam: this is where a future gate inspects the ClientHello and,
-    /// for unauthenticated probes, proxies to a real backend instead of
-    /// proceeding to Noise. Today every accepted TLS session proceeds.
-    pub fn accept(&self) -> io::Result<Option<TlsServerConn>> {
+}
+
+impl super::StreamServerConn for TlsServerConn {
+    fn send(&mut self, datagram: &[u8]) -> io::Result<()> {
+        self.send(datagram)
+    }
+    fn recv(&mut self, out: &mut Vec<u8>) -> io::Result<bool> {
+        self.recv(out)
+    }
+    fn pollfd(&self) -> RawFd {
+        self.pollfd()
+    }
+    fn peer_addr(&self) -> std::net::SocketAddr {
+        self.peer_addr()
+    }
+    fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
+        self.set_nonblocking(nonblocking)
+    }
+}
+
+impl super::StreamServerListener for TlsServerListener {
+    type Conn = TlsServerConn;
+
+    /// Accept one pending raw TCP connection. `Ok(None)` if none is waiting
+    /// (non-blocking listener).
+    fn accept_raw(&self) -> io::Result<Option<(TcpStream, std::net::SocketAddr)>> {
         let (sock, peer) = match self.listener.accept() {
             Ok(pair) => pair,
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(e),
         };
         sock.set_nodelay(true)?;
+        Ok(Some((sock, peer)))
+    }
+
+    /// Complete the TLS handshake on an accepted stream. Every accepted TLS
+    /// session proceeds — REALITY (which does gate unauthenticated probes) is
+    /// its own transport ([`super::reality`]), not layered onto this one.
+    fn handshake(
+        &self,
+        stream: TcpStream,
+        peer: std::net::SocketAddr,
+    ) -> io::Result<Option<TlsServerConn>> {
         let conn = ServerConnection::new(self.config.clone()).map_err(io::Error::other)?;
-        let carrier = TlsCarrier::handshake(sock, Connection::Server(conn))?;
+        let carrier = TlsCarrier::handshake(stream, Connection::Server(conn))?;
         Ok(Some(TlsServerConn { carrier, peer }))
+    }
+
+    fn pollfd(&self) -> RawFd {
+        self.pollfd()
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.set_nonblocking(nonblocking)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::StreamServerListener;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -405,8 +444,8 @@ mod tests {
             // Blocking accept + handshake, then drive non-blocking like the
             // real poll loop (recv() is designed to be polled, not blocked on).
             let mut conn = loop {
-                if let Some(c) = listener.accept().unwrap() {
-                    break c;
+                if let Some((stream, peer)) = listener.accept_raw().unwrap() {
+                    break listener.handshake(stream, peer).unwrap().unwrap();
                 }
             };
             conn.set_nonblocking(true).unwrap();
