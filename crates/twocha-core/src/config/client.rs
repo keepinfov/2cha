@@ -170,18 +170,18 @@ impl ClientConfig {
         }
         self.server_public()?;
         if self.client.transport == TransportKind::Reality {
-            if self.reality.public_key.is_none() {
+            if self.reality.client.public_key.is_none() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires reality.public_key (server's REALITY key)"
                         .into(),
                 ));
             }
-            if self.reality.short_id.is_none() {
+            if self.reality.client.short_id.is_none() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires reality.short_id".into(),
                 ));
             }
-            if self.reality.server_name.is_none() {
+            if self.reality.client.server_name.is_none() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires reality.server_name (SNI to mimic)".into(),
                 ));

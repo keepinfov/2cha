@@ -166,18 +166,18 @@ impl ServerConfig {
         }
         self.peer_keys()?;
         if self.server.transport == super::TransportKind::Reality {
-            if self.reality.private_key_file.is_none() {
+            if self.reality.server.private_key_file.is_none() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires reality.private_key_file".into(),
                 ));
             }
-            if self.reality.dest.is_none() {
+            if self.reality.server.dest.is_none() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires reality.dest (a real host:port to borrow)"
                         .into(),
                 ));
             }
-            if self.reality.server_names.is_empty() {
+            if self.reality.server.server_names.is_empty() {
                 return Err(ConfigError::Invalid(
                     "transport = \"reality\" requires a non-empty reality.server_names".into(),
                 ));
@@ -322,7 +322,7 @@ pub(super) fn resolve_paths(
     if let Some(key) = tls.key_file.as_mut() {
         resolve_relative_path(key, config_path);
     }
-    if let Some(key) = reality.private_key_file.as_mut() {
+    if let Some(key) = reality.server.private_key_file.as_mut() {
         resolve_relative_path(key, config_path);
     }
 }

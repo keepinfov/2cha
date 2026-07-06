@@ -250,7 +250,7 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
 fn build_reality_client(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
     #[cfg(feature = "reality")]
     {
-        let r = &cfg.reality;
+        let r = &cfg.reality.client;
         let public_key = r
             .public_key
             .as_deref()

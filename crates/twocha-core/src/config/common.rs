@@ -80,9 +80,22 @@ impl Default for TlsSection {
 /// REALITY transport configuration. Only consulted when `transport = "reality"`
 /// and the `reality` build feature is enabled. Keys use the same format as
 /// `2cha reality-keygen` (base64 X25519 public key, hex short id).
+///
+/// Server-only and client-only settings live in separate structs — a client
+/// config has no business reading `dest`, nor a server reading `public_key` —
+/// but both are flattened back into one `[reality]` TOML table so the config
+/// file format (and every existing deployment's config) is unchanged.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RealitySection {
-    // ── server ──
+    #[serde(flatten)]
+    pub server: RealityServerFields,
+    #[serde(flatten)]
+    pub client: RealityClientFields,
+}
+
+/// `[reality]` fields only a REALITY server consults.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RealityServerFields {
     /// Path to the REALITY X25519 private key (raw 32 bytes, mode 0600).
     #[serde(default)]
     pub private_key_file: Option<String>,
@@ -98,8 +111,11 @@ pub struct RealitySection {
     /// Max client/server clock skew in milliseconds (0 = no check).
     #[serde(default)]
     pub max_time_diff_ms: u64,
+}
 
-    // ── client ──
+/// `[reality]` fields only a REALITY client consults.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RealityClientFields {
     /// Server's REALITY public key (base64 X25519).
     #[serde(default)]
     pub public_key: Option<String>,
