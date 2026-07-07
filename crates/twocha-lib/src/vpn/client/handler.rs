@@ -717,8 +717,12 @@ fn client_downlink_loop(
 /// global, and lets two tunnels coexist without stomping on each other.
 ///
 /// # Safety
-/// `tun_fd` must be a valid, open TUN fd whose ownership is transferred here
-/// (it is closed when the wrapped device drops). Android: pass `pfd.detachFd()`.
+/// `tun_fd` must be a valid, open TUN fd whose ownership is transferred here.
+/// It is wrapped (and thus guaranteed closed on drop) as the very first thing
+/// this function does, so a failure anywhere below — a REALITY/transport
+/// connect failure, a Noise_IK handshake timeout, etc. — always tears the fd
+/// down instead of leaking a live, unconfigured tun interface that blackholes
+/// the host's traffic. Android: pass `pfd.detachFd()`.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn run_mobile(
@@ -731,6 +735,8 @@ pub unsafe fn run_mobile(
     on_connected: &dyn Fn(),
     on_stats: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<()> {
+    let tun = TunDevice::from_fd(tun_fd, cfg.tun.mtu)?;
+
     let server_addr = cfg
         .server_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
@@ -759,8 +765,6 @@ pub unsafe fn run_mobile(
     on_connected();
 
     transport.as_dyn_mut().set_nonblocking(true)?;
-
-    let tun = TunDevice::from_fd(tun_fd, cfg.tun.mtu)?;
     tun.set_nonblocking(true)?;
 
     let stats = StatsEmitter::new(on_stats);
@@ -1164,6 +1168,52 @@ mod tests {
             connected.load(Ordering::SeqCst),
             1,
             "on_connected must fire exactly once, after the handshake completes"
+        );
+    }
+
+    /// `run_mobile` must own (and thus close, via `TunDevice`'s `Drop`) the
+    /// tun fd from its very first line, so a transport connect failure that
+    /// happens well before the handshake or any tun I/O still tears the
+    /// interface down instead of leaking a live, unconfigured tun fd.
+    #[test]
+    fn run_mobile_closes_tun_fd_on_early_transport_failure() {
+        let (_test_end, client_tun) = UnixDatagram::pair().unwrap();
+        let tun_fd = client_tun.into_raw_fd();
+
+        // Nothing listens on 127.0.0.1:1: the TLS carrier's TCP connect fails
+        // fast with ECONNREFUSED, well before any handshake or tun I/O runs.
+        let client_id = Identity::generate();
+        let cfg = ClientConfig::parse(&format!(
+            "[client]\nserver = \"127.0.0.1:1\"\ntransport = \"tls\"\n\
+             [crypto]\nprivate_key_file = \"/dev/null\"\nserver_public_key = \"{}\"\n\
+             [tun]\nmtu = 1400\n",
+            twocha_core::encode_public_key(&client_id.public_bytes()),
+        ))
+        .unwrap();
+
+        let running = AtomicBool::new(true);
+        let result = unsafe {
+            run_mobile(
+                cfg,
+                client_id,
+                [0u8; 32],
+                tun_fd,
+                &|_| true,
+                &running,
+                &|| panic!("on_connected must not fire on a failed connect"),
+                &|_, _| {},
+            )
+        };
+        assert!(result.is_err(), "connect to a refused port must fail");
+
+        // A second close on the same raw fd only fails with EBADF if
+        // `run_mobile` already closed it on the early error path above.
+        let rc = unsafe { libc::close(tun_fd) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            (rc, err.raw_os_error()),
+            (-1, Some(libc::EBADF)),
+            "run_mobile must close tun_fd on early failure, not only after a successful handshake"
         );
     }
 }
