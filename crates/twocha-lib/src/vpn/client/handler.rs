@@ -106,7 +106,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     common::reset_running();
     common::setup_signal_handler();
 
-    let mut transport = build_transport(&cfg, server_addr)?;
+    let mut transport = build_transport(&cfg, server_addr, None)?;
     log::info!("transport: {} -> {}", cfg.client.transport, server_addr);
 
     // Initial Noise_IK handshake, driven over the transport (retry + backoff)
@@ -214,8 +214,18 @@ impl BuiltTransport {
 
 /// Build the selected obfuscation transport. Both carry complete v4 wire
 /// datagrams; the QUIC path is byte-identical to the pre-abstraction client.
+///
+/// `protect` (Android `VpnService.protect`), when set, is applied to any
+/// carrier socket that must be excluded from the tunnel *before it connects* —
+/// currently the REALITY carrier, whose socket is handed to Go and so never
+/// appears in [`pollfds`](ClientTransport::pollfds) for the caller's post-build
+/// protect loop. QUIC/TLS sockets are still protected by that loop.
 #[cfg(unix)]
-fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
+fn build_transport(
+    cfg: &ClientConfig,
+    server_addr: SocketAddr,
+    protect: Option<&dyn Fn(RawFd) -> bool>,
+) -> Result<BuiltTransport> {
     let transport = match cfg.client.transport {
         TransportKind::Quic => {
             let local_addr: SocketAddr = if server_addr.is_ipv6() {
@@ -239,7 +249,7 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
             let t = TlsClientTransport::connect(server_addr, &cfg.tls.sni).map_err(VpnError::Io)?;
             BuiltTransport::Tls(Box::new(t))
         }
-        TransportKind::Reality => build_reality_client(cfg, server_addr)?,
+        TransportKind::Reality => build_reality_client(cfg, server_addr, protect)?,
     };
     Ok(transport)
 }
@@ -247,7 +257,11 @@ fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltT
 /// Build the REALITY client carrier (Go xtls/reality via FFI). Errors cleanly
 /// unless compiled with `--features reality`.
 #[cfg(unix)]
-fn build_reality_client(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
+fn build_reality_client(
+    cfg: &ClientConfig,
+    server_addr: SocketAddr,
+    protect: Option<&dyn Fn(RawFd) -> bool>,
+) -> Result<BuiltTransport> {
     #[cfg(feature = "reality")]
     {
         let r = &cfg.reality.client;
@@ -275,13 +289,14 @@ fn build_reality_client(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<B
             &public_key,
             &short_id,
             fingerprint,
+            protect,
         )
         .map_err(VpnError::Io)?;
         Ok(BuiltTransport::Reality(Box::new(t)))
     }
     #[cfg(not(feature = "reality"))]
     {
-        let _ = (cfg, server_addr);
+        let _ = (cfg, server_addr, protect);
         Err(VpnError::Config(
             "reality transport requires building with --features reality".into(),
         ))
@@ -741,7 +756,10 @@ pub unsafe fn run_mobile(
         .server_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    let mut transport = build_transport(&cfg, server_addr)?;
+    // Pass `protect` into the build so the REALITY carrier — whose socket is
+    // handed to Go and never surfaces in the `pollfds` loop below — is protected
+    // before it dials. QUIC/TLS sockets are protected by that loop instead.
+    let mut transport = build_transport(&cfg, server_addr, Some(protect))?;
     log::info!("transport: {} -> {}", cfg.client.transport, server_addr);
 
     // Protect every carrier socket before it sends anything, otherwise the
