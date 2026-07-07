@@ -257,8 +257,8 @@ Server config:
 
     [reality]
     private_key_file = "/etc/2cha/reality.key"
-    dest             = "www.microsoft.com:443"   # real site to borrow / relay probes to
-    server_names     = ["www.microsoft.com"]     # accepted SNIs (others → dest)
+    dest             = "www.cloudflare.com:443"  # real site to borrow / relay probes to
+    server_names     = ["www.cloudflare.com"]    # accepted SNIs (others → dest)
     short_ids        = ["0123456789abcdef"]
 
 Client config:
@@ -269,8 +269,29 @@ Client config:
     [reality]
     public_key  = "<base64 from reality-keygen>"
     short_id    = "0123456789abcdef"
-    server_name = "www.microsoft.com"            # SNI to mimic; one of the server's
+    server_name = "www.cloudflare.com"           # SNI to mimic; one of the server's
     fingerprint = "chrome"                        # chrome|firefox|safari|edge
 
 An unauthenticated probe (wrong/no keys) is transparently handed to `dest` inside the
 Go core, so it completes a genuine handshake with the real site.
+
+## Choosing a dest
+
+The borrowed site must speak **TLS 1.3 with an X25519 (or X25519MLKEM768) key
+share**, and — critically — every TLS record in its handshake flight must be
+**≤ 8192 bytes**: `xtls/reality` mimics the dest's flight record-by-record and
+hard-caps each record at an unexported `size = 8192`. A dest over the cap fails
+in the worst possible way: probes still see a flawless decoy, but every
+*authenticated* client aborts mid-handshake — the client logs a bare
+`reality client handshake failed: EOF` and the server logs upstream's
+last-resort reason `handshake did not complete successfully`
+([XTLS/Xray-core#6356](https://github.com/XTLS/Xray-core/issues/6356)).
+
+`www.microsoft.com` — the former default here — trips this today: its
+OCSP-stapled Certificate message is ~8.3 KB. `www.cloudflare.com` (~3.5 KB) is
+known-good. The server probes the configured `dest` once at startup and prints
+a `reality: WARNING: dest ... ` line if its records exceed the cap; check the
+journal after switching dests. To measure a candidate by hand:
+
+    echo | openssl s_client -connect <dest>:443 -servername <dest> -status -msg 2>&1 \
+      | grep 'Certificate'   # message length is the hex [length ...] field

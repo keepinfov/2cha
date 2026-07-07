@@ -133,8 +133,8 @@ fn prompt_tls(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
 #[cfg(feature = "reality")]
 fn prompt_reality(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
     let server_name: String = Input::with_theme(theme)
-        .with_prompt("  REALITY site to borrow (a real HTTPS host, e.g. www.microsoft.com)")
-        .default("www.microsoft.com".to_string())
+        .with_prompt("  REALITY site to borrow (a real HTTPS host, e.g. www.cloudflare.com)")
+        .default("www.cloudflare.com".to_string())
         .interact_text()
         .map_err(wizard_io_err)?;
 
