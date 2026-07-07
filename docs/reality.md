@@ -257,8 +257,8 @@ Server config:
 
     [reality]
     private_key_file = "/etc/2cha/reality.key"
-    dest             = "www.microsoft.com:443"   # real site to borrow / relay probes to
-    server_names     = ["www.microsoft.com"]     # accepted SNIs (others → dest)
+    dest             = "www.mozilla.org:443"     # real site to borrow / relay probes to
+    server_names     = ["www.mozilla.org"]       # accepted SNIs (others → dest)
     short_ids        = ["0123456789abcdef"]
 
 Client config:
@@ -269,8 +269,41 @@ Client config:
     [reality]
     public_key  = "<base64 from reality-keygen>"
     short_id    = "0123456789abcdef"
-    server_name = "www.microsoft.com"            # SNI to mimic; one of the server's
+    server_name = "www.mozilla.org"              # SNI to mimic; one of the server's
     fingerprint = "chrome"                        # chrome|firefox|safari|edge
 
 An unauthenticated probe (wrong/no keys) is transparently handed to `dest` inside the
 Go core, so it completes a genuine handshake with the real site.
+
+## Choosing a dest
+
+Not every HTTPS site works as a `dest`. `xtls/reality` borrows the dest's TLS
+appearance by **mimicking its handshake flight record-by-record**, and that
+mimicry is picky about the dest in ways you can't tell by eye:
+
+- every handshake record must be **≤ 8192 bytes** (reality's unexported mimic
+  cap) — `www.microsoft.com`'s OCSP-stapled Certificate is ~8.3 KB and trips
+  this ([XTLS/Xray-core#6356](https://github.com/XTLS/Xray-core/issues/6356));
+- the dest's **post-handshake `NewSessionTicket`** must match the size reality
+  measured during its one-shot startup detection. Most modern CDNs
+  (Cloudflare, Apple, Google, Bing, Discord, jsDelivr…) send a slightly larger
+  ticket on the live connection, and reality's padding math underflows
+  (`payload[0]: 4, padding: -N`). These dests **do not work.**
+
+Every unusable dest fails the same, silent way: censor probes still see a
+flawless decoy, but every *authenticated* client aborts mid-handshake — the
+client logs a bare `reality client handshake failed: EOF` and the server logs
+upstream's opaque `handshake did not complete successfully`.
+
+**Known-good dests** (verified against this pinned reality version):
+`www.mozilla.org` (the default), `addons.mozilla.org`, `support.mozilla.org`,
+`developer.mozilla.org`. Prefer a dest that is also reachable and unblocked
+from your clients' region (e.g. avoid Google-hosted SNIs for clients in China).
+
+Don't guess — the server **self-tests the configured `dest` at startup** by
+running a full loopback REALITY handshake against it, and prints
+
+    reality: WARNING: startup self-test against dest <dest> failed: ...
+
+to the journal if the dest can't be mimicked. If you see that line, switch
+`dest`/`server_names` (and every client's `server_name`) to a known-good site.

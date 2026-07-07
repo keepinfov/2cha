@@ -210,7 +210,7 @@ mod tests {
             reality: Some(RealityMobileParams {
                 public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
                 short_id: "0123456789abcdef".into(),
-                server_name: "www.microsoft.com".into(),
+                server_name: "www.mozilla.org".into(),
                 fingerprint: "chrome".into(),
             }),
         });
@@ -222,7 +222,7 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
         assert_eq!(v["reality"]["short_id"], "0123456789abcdef");
-        assert_eq!(v["reality"]["server_name"], "www.microsoft.com");
+        assert_eq!(v["reality"]["server_name"], "www.mozilla.org");
         assert_eq!(v["reality"]["fingerprint"], "chrome");
     }
 

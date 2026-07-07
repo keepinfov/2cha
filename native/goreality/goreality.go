@@ -193,6 +193,7 @@ func gor_server_new(privateKey *C.uint8_t, dest *C.char, serverNamesCSV *C.char,
 	// Required when not using REALITY's own listener (per reality.Server docs).
 	reality.DetectPostHandshakeRecordsLens(cfg)
 	awaitRecordDetection(cfg)
+	go warnIfDestUnusable(cfg)
 	return C.int64_t(store(cfg))
 }
 
@@ -263,7 +264,17 @@ func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
 	if err != nil {
 		// reality.Server already relayed the probe to Dest; log why so a
 		// legitimate client's rejected handshake isn't silently invisible.
-		fmt.Fprintf(os.Stderr, "reality: handshake rejected, fell back to dest: %v\n", err)
+		// Upstream's last-resort reason means the client *did* authenticate
+		// (SNI, key and short id all matched) and the mimicked handshake broke
+		// afterwards — in practice a dest xtls/reality can't mirror (see
+		// destcheck.go). Point at the startup self-test instead of the opaque
+		// upstream string.
+		hint := ""
+		if strings.Contains(err.Error(), "handshake did not complete successfully") {
+			hint = " (client auth succeeded; xtls/reality could not mimic dest " + cfg.Dest +
+				" — see the startup dest self-test warning and docs/reality.md; try dest=www.mozilla.org:443)"
+		}
+		fmt.Fprintf(os.Stderr, "reality: handshake rejected, fell back to dest: %v%s\n", err, hint)
 		return gorFallback
 	}
 	cEnd, id, err := bridge(rc)
