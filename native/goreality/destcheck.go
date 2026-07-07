@@ -1,97 +1,108 @@
-// Startup sanity probe of the decoy `dest`: xtls/reality's Server() mimics the
-// dest's handshake flight record-by-record and hard-caps every record at an
-// unexported `size = 8192` bytes. A dest whose flight contains a longer record
-// (www.microsoft.com's OCSP-stapled Certificate is ~8.3 KB today) makes every
-// *authenticated* client fail mid-handshake with the opaque upstream reason
-// "handshake did not complete successfully" (XTLS/Xray-core#6356), while probes
-// still see a perfectly healthy decoy. Measure the dest's records once at
-// server startup and warn loudly so the misconfiguration is visible before the
-// first client ever connects.
+// Startup self-test of the decoy `dest`. xtls/reality borrows the dest's TLS
+// appearance by mimicking its handshake flight record-by-record, and that
+// mimicry is fragile in several dest-dependent ways: a record over its
+// unexported 8192-byte cap (www.microsoft.com's OCSP-stapled Certificate), or a
+// post-handshake NewSessionTicket whose live size differs from the one reality
+// measured in its one-shot startup detection (most modern CDNs — the padding
+// math underflows: "payload[0]: 4, padding: -N", conn.go). Every such dest
+// fails identically and opaquely: authenticated clients abort mid-handshake
+// with a bare EOF while the server logs upstream's last-resort
+// "handshake did not complete successfully" — and censor probes still see a
+// perfectly healthy decoy, so nothing looks wrong from the outside.
+//
+// Rather than enumerate those failure modes, we exercise the real path once at
+// startup: a loopback REALITY handshake (this package's own client against
+// reality.Server, which dials the real dest and mimics it). If it can't
+// complete, neither can any client, so warn loudly and name known-good dests.
 package main
 
 import (
+	"context"
+	"crypto/ecdh"
 	"fmt"
 	"net"
 	"os"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
+	"github.com/xtls/reality"
 )
 
-// realityRecordCap mirrors xtls/reality's unexported `size` constant (tls.go).
-const realityRecordCap = 8192
+const destSelfTestTimeout = 15 * time.Second
 
-const destProbeTimeout = 10 * time.Second
-
-// recordLenScanner counts TLS record lengths (header included) flowing through
-// Read, without altering the stream. Records arrive in arbitrary Read chunks,
-// so it keeps a tiny header/payload cursor across calls.
-type recordLenScanner struct {
-	net.Conn
-	hdr     [5]byte
-	hdrLen  int // header bytes collected so far
-	remain  int // payload bytes left in the current record
-	maxSeen int // largest record (5-byte header + payload) observed
-}
-
-func (c *recordLenScanner) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	for b := p[:n]; len(b) > 0; {
-		if c.remain > 0 {
-			skip := min(c.remain, len(b))
-			c.remain -= skip
-			b = b[skip:]
-			continue
-		}
-		take := min(len(c.hdr)-c.hdrLen, len(b))
-		copy(c.hdr[c.hdrLen:], b[:take])
-		c.hdrLen += take
-		b = b[take:]
-		if c.hdrLen == len(c.hdr) {
-			c.remain = int(c.hdr[3])<<8 | int(c.hdr[4])
-			c.maxSeen = max(c.maxSeen, len(c.hdr)+c.remain)
-			c.hdrLen = 0
-		}
-	}
-	return n, err
-}
-
-// maxDestHandshakeRecordLen dials dest and runs one throwaway TLS handshake
-// with the same default fingerprint REALITY clients use (Chrome), returning
-// the largest record dest sent during it. The fingerprint matters: what dest
-// staples/compresses — and therefore its record sizes — depends on the
-// ClientHello it answers.
-func maxDestHandshakeRecordLen(dest, sni string) (int, error) {
-	d := net.Dialer{Timeout: destProbeTimeout}
-	raw, err := d.Dial("tcp", dest)
+// destSelfTest runs one loopback REALITY handshake against cfg.Dest using a
+// short id, SNI and (derived) public key that authenticate against cfg, and
+// returns whatever stops an authenticated client from completing — nil means
+// the dest is usable. The caller must have run DetectPostHandshakeRecordsLens
+// for cfg.Dest already (gor_server_new does). Never mutates cfg.
+func destSelfTest(cfg *reality.Config) error {
+	sk, err := ecdh.X25519().NewPrivateKey(cfg.PrivateKey)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("bad reality private key: %w", err)
 	}
-	defer raw.Close()
-	raw.SetDeadline(time.Now().Add(destProbeTimeout))
-	scan := &recordLenScanner{Conn: raw}
-	tc := utls.UClient(scan, &utls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-	}, utls.HelloChrome_Auto)
-	err = tc.Handshake()
-	return scan.maxSeen, err
+	pub := sk.PublicKey().Bytes()
+
+	var shortID [8]byte
+	haveSID := false
+	for id := range cfg.ShortIds {
+		shortID, haveSID = id, true
+		break
+	}
+	if !haveSID {
+		return nil // nothing to authenticate with; not a dest problem
+	}
+	var sni string
+	for name := range cfg.ServerNames {
+		sni = name
+		break
+	}
+	if sni == "" {
+		return nil
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		// reality.Server dials the real dest and mimics it; on the loopback
+		// failure path it closes conn itself. Discard the success result — the
+		// client side below is what we're measuring.
+		if rc, err := reality.Server(context.Background(), conn, cfg); err == nil {
+			rc.Close()
+		}
+	}()
+
+	tcp, err := net.DialTimeout("tcp", ln.Addr().String(), destSelfTestTimeout)
+	if err != nil {
+		return err
+	}
+	_ = tcp.SetDeadline(time.Now().Add(destSelfTestTimeout))
+	ctx, cancel := context.WithTimeout(context.Background(), destSelfTestTimeout)
+	defer cancel()
+
+	rc, err := clientHandshake(ctx, tcp, sni, pub, shortID[:], "chrome")
+	if err != nil {
+		tcp.Close()
+		return err
+	}
+	rc.Close()
+	return nil
 }
 
-// warnIfDestOverRecordCap runs the probe and prints an actionable warning when
-// dest can never serve authenticated clients. Best-effort: probe failures are
-// noted but never fatal (a transiently unreachable dest must not block or kill
-// server startup), so callers just `go warnIfDestOverRecordCap(...)`.
-func warnIfDestOverRecordCap(dest, sni string) {
+// warnIfDestUnusable runs destSelfTest and prints an actionable warning if the
+// configured dest can't be mimicked. Best-effort: recovers from any panic and
+// never blocks or fails server startup (call as `go warnIfDestUnusable(cfg)`).
+func warnIfDestUnusable(cfg *reality.Config) {
 	defer func() { _ = recover() }()
-	maxLen, err := maxDestHandshakeRecordLen(dest, sni)
-	if maxLen > realityRecordCap {
+	if err := destSelfTest(cfg); err != nil {
 		fmt.Fprintf(os.Stderr,
-			"reality: WARNING: dest %s sent a %d-byte TLS handshake record; xtls/reality mimics at most %d bytes per record, so authenticated clients will fail with \"handshake did not complete successfully\" (XTLS/Xray-core#6356) — pick a different dest (e.g. www.cloudflare.com:443)\n",
-			dest, maxLen, realityRecordCap)
-		return
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "reality: dest record-size probe failed (non-fatal): %v\n", err)
+			"reality: WARNING: startup self-test against dest %s failed: %v — authenticated clients will fail the same way (xtls/reality cannot mimic this dest's handshake). Pick a different dest; known-good: www.mozilla.org:443, addons.mozilla.org:443. See docs/reality.md.\n",
+			cfg.Dest, err)
 	}
 }

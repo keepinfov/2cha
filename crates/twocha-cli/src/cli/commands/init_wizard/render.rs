@@ -405,8 +405,8 @@ mod tests {
         }]);
         p.transport = "reality".into();
         p.reality_key_file = Some("/etc/2cha/reality.key".into());
-        p.reality_dest = Some("www.cloudflare.com:443".into());
-        p.reality_server_names = vec!["www.cloudflare.com".into()];
+        p.reality_dest = Some("www.mozilla.org:443".into());
+        p.reality_server_names = vec!["www.mozilla.org".into()];
         p.reality_short_ids = vec!["0123456789abcdef".into()];
         let rendered = render_server(&p);
         let cfg = twocha_core::ServerConfig::parse(&rendered).unwrap();
@@ -429,7 +429,7 @@ mod tests {
             tls_sni: None,
             reality_public_key: Some(twocha_core::encode_public_key(&[3u8; 32])),
             reality_short_id: Some("0123456789abcdef".into()),
-            reality_server_name: Some("www.cloudflare.com".into()),
+            reality_server_name: Some("www.mozilla.org".into()),
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
         assert!(cfg.validate().is_ok());
