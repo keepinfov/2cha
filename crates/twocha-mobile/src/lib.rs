@@ -136,6 +136,15 @@ impl TwochaTunnel {
         protector: Box<dyn SocketProtector>,
         observer: Box<dyn TunnelObserver>,
     ) -> Result<(), TwochaError> {
+        // Own `tun_fd` from the moment we're handed it: config/key parsing
+        // below can fail before `run_mobile` (which installs its own closing
+        // guard as its first action) is ever reached, which would otherwise
+        // leak the host's live tun interface. Dropped (closing the fd) on any
+        // early `?` return; released back to a raw fd just before `run_mobile`.
+        #[cfg(unix)]
+        let fd_guard: std::os::unix::io::OwnedFd =
+            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(tun_fd) };
+
         let cfg =
             ClientConfig::parse(&config_toml).map_err(|e| TwochaError::Config(format!("{e}")))?;
         let key = decode_public_key(&private_key_b64)
@@ -157,6 +166,10 @@ impl TwochaTunnel {
             let stats_observer = Arc::clone(&observer);
             let on_connected = move || observer.on_connected();
             let on_stats = move |tx: u64, rx: u64| stats_observer.on_stats(tx, rx);
+
+            // `run_mobile` now owns closing the fd (it wraps it in a `TunDevice`
+            // as its first action), so release the guard without closing here.
+            let tun_fd = std::os::unix::io::IntoRawFd::into_raw_fd(fd_guard);
 
             // SAFETY: `tun_fd` is a valid fd whose ownership the host transfers
             // to us; the engine closes it on teardown.
