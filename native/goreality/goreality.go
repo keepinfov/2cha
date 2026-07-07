@@ -261,7 +261,10 @@ func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
 	}
 	rc, err := reality.Server(context.Background(), conn, cfg)
 	if err != nil {
-		return gorFallback // reality.Server already relayed the probe to Dest.
+		// reality.Server already relayed the probe to Dest; log why so a
+		// legitimate client's rejected handshake isn't silently invisible.
+		fmt.Fprintf(os.Stderr, "reality: handshake rejected, fell back to dest: %v\n", err)
+		return gorFallback
 	}
 	cEnd, id, err := bridge(rc)
 	if err != nil {
