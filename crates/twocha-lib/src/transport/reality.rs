@@ -16,6 +16,8 @@ use std::os::raw::c_char;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 
+use socket2::{Domain, Protocol, Socket, Type};
+
 use super::{push_frame, ClientTransport, FrameBuf};
 
 const GOR_FALLBACK: i64 = -1;
@@ -134,15 +136,43 @@ impl RealityClientTransport {
     /// Connect to `addr`, run the REALITY client handshake mimicking `server_name`
     /// and authenticating with the server's public key + short id, and return a
     /// carrier ready for the poll loop.
+    ///
+    /// `protect`, when set (Android `VpnService.protect`), is invoked on the raw
+    /// carrier socket **before it connects**. This is mandatory on mobile: the
+    /// outbound TCP originates here (then passes to Go), and under a full tunnel
+    /// its own SYN to the server would otherwise be routed back into the
+    /// half-built tunnel and the handshake would deadlock. Unlike QUIC/TLS —
+    /// whose real socket is exposed via [`pollfds`](ClientTransport::pollfds)
+    /// and protected by the caller's post-build loop — this socket is handed to
+    /// Go and never appears in `pollfds` (that returns the local socketpair), so
+    /// it must be protected here or not at all.
     pub fn connect<A: ToSocketAddrs>(
         addr: A,
         server_name: &str,
         public_key: &[u8; 32],
         short_id: &[u8; 8],
         fingerprint: &str,
+        protect: Option<&dyn Fn(RawFd) -> bool>,
     ) -> io::Result<Self> {
-        let tcp = TcpStream::connect(addr)?;
-        tcp.set_nodelay(true)?;
+        let addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "no address to connect to")
+        })?;
+        let domain = if addr.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        if let Some(protect) = protect {
+            if !protect(sock.as_raw_fd()) {
+                log::warn!(
+                    "reality: protect(fd) returned false; carrier may loop back into the tunnel"
+                );
+            }
+        }
+        sock.connect(&addr.into())?;
+        sock.set_nodelay(true)?;
+        let tcp: TcpStream = sock.into();
         let fd = tcp.into_raw_fd(); // ownership passes to Go
         let name = CString::new(server_name).map_err(io::Error::other)?;
         let fp = CString::new(fingerprint).map_err(io::Error::other)?;
@@ -417,6 +447,7 @@ mod tests {
             client_pub,
             &short_id,
             "chrome",
+            None,
         )
         .unwrap();
         client.send(b"reality-carrier-payload").unwrap();
