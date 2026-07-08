@@ -167,7 +167,10 @@ impl RealityClientTransport {
         if let Some(protect) = protect {
             let ok = protect(raw);
             if ok {
-                log::debug!("reality: protect(fd={}) ok — carrier will bypass the tunnel", raw);
+                log::debug!(
+                    "reality: protect(fd={}) ok — carrier will bypass the tunnel",
+                    raw
+                );
             } else {
                 log::warn!(
                     "reality: protect(fd={}) returned false; carrier may loop back into the tunnel",
@@ -175,7 +178,11 @@ impl RealityClientTransport {
                 );
             }
         }
-        log::debug!("reality: connecting carrier socket (fd={}) to {}", raw, addr);
+        log::debug!(
+            "reality: connecting carrier socket (fd={}) to {}",
+            raw,
+            addr
+        );
         if let Err(e) = sock.connect(&addr.into()) {
             log::warn!("reality: carrier TCP connect to {} failed: {}", addr, e);
             return Err(e);
