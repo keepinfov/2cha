@@ -59,6 +59,12 @@ pub enum NetworkError {
     Timeout,
     HostUnreachable(String),
     WouldBlock,
+    /// A handshake ran to exhaustion (or was aborted) without completing. The
+    /// string carries a human-readable diagnostic — which stage failed, how many
+    /// attempts were spent, the underlying carrier error — so the failure is
+    /// legible in host logs (and, on mobile, in the returned error string the UI
+    /// shows) instead of a bare `Timeout`.
+    HandshakeFailed(String),
 }
 
 impl std::error::Error for VpnError {
@@ -77,6 +83,9 @@ impl fmt::Display for VpnError {
             VpnError::Tun(e) => write!(f, "TUN error: {:?}", e),
             VpnError::Crypto(e) => write!(f, "Crypto error: {:?}", e),
             VpnError::Protocol(e) => write!(f, "Protocol error: {:?}", e),
+            VpnError::Network(NetworkError::HandshakeFailed(msg)) => {
+                write!(f, "handshake failed: {}", msg)
+            }
             VpnError::Network(e) => write!(f, "Network error: {:?}", e),
             VpnError::Config(msg) => write!(f, "Config error: {}", msg),
         }

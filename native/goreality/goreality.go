@@ -81,6 +81,15 @@ func drop(id int64) {
 	delete(handles, id)
 }
 
+// gorLog writes a one-line diagnostic to stderr (captured by journald on the
+// server; on Android app-process stderr is usually dropped, so the mobile
+// client relies on the Rust-side `reality:` logs instead). Always on: REALITY
+// is a niche transport with low connection volume, and these lines are exactly
+// what makes a post-handshake carrier drop legible.
+func gorLog(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "goreality: "+format+"\n", args...)
+}
+
 func setErr(buf *C.char, buflen C.int, msg string) {
 	if buf == nil || buflen <= 0 {
 		return
@@ -135,8 +144,19 @@ func bridge(rc net.Conn) (C.int, int64, error) {
 		return -1, 0, err
 	}
 	id := store(&entry{reality: rc, local: local})
-	go func() { io.Copy(rc, local); rc.Close(); local.Close() }()
-	go func() { io.Copy(local, rc); rc.Close(); local.Close() }()
+	gorLog("bridge %d up: relaying %v <-> local (decrypted stream)", id, rc.RemoteAddr())
+	go func() {
+		n, err := io.Copy(rc, local)
+		gorLog("bridge %d: local->reality closed after %d bytes (err=%v)", id, n, err)
+		rc.Close()
+		local.Close()
+	}()
+	go func() {
+		n, err := io.Copy(local, rc)
+		gorLog("bridge %d: reality->local closed after %d bytes (err=%v)", id, n, err)
+		rc.Close()
+		local.Close()
+	}()
 	return C.int(cEnd), id, nil
 }
 
@@ -260,6 +280,7 @@ func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
 		setErr(errBuf, errlen, err.Error())
 		return -2
 	}
+	gorLog("server: incoming connection from %v, running REALITY handshake (dest=%s)", conn.RemoteAddr(), cfg.Dest)
 	rc, err := reality.Server(context.Background(), conn, cfg)
 	if err != nil {
 		// reality.Server already relayed the probe to Dest; log why so a
@@ -277,6 +298,7 @@ func gor_server_handshake(serverHandle C.int64_t, tcpFd C.int, outFd *C.int,
 		fmt.Fprintf(os.Stderr, "reality: handshake rejected, fell back to dest: %v%s\n", err, hint)
 		return gorFallback
 	}
+	gorLog("server: REALITY handshake OK for %v, bridging", rc.RemoteAddr())
 	cEnd, id, err := bridge(rc)
 	if err != nil {
 		setErr(errBuf, errlen, err.Error())
@@ -299,12 +321,16 @@ func gor_client_handshake(tcpFd C.int, serverName *C.char, publicKey *C.uint8_t,
 	pub := append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(publicKey)), 32)...)
 	sid := append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(shortID)), 8)...)
 
-	rc, err := clientHandshake(context.Background(), conn, C.GoString(serverName), pub, sid, C.GoString(fingerprint))
+	name := C.GoString(serverName)
+	gorLog("client: REALITY handshake to %v (sni=%s, fingerprint=%s)", conn.RemoteAddr(), name, C.GoString(fingerprint))
+	rc, err := clientHandshake(context.Background(), conn, name, pub, sid, C.GoString(fingerprint))
 	if err != nil {
+		gorLog("client: REALITY handshake failed: %v", err)
 		conn.Close()
 		setErr(errBuf, errlen, err.Error())
 		return -2
 	}
+	gorLog("client: REALITY handshake OK, bridging")
 	cEnd, id, err := bridge(rc)
 	if err != nil {
 		setErr(errBuf, errlen, err.Error())
@@ -320,6 +346,7 @@ func gor_close(handle C.int64_t) {
 	v := loadHandle(int64(handle))
 	drop(int64(handle))
 	if e, ok := v.(*entry); ok {
+		gorLog("close: tearing down carrier handle %d", int64(handle))
 		if e.reality != nil {
 			e.reality.Close()
 		}

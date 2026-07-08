@@ -283,6 +283,14 @@ fn build_reality_client(
         } else {
             &r.fingerprint
         };
+        log::info!(
+            "reality: dialing {} (sni={:?}, fingerprint={}, short_id={}, protect={})",
+            server_addr,
+            server_name,
+            fingerprint,
+            short_id_hex,
+            protect.is_some()
+        );
         let t = crate::transport::reality::RealityClientTransport::connect(
             server_addr,
             server_name,
@@ -291,7 +299,11 @@ fn build_reality_client(
             fingerprint,
             protect,
         )
-        .map_err(VpnError::Io)?;
+        .map_err(|e| {
+            log::error!("reality: carrier connect/handshake failed: {}", e);
+            VpnError::Io(e)
+        })?;
+        log::info!("reality: carrier up (TLS+REALITY handshake done, decrypted stream ready)");
         Ok(BuiltTransport::Reality(Box::new(t)))
     }
     #[cfg(not(feature = "reality"))]
@@ -813,41 +825,116 @@ fn handshake_over_transport(
     transport.set_nonblocking(true)?;
     let mut buf = Vec::new();
 
+    // Breadcrumbs for a legible failure: the bare "Timeout" this used to return
+    // hides *why* the handshake never landed (carrier dead vs. no reply vs. a
+    // rejected reply vs. a stop mid-flight). Track enough to say so, both in the
+    // logs (logcat, tag `twocha`) and in the returned error string (the mobile
+    // UI shows it).
+    let started = Instant::now();
+    let mut send_failures: u32 = 0;
+    let mut recv_errors: u32 = 0;
+    let mut responses_rejected: u32 = 0;
+    let mut cookies_seen: u32 = 0;
+    let mut bytes_received: u64 = 0;
+    let mut last_send_err = String::new();
+    let mut last_recv_err = String::new();
+    log::info!(
+        "noise handshake: starting, up to {} attempts (base timeout {:?}), transport has {} pollfd(s)",
+        HANDSHAKE_ATTEMPTS,
+        HANDSHAKE_BASE_TIMEOUT,
+        transport.pollfds().len()
+    );
+
     for attempt in 0..HANDSHAKE_ATTEMPTS {
         if !running.load(Ordering::SeqCst) {
-            return Err(NetworkError::Timeout.into());
+            let reason = format!(
+                "tunnel stopped before completion (during attempt {}/{}, {:?} elapsed, {} send failures, {} bytes received)",
+                attempt + 1,
+                HANDSHAKE_ATTEMPTS,
+                started.elapsed(),
+                send_failures,
+                bytes_received
+            );
+            log::warn!("noise handshake aborted: {}", reason);
+            return Err(NetworkError::HandshakeFailed(reason).into());
         }
         let timeout = HANDSHAKE_BASE_TIMEOUT * 2u32.pow(attempt.min(4));
         log::debug!(
-            "handshake attempt {}/{} (timeout {:?})",
+            "noise handshake attempt {}/{} (timeout {:?}, {:?} elapsed)",
             attempt + 1,
             HANDSHAKE_ATTEMPTS,
-            timeout
+            timeout,
+            started.elapsed()
         );
 
         let mut hs = ClientHandshake::new(suite, identity, server_public)?;
-        if transport.send(hs.datagram()).is_err() {
+        if let Err(e) = transport.send(hs.datagram()) {
+            send_failures += 1;
+            last_send_err = e.to_string();
+            // A send that fails this early almost always means the carrier died
+            // right after connecting (e.g. the REALITY relay dropped) — surface
+            // it instead of silently retrying into a dead socket.
+            log::warn!(
+                "noise handshake attempt {}/{}: sending init failed: {} (carrier may be dead)",
+                attempt + 1,
+                HANDSHAKE_ATTEMPTS,
+                e
+            );
             continue;
         }
+        log::debug!(
+            "noise handshake attempt {}/{}: init sent ({} bytes), awaiting response",
+            attempt + 1,
+            HANDSHAKE_ATTEMPTS,
+            hs.datagram().len()
+        );
 
         let deadline = Instant::now() + timeout;
+        let mut logged_recv_err = false;
         let session = loop {
-            if Instant::now() >= deadline || !running.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                log::debug!(
+                    "noise handshake attempt {}/{}: no response within {:?}",
+                    attempt + 1,
+                    HANDSHAKE_ATTEMPTS,
+                    timeout
+                );
+                break None;
+            }
+            if !running.load(Ordering::SeqCst) {
+                log::debug!("noise handshake: stop signalled mid-attempt");
                 break None;
             }
             match transport.recv(&mut buf) {
-                Ok(true) => {}
+                Ok(true) => {
+                    bytes_received += buf.len() as u64;
+                }
                 Ok(false) => {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
-                Err(_) => {
+                Err(e) => {
+                    recv_errors += 1;
+                    last_recv_err = e.to_string();
+                    // Log once per attempt so a dead carrier returning an error
+                    // every poll doesn't flood the log.
+                    if !logged_recv_err {
+                        logged_recv_err = true;
+                        log::debug!(
+                            "noise handshake attempt {}/{}: recv error: {}",
+                            attempt + 1,
+                            HANDSHAKE_ATTEMPTS,
+                            e
+                        );
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
             }
             match wire::parse(&buf) {
                 Ok(WireMsg::Cookie { nonce, sealed }) => {
+                    cookies_seen += 1;
+                    log::debug!("noise handshake: cookie challenge received, retrying init");
                     if hs.apply_cookie(nonce, sealed).is_ok() {
                         let _ = transport.send(hs.datagram());
                     }
@@ -855,7 +942,8 @@ fn handshake_over_transport(
                 Ok(WireMsg::Resp { .. }) => match hs.complete(&buf) {
                     Ok(session) => break Some(session),
                     Err(e) => {
-                        log::debug!("handshake response rejected: {}", e);
+                        responses_rejected += 1;
+                        log::warn!("noise handshake: server response rejected: {}", e);
                         break None;
                     }
                 },
@@ -864,12 +952,47 @@ fn handshake_over_transport(
         };
 
         if let Some(session) = session {
-            log::info!("handshake complete");
+            log::info!(
+                "noise handshake complete on attempt {}/{} ({:?} elapsed)",
+                attempt + 1,
+                HANDSHAKE_ATTEMPTS,
+                started.elapsed()
+            );
             return Ok(session);
         }
     }
 
-    Err(NetworkError::Timeout.into())
+    // Exhausted every attempt: pick the most specific reason we observed so the
+    // one-line error explains itself.
+    let elapsed = started.elapsed();
+    let reason = if send_failures == HANDSHAKE_ATTEMPTS {
+        format!(
+            "all {} init sends failed — the carrier is dead (last error: {}). On REALITY this usually means the relay dropped right after the TLS handshake.",
+            HANDSHAKE_ATTEMPTS, last_send_err
+        )
+    } else if responses_rejected > 0 {
+        format!(
+            "server replied but rejected {} response(s) after {} attempts — likely a key/cipher mismatch with the server",
+            responses_rejected, HANDSHAKE_ATTEMPTS
+        )
+    } else if bytes_received == 0 && recv_errors > 0 {
+        format!(
+            "no reply after {} attempts ({:?}); carrier kept erroring (last: {}), so the server never received the init or the return path is broken",
+            HANDSHAKE_ATTEMPTS, elapsed, last_recv_err
+        )
+    } else if bytes_received == 0 {
+        format!(
+            "no reply from server after {} attempts ({:?}) — init left but nothing came back (server down, wrong address, or the return path is dropped)",
+            HANDSHAKE_ATTEMPTS, elapsed
+        )
+    } else {
+        format!(
+            "handshake never completed after {} attempts ({:?}): {} bytes received, {} cookie(s), {} rejected response(s), {} recv error(s)",
+            HANDSHAKE_ATTEMPTS, elapsed, bytes_received, cookies_seen, responses_rejected, recv_errors
+        )
+    };
+    log::error!("noise handshake failed: {}", reason);
+    Err(NetworkError::HandshakeFailed(reason).into())
 }
 
 /// Reusable data-plane buffers, allocated once per event loop: no per-packet
