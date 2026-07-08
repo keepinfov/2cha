@@ -163,15 +163,37 @@ impl RealityClientTransport {
             Domain::IPV4
         };
         let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        let raw = sock.as_raw_fd();
         if let Some(protect) = protect {
-            if !protect(sock.as_raw_fd()) {
+            let ok = protect(raw);
+            if ok {
+                log::debug!(
+                    "reality: protect(fd={}) ok — carrier will bypass the tunnel",
+                    raw
+                );
+            } else {
                 log::warn!(
-                    "reality: protect(fd) returned false; carrier may loop back into the tunnel"
+                    "reality: protect(fd={}) returned false; carrier may loop back into the tunnel",
+                    raw
                 );
             }
         }
-        sock.connect(&addr.into())?;
+        log::debug!(
+            "reality: connecting carrier socket (fd={}) to {}",
+            raw,
+            addr
+        );
+        if let Err(e) = sock.connect(&addr.into()) {
+            log::warn!("reality: carrier TCP connect to {} failed: {}", addr, e);
+            return Err(e);
+        }
         sock.set_nodelay(true)?;
+        log::debug!(
+            "reality: TCP connected to {}, starting REALITY handshake (sni={:?}, fingerprint={})",
+            addr,
+            server_name,
+            fingerprint
+        );
         let tcp: TcpStream = sock.into();
         let fd = tcp.into_raw_fd(); // ownership passes to Go
         let name = CString::new(server_name).map_err(io::Error::other)?;
@@ -190,11 +212,18 @@ impl RealityClientTransport {
             )
         };
         if handle < 0 {
+            let msg = take_err(&err);
+            log::warn!("reality: REALITY client handshake failed: {}", msg);
             return Err(io::Error::other(format!(
                 "reality client handshake failed: {}",
-                take_err(&err)
+                msg
             )));
         }
+        log::debug!(
+            "reality: REALITY handshake ok (handle={}, carrier stream fd={})",
+            handle,
+            out_fd
+        );
         Ok(RealityClientTransport {
             carrier: Carrier::new(out_fd, handle),
         })
