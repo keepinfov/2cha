@@ -104,9 +104,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         },
         transport: transport.kind,
         tls_sni: transport.sni,
-        reality_public_key: transport.reality_public_key,
-        reality_short_id: transport.reality_short_id,
-        reality_server_name: transport.reality_server_name,
     });
 
     twocha_core::ClientConfig::parse(&config)

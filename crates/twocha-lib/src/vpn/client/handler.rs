@@ -106,7 +106,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     common::reset_running();
     common::setup_signal_handler();
 
-    let mut transport = build_transport(&cfg, server_addr, None)?;
+    let mut transport = build_transport(&cfg, server_addr)?;
     log::info!("transport: {} -> {}", cfg.client.transport, server_addr);
 
     // Initial Noise_IK handshake, driven over the transport (retry + backoff)
@@ -196,8 +196,6 @@ enum BuiltTransport {
     Quic(UdpQuicClientTransport),
     // Boxed: the rustls connection dwarfs the UDP carrier
     Tls(Box<TlsClientTransport>),
-    #[cfg(feature = "reality")]
-    Reality(Box<crate::transport::reality::RealityClientTransport>),
 }
 
 #[cfg(unix)]
@@ -206,26 +204,16 @@ impl BuiltTransport {
         match self {
             BuiltTransport::Quic(t) => t,
             BuiltTransport::Tls(t) => t.as_mut(),
-            #[cfg(feature = "reality")]
-            BuiltTransport::Reality(t) => t.as_mut(),
         }
     }
 }
 
 /// Build the selected obfuscation transport. Both carry complete v4 wire
 /// datagrams; the QUIC path is byte-identical to the pre-abstraction client.
-///
-/// `protect` (Android `VpnService.protect`), when set, is applied to any
-/// carrier socket that must be excluded from the tunnel *before it connects* —
-/// currently the REALITY carrier, whose socket is handed to Go and so never
-/// appears in [`pollfds`](ClientTransport::pollfds) for the caller's post-build
-/// protect loop. QUIC/TLS sockets are still protected by that loop.
+/// Carrier sockets surface in [`pollfds`](ClientTransport::pollfds), so the
+/// caller's post-build loop protects them (Android `VpnService.protect`).
 #[cfg(unix)]
-fn build_transport(
-    cfg: &ClientConfig,
-    server_addr: SocketAddr,
-    protect: Option<&dyn Fn(RawFd) -> bool>,
-) -> Result<BuiltTransport> {
+fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
     let transport = match cfg.client.transport {
         TransportKind::Quic => {
             let local_addr: SocketAddr = if server_addr.is_ipv6() {
@@ -249,70 +237,8 @@ fn build_transport(
             let t = TlsClientTransport::connect(server_addr, &cfg.tls.sni).map_err(VpnError::Io)?;
             BuiltTransport::Tls(Box::new(t))
         }
-        TransportKind::Reality => build_reality_client(cfg, server_addr, protect)?,
     };
     Ok(transport)
-}
-
-/// Build the REALITY client carrier (Go xtls/reality via FFI). Errors cleanly
-/// unless compiled with `--features reality`.
-#[cfg(unix)]
-fn build_reality_client(
-    cfg: &ClientConfig,
-    server_addr: SocketAddr,
-    protect: Option<&dyn Fn(RawFd) -> bool>,
-) -> Result<BuiltTransport> {
-    #[cfg(feature = "reality")]
-    {
-        let r = &cfg.reality.client;
-        let public_key = r
-            .public_key
-            .as_deref()
-            .ok_or_else(|| VpnError::Config("reality.public_key is required".into()))?;
-        let public_key = twocha_core::decode_public_key(public_key)
-            .map_err(|e| VpnError::Config(format!("reality.public_key: {e}")))?;
-        let short_id_hex = r
-            .short_id
-            .as_deref()
-            .ok_or_else(|| VpnError::Config("reality.short_id is required".into()))?;
-        let short_id = twocha_core::crypto::reality::parse_short_id(short_id_hex)
-            .ok_or_else(|| VpnError::Config("reality.short_id must be hex (<=16 chars)".into()))?;
-        let server_name = r.server_name.as_deref().unwrap_or(&cfg.tls.sni);
-        let fingerprint = if r.fingerprint.is_empty() {
-            "chrome"
-        } else {
-            &r.fingerprint
-        };
-        log::info!(
-            "reality: dialing {} (sni={:?}, fingerprint={}, short_id={}, protect={})",
-            server_addr,
-            server_name,
-            fingerprint,
-            short_id_hex,
-            protect.is_some()
-        );
-        let t = crate::transport::reality::RealityClientTransport::connect(
-            server_addr,
-            server_name,
-            &public_key,
-            &short_id,
-            fingerprint,
-            protect,
-        )
-        .map_err(|e| {
-            log::error!("reality: carrier connect/handshake failed: {}", e);
-            VpnError::Io(e)
-        })?;
-        log::info!("reality: carrier up (TLS+REALITY handshake done, decrypted stream ready)");
-        Ok(BuiltTransport::Reality(Box::new(t)))
-    }
-    #[cfg(not(feature = "reality"))]
-    {
-        let _ = (cfg, server_addr, protect);
-        Err(VpnError::Config(
-            "reality transport requires building with --features reality".into(),
-        ))
-    }
 }
 
 /// Cumulative payload byte counters, shared by the data-plane threads and
@@ -746,8 +672,8 @@ fn client_downlink_loop(
 /// # Safety
 /// `tun_fd` must be a valid, open TUN fd whose ownership is transferred here.
 /// It is wrapped (and thus guaranteed closed on drop) as the very first thing
-/// this function does, so a failure anywhere below — a REALITY/transport
-/// connect failure, a Noise_IK handshake timeout, etc. — always tears the fd
+/// this function does, so a failure anywhere below — a transport connect
+/// failure, a Noise_IK handshake timeout, etc. — always tears the fd
 /// down instead of leaking a live, unconfigured tun interface that blackholes
 /// the host's traffic. Android: pass `pfd.detachFd()`.
 #[cfg(unix)]
@@ -768,10 +694,7 @@ pub unsafe fn run_mobile(
         .server_addr()
         .map_err(|e| VpnError::Config(format!("{}", e)))?;
 
-    // Pass `protect` into the build so the REALITY carrier — whose socket is
-    // handed to Go and never surfaces in the `pollfds` loop below — is protected
-    // before it dials. QUIC/TLS sockets are protected by that loop instead.
-    let mut transport = build_transport(&cfg, server_addr, Some(protect))?;
+    let mut transport = build_transport(&cfg, server_addr)?;
     log::info!("transport: {} -> {}", cfg.client.transport, server_addr);
 
     // Protect every carrier socket before it sends anything, otherwise the
@@ -872,8 +795,8 @@ fn handshake_over_transport(
             send_failures += 1;
             last_send_err = e.to_string();
             // A send that fails this early almost always means the carrier died
-            // right after connecting (e.g. the REALITY relay dropped) — surface
-            // it instead of silently retrying into a dead socket.
+            // right after connecting — surface it instead of silently retrying
+            // into a dead socket.
             log::warn!(
                 "noise handshake attempt {}/{}: sending init failed: {} (carrier may be dead)",
                 attempt + 1,
@@ -967,7 +890,7 @@ fn handshake_over_transport(
     let elapsed = started.elapsed();
     let reason = if send_failures == HANDSHAKE_ATTEMPTS {
         format!(
-            "all {} init sends failed — the carrier is dead (last error: {}). On REALITY this usually means the relay dropped right after the TLS handshake.",
+            "all {} init sends failed — the carrier is dead (last error: {}).",
             HANDSHAKE_ATTEMPTS, last_send_err
         )
     } else if responses_rejected > 0 {

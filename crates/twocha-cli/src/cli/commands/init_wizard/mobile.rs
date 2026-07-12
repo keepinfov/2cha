@@ -20,19 +20,9 @@ pub struct MobileExportParams {
     pub prefix: u8,
     pub route_all: bool,
     pub dns_servers: Vec<String>,
-    /// "quic", "tls" or "reality"
+    /// "quic" or "tls"
     pub transport: String,
     pub tls_sni: Option<String>,
-    pub reality: Option<RealityMobileParams>,
-}
-
-/// REALITY client fields, mirroring the Kotlin app's `RealitySection`
-/// (`VpnConfig.kt`): `public_key` / `short_id` / `server_name` / `fingerprint`.
-pub struct RealityMobileParams {
-    pub public_key: String,
-    pub short_id: String,
-    pub server_name: String,
-    pub fingerprint: String,
 }
 
 /// Build the app-importable JSON (field names match the Kotlin `VpnConfig`
@@ -67,14 +57,6 @@ pub fn mobile_config_json(p: &MobileExportParams) -> String {
     });
     if let Some(ref sni) = p.tls_sni {
         root["tls"] = json!({ "sni": sni });
-    }
-    if let Some(ref r) = p.reality {
-        root["reality"] = json!({
-            "public_key": r.public_key,
-            "short_id": r.short_id,
-            "server_name": r.server_name,
-            "fingerprint": r.fingerprint,
-        });
     }
     root.to_string()
 }
@@ -150,7 +132,6 @@ mod tests {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             transport: "quic".into(),
             tls_sni: None,
-            reality: None,
         });
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["client"]["server"], "203.0.113.7:51820");
@@ -169,9 +150,8 @@ mod tests {
         assert_eq!(v["tun"]["mtu"], 1420);
         // No private key may ever ride in the QR
         assert!(!json.contains("private"));
-        // tls/reality sections only present for their respective transports
+        // the tls section is only present for the tls transport
         assert!(v.get("tls").is_none());
-        assert!(v.get("reality").is_none());
     }
 
     #[test]
@@ -186,44 +166,10 @@ mod tests {
             dns_servers: Vec::new(),
             transport: "tls".into(),
             tls_sni: Some("www.cloudflare.com".into()),
-            reality: None,
         });
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["client"]["transport"], "tls");
         assert_eq!(v["tls"]["sni"], "www.cloudflare.com");
-    }
-
-    /// The `reality` block must match the Android app's `RealitySection`
-    /// (`VpnConfig.kt`) exactly: `public_key`/`short_id`/`server_name`/`fingerprint`.
-    #[test]
-    fn mobile_json_reality_includes_fields() {
-        let json = mobile_config_json(&MobileExportParams {
-            endpoint: "vpn.example.com:443".into(),
-            cipher: "chacha20-poly1305".into(),
-            server_public_key: "k".into(),
-            address: Ipv4Addr::new(10, 8, 0, 2),
-            prefix: 24,
-            route_all: false,
-            dns_servers: Vec::new(),
-            transport: "reality".into(),
-            tls_sni: None,
-            reality: Some(RealityMobileParams {
-                public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
-                short_id: "0123456789abcdef".into(),
-                server_name: "www.mozilla.org".into(),
-                fingerprint: "chrome".into(),
-            }),
-        });
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["client"]["transport"], "reality");
-        assert!(v.get("tls").is_none());
-        assert_eq!(
-            v["reality"]["public_key"],
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-        );
-        assert_eq!(v["reality"]["short_id"], "0123456789abcdef");
-        assert_eq!(v["reality"]["server_name"], "www.mozilla.org");
-        assert_eq!(v["reality"]["fingerprint"], "chrome");
     }
 
     #[test]
@@ -238,7 +184,6 @@ mod tests {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             transport: "quic".into(),
             tls_sni: None,
-            reality: None,
         });
         let qr = render_qr(&json).expect("config-sized payloads must fit a QR");
         assert!(qr.lines().count() > 10);

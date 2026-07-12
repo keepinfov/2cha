@@ -27,18 +27,6 @@ struct GeneratedClient {
     address: Ipv4Addr,
 }
 
-/// REALITY key material generated once by the server wizard: the private key
-/// and short id go into the server config (`private_key_file`, `short_ids`),
-/// while the public key, short id and borrowed `server_name` are copied into
-/// every generated client config.
-struct RealityMaterial {
-    key_file: String,
-    public_key: String,
-    short_id: String,
-    server_name: String,
-    dest: String,
-}
-
 /// A mobile-app peer gathered by the wizard: exported as scannable JSON
 /// rather than a config file (the phone owns its private key).
 struct MobileClient {
@@ -108,31 +96,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
         style(key_path.display()).dim(),
         style(&server_public).green().bold()
     );
-
-    // ── REALITY keys (only for the reality transport) ────────────────────
-    let reality = if transport.kind == "reality" {
-        let reality_key_path = dir.join("reality.key");
-        let (reality_id, r_generated) = load_or_generate_key(&reality_key_path)?;
-        let short_id = twocha_core::crypto::reality::short_id_hex(
-            &twocha_core::crypto::reality::generate_short_id(),
-        );
-        println!(
-            "   {} {} REALITY key {} public key: {}",
-            icon_success(),
-            if r_generated { "Generated" } else { "Loaded" },
-            style(reality_key_path.display()).dim(),
-            style(reality_id.public_base64()).green().bold()
-        );
-        Some(RealityMaterial {
-            key_file: reality_key_path.display().to_string(),
-            public_key: reality_id.public_base64(),
-            short_id,
-            server_name: transport.reality_server_name.clone().unwrap_or_default(),
-            dest: transport.reality_dest.clone().unwrap_or_default(),
-        })
-    } else {
-        None
-    };
 
     // ── VPN subnet ───────────────────────────────────────────────────────
     let (suggested_net, suggested_prefix) = detect::suggest_subnet();
@@ -292,12 +255,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
                 dns_servers,
                 transport: transport.kind.clone(),
                 tls_sni: transport.sni.clone(),
-                reality: reality.as_ref().map(|r| mobile::RealityMobileParams {
-                    public_key: r.public_key.clone(),
-                    short_id: r.short_id.clone(),
-                    server_name: r.server_name.clone(),
-                    fingerprint: "chrome".to_string(),
-                }),
             });
             mobiles.push(MobileClient {
                 name,
@@ -319,9 +276,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
                 dns_servers,
                 transport: transport.kind.clone(),
                 tls_sni: transport.sni.clone(),
-                reality_public_key: reality.as_ref().map(|r| r.public_key.clone()),
-                reality_short_id: reality.as_ref().map(|r| r.short_id.clone()),
-                reality_server_name: reality.as_ref().map(|r| r.server_name.clone()),
             });
 
             peers.push(PeerParams {
@@ -363,16 +317,6 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
         tls_sni: transport.sni.clone(),
         tls_cert_file: transport.cert_file.clone(),
         tls_key_file: transport.key_file.clone(),
-        reality_key_file: reality.as_ref().map(|r| r.key_file.clone()),
-        reality_dest: reality.as_ref().map(|r| r.dest.clone()),
-        reality_server_names: reality
-            .as_ref()
-            .map(|r| vec![r.server_name.clone()])
-            .unwrap_or_default(),
-        reality_short_ids: reality
-            .as_ref()
-            .map(|r| vec![r.short_id.clone()])
-            .unwrap_or_default(),
     });
 
     let parsed = twocha_core::ServerConfig::parse(&server_cfg)

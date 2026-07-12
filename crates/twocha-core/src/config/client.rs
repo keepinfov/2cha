@@ -51,8 +51,6 @@ pub struct ClientConfig {
     #[serde(default)]
     pub tls: TlsSection,
     #[serde(default)]
-    pub reality: super::common::RealitySection,
-    #[serde(default)]
     pub ipv4: Ipv4ClientSection,
     #[serde(default)]
     pub ipv6: Ipv6ClientSection,
@@ -147,12 +145,7 @@ impl ClientConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        super::server::resolve_paths(
-            &mut config.crypto,
-            &mut config.tls,
-            &mut config.reality,
-            path,
-        );
+        super::server::resolve_paths(&mut config.crypto, &mut config.tls, path);
         config.validate()?;
         Ok(config)
     }
@@ -169,24 +162,6 @@ impl ClientConfig {
             return Err(ConfigError::Invalid("ipv6.prefix must be 0..=128".into()));
         }
         self.server_public()?;
-        if self.client.transport == TransportKind::Reality {
-            if self.reality.client.public_key.is_none() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires reality.public_key (server's REALITY key)"
-                        .into(),
-                ));
-            }
-            if self.reality.client.short_id.is_none() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires reality.short_id".into(),
-                ));
-            }
-            if self.reality.client.server_name.is_none() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires reality.server_name (SNI to mimic)".into(),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -433,26 +408,5 @@ server_public_key = "x"
         let cfg = ClientConfig::parse(toml).expect("tls config must parse");
         assert_eq!(cfg.client.transport, TransportKind::Tls);
         assert_eq!(cfg.tls.sni, "example.org");
-    }
-
-    #[test]
-    fn transport_reality_validation() {
-        let key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
-        let base = format!(
-            "[client]\nserver = \"1.2.3.4:443\"\ntransport = \"reality\"\n\
-             [tun]\nname = \"tun0\"\n[crypto]\nprivate_key_file = \"/tmp/k\"\n\
-             server_public_key = \"{key}\"\n",
-        );
-        // [reality] absent → rejected.
-        assert!(ClientConfig::parse(&base).unwrap().validate().is_err());
-
-        let full = format!(
-            "{base}[reality]\npublic_key = \"{key}\"\nshort_id = \"0123456789abcdef\"\n\
-             server_name = \"example.com\"\n",
-        );
-        let cfg = ClientConfig::parse(&full).unwrap();
-        assert_eq!(cfg.client.transport, TransportKind::Reality);
-        cfg.validate()
-            .expect("complete reality client config validates");
     }
 }

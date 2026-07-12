@@ -34,9 +34,6 @@ pub enum TransportKind {
     Quic,
     /// Real TLS 1.3 over TCP with Noise riding inside.
     Tls,
-    /// REALITY: anti-probe TLS via the Go xtls/reality core. Requires the
-    /// `reality` build feature; unauthenticated probes are handed to a real site.
-    Reality,
 }
 
 impl std::fmt::Display for TransportKind {
@@ -44,7 +41,6 @@ impl std::fmt::Display for TransportKind {
         match self {
             TransportKind::Quic => write!(f, "quic"),
             TransportKind::Tls => write!(f, "tls"),
-            TransportKind::Reality => write!(f, "reality"),
         }
     }
 }
@@ -75,59 +71,6 @@ impl Default for TlsSection {
             key_file: None,
         }
     }
-}
-
-/// REALITY transport configuration. Only consulted when `transport = "reality"`
-/// and the `reality` build feature is enabled. Keys use the same format as
-/// `2cha reality-keygen` (base64 X25519 public key, hex short id).
-///
-/// Server-only and client-only settings live in separate structs — a client
-/// config has no business reading `dest`, nor a server reading `public_key` —
-/// but both are flattened back into one `[reality]` TOML table so the config
-/// file format (and every existing deployment's config) is unchanged.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealitySection {
-    #[serde(flatten)]
-    pub server: RealityServerFields,
-    #[serde(flatten)]
-    pub client: RealityClientFields,
-}
-
-/// `[reality]` fields only a REALITY server consults.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealityServerFields {
-    /// Path to the REALITY X25519 private key (raw 32 bytes, mode 0600).
-    #[serde(default)]
-    pub private_key_file: Option<String>,
-    /// Real site to borrow a certificate from / relay probes to (`host:port`).
-    #[serde(default)]
-    pub dest: Option<String>,
-    /// Accepted SNIs. A ClientHello for any other name is proxied to `dest`.
-    #[serde(default)]
-    pub server_names: Vec<String>,
-    /// Accepted short ids (hex, up to 16 chars).
-    #[serde(default)]
-    pub short_ids: Vec<String>,
-    /// Max client/server clock skew in milliseconds (0 = no check).
-    #[serde(default)]
-    pub max_time_diff_ms: u64,
-}
-
-/// `[reality]` fields only a REALITY client consults.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealityClientFields {
-    /// Server's REALITY public key (base64 X25519).
-    #[serde(default)]
-    pub public_key: Option<String>,
-    /// Short id to present (hex), matching one of the server's.
-    #[serde(default)]
-    pub short_id: Option<String>,
-    /// SNI to mimic; one of the server's `server_names`.
-    #[serde(default)]
-    pub server_name: Option<String>,
-    /// uTLS browser fingerprint (`chrome`/`firefox`/`safari`/`edge`; default chrome).
-    #[serde(default)]
-    pub fingerprint: String,
 }
 
 /// TUN device configuration

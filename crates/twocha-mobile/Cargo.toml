@@ -10,11 +10,6 @@ repository.workspace = true
 name = "twocha_mobile"
 crate-type = ["cdylib", "staticlib"]
 
-[features]
-# REALITY transport on mobile: links the Go xtls/reality core per Android ABI
-# (needs Go 1.24+ in the cargo-ndk build). Off by default.
-reality = ["twocha-lib/reality"]
-
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"

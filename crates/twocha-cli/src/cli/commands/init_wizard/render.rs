@@ -17,11 +17,6 @@ pub struct ServerParams {
     pub tls_sni: Option<String>,
     pub tls_cert_file: Option<String>,
     pub tls_key_file: Option<String>,
-    // REALITY (only used when transport == "reality")
-    pub reality_key_file: Option<String>,
-    pub reality_dest: Option<String>,
-    pub reality_server_names: Vec<String>,
-    pub reality_short_ids: Vec<String>,
 }
 
 pub struct PeerParams {
@@ -40,66 +35,6 @@ pub struct ClientParams {
     pub dns_servers: Vec<String>,
     pub transport: String,
     pub tls_sni: Option<String>,
-    // REALITY (only used when transport == "reality")
-    pub reality_public_key: Option<String>,
-    pub reality_short_id: Option<String>,
-    pub reality_server_name: Option<String>,
-}
-
-/// Comma-separated, double-quoted TOML array body (no brackets).
-fn quoted_list(items: &[String]) -> String {
-    items
-        .iter()
-        .map(|i| format!("\"{}\"", i))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Render a server `[reality]` section, or empty for non-REALITY transports.
-fn reality_server_section(p: &ServerParams) -> String {
-    if p.transport != "reality" {
-        return String::new();
-    }
-    let mut s = String::from(
-        "\n# REALITY transport: unauthenticated connections (censor probes) are\n\
-         # proxied to a real HTTPS site (`dest`), so they see that site's genuine\n\
-         # certificate; authenticated 2cha clients tunnel Noise inside. Generate\n\
-         # keys with `2cha reality-keygen`. Needs the glibc/container build.\n[reality]\n",
-    );
-    if let Some(k) = &p.reality_key_file {
-        let _ = writeln!(s, "private_key_file = \"{}\"", k);
-    }
-    if let Some(d) = &p.reality_dest {
-        let _ = writeln!(s, "dest = \"{}\"", d);
-    }
-    let _ = writeln!(
-        s,
-        "server_names = [{}]",
-        quoted_list(&p.reality_server_names)
-    );
-    let _ = writeln!(s, "short_ids = [{}]", quoted_list(&p.reality_short_ids));
-    s
-}
-
-/// Render a client `[reality]` section, or empty for non-REALITY transports.
-fn reality_client_section(p: &ClientParams) -> String {
-    if p.transport != "reality" {
-        return String::new();
-    }
-    let mut s = String::from(
-        "\n# REALITY transport: mimics a real HTTPS site. All three values come\n\
-         # from the server admin (2cha reality-keygen).\n[reality]\n",
-    );
-    if let Some(k) = &p.reality_public_key {
-        let _ = writeln!(s, "public_key = \"{}\"", k);
-    }
-    if let Some(id) = &p.reality_short_id {
-        let _ = writeln!(s, "short_id = \"{}\"", id);
-    }
-    if let Some(sn) = &p.reality_server_name {
-        let _ = writeln!(s, "server_name = \"{}\"", sn);
-    }
-    s
 }
 
 /// Render a top-level `[tls]` section, or an empty string for non-TLS transports.
@@ -152,7 +87,7 @@ pub fn render_server(p: &ServerParams) -> String {
 [server]
 listen = "{listen}"
 max_clients = {max_clients}
-# Obfuscation transport: "quic" (UDP), "tls" (TCP), or "reality". Must match clients.
+# Obfuscation transport: "quic" (UDP) or "tls" (TCP). Must match clients.
 transport = "{transport}"
 
 [tun]
@@ -176,7 +111,6 @@ private_key_file = "{key_file}"
         p.tls_cert_file.as_deref(),
         p.tls_key_file.as_deref(),
     ));
-    out.push_str(&reality_server_section(p));
 
     out.push('\n');
     if p.peers.is_empty() {
@@ -240,8 +174,7 @@ pub fn render_client(p: &ClientParams) -> String {
     }
     dns_v4.push(']');
 
-    let mut extra = tls_section(&p.transport, p.tls_sni.as_deref(), None, None);
-    extra.push_str(&reality_client_section(p));
+    let extra = tls_section(&p.transport, p.tls_sni.as_deref(), None, None);
 
     format!(
         r#"# 2cha VPN Client Configuration v1.0
@@ -251,7 +184,7 @@ pub fn render_client(p: &ClientParams) -> String {
 [client]
 # Server address: IP:port or domain:port
 server = "{endpoint}"
-# Obfuscation transport: "quic" (UDP), "tls" (TCP), or "reality". Must match the server.
+# Obfuscation transport: "quic" (UDP) or "tls" (TCP). Must match the server.
 transport = "{transport}"
 {extra}
 [tun]
@@ -312,10 +245,6 @@ mod tests {
             tls_sni: None,
             tls_cert_file: None,
             tls_key_file: None,
-            reality_key_file: None,
-            reality_dest: None,
-            reality_server_names: Vec::new(),
-            reality_short_ids: Vec::new(),
         }
     }
 
@@ -351,9 +280,6 @@ mod tests {
             dns_servers: super::super::default_dns_servers(),
             transport: "quic".into(),
             tls_sni: None,
-            reality_public_key: None,
-            reality_short_id: None,
-            reality_server_name: None,
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
         assert!(cfg.validate().is_ok());
@@ -387,53 +313,11 @@ mod tests {
             dns_servers: Vec::new(),
             transport: "tls".into(),
             tls_sni: Some("www.example.com".into()),
-            reality_public_key: None,
-            reality_short_id: None,
-            reality_server_name: None,
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.client.transport, twocha_core::TransportKind::Tls);
         assert_eq!(cfg.tls.sni, "www.example.com");
-    }
-
-    #[test]
-    fn test_render_server_reality_parses() {
-        let mut p = server_params(vec![PeerParams {
-            public_key: twocha_core::encode_public_key(&[7u8; 32]),
-            name: "laptop".into(),
-        }]);
-        p.transport = "reality".into();
-        p.reality_key_file = Some("/etc/2cha/reality.key".into());
-        p.reality_dest = Some("www.mozilla.org:443".into());
-        p.reality_server_names = vec!["www.mozilla.org".into()];
-        p.reality_short_ids = vec!["0123456789abcdef".into()];
-        let rendered = render_server(&p);
-        let cfg = twocha_core::ServerConfig::parse(&rendered).unwrap();
-        assert_eq!(cfg.server.transport, twocha_core::TransportKind::Reality);
-        cfg.validate().expect("reality server config validates");
-    }
-
-    #[test]
-    fn test_render_client_reality_parses() {
-        let rendered = render_client(&ClientParams {
-            endpoint: "vpn.example.com:443".into(),
-            cipher: "chacha20-poly1305".into(),
-            key_file: "/etc/2cha/client.key".into(),
-            server_public_key: twocha_core::encode_public_key(&[9u8; 32]),
-            address: Ipv4Addr::new(10, 8, 0, 2),
-            prefix: 24,
-            route_all: false,
-            dns_servers: Vec::new(),
-            transport: "reality".into(),
-            tls_sni: None,
-            reality_public_key: Some(twocha_core::encode_public_key(&[3u8; 32])),
-            reality_short_id: Some("0123456789abcdef".into()),
-            reality_server_name: Some("www.mozilla.org".into()),
-        });
-        let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
-        assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.client.transport, twocha_core::TransportKind::Reality);
     }
 
     #[test]

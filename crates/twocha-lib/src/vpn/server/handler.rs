@@ -8,8 +8,6 @@
 use crate::platform::unix::{
     is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
-#[cfg(feature = "reality")]
-use crate::transport::reality::RealityServerListener;
 #[cfg(unix)]
 use crate::transport::tls::TlsServerListener;
 #[cfg(unix)]
@@ -53,8 +51,8 @@ const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How a session's packets reach the peer. UDP carries the peer's address
-/// (which can roam); a stream transport (TLS or REALITY) pins the session to
-/// a specific accepted connection, identified by its per-listener id.
+/// (which can roam); a stream transport (TLS) pins the session to a specific
+/// accepted connection, identified by its per-listener id.
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Link {
@@ -379,57 +377,6 @@ fn serve_transport(
             control,
             listen_addr,
         ),
-        TransportKind::Reality => serve_reality_dispatch(
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        ),
-    }
-}
-
-/// REALITY transport dispatch. Errors cleanly unless compiled with
-/// `--features reality`.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn serve_reality_dispatch(
-    cfg: &ServerConfig,
-    config_path: &str,
-    tun: &mut TunDevice,
-    state: &mut ServerState,
-    event_loop: &mut EventLoop,
-    control: Option<&ControlListener>,
-    listen_addr: SocketAddr,
-) -> Result<()> {
-    #[cfg(feature = "reality")]
-    {
-        serve_reality(
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        )
-    }
-    #[cfg(not(feature = "reality"))]
-    {
-        let _ = (
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        );
-        Err(VpnError::Config(
-            "reality transport requires building with --features reality".into(),
-        ))
     }
 }
 
@@ -561,8 +508,7 @@ fn build_tls_listener(cfg: &ServerConfig, listen_addr: SocketAddr) -> Result<Tls
 #[cfg(unix)]
 enum HandshakeOutcome<C> {
     Established(C),
-    /// Peer was rejected and already handled (e.g. a REALITY probe relayed to
-    /// its decoy `dest`) — nothing to register.
+    /// Peer was rejected and already handled — nothing to register.
     Rejected,
     Failed(SocketAddr, std::io::Error),
 }
@@ -570,12 +516,9 @@ enum HandshakeOutcome<C> {
 /// Drain the listener's accept backlog (cheap and non-blocking) and hand each
 /// accepted TCP stream to a fresh thread to run the transport handshake.
 ///
-/// The handshake itself can block for a long time: a REALITY probe that fails
-/// auth gets relayed to a decoy `dest` inside the Go core, and the call
-/// doesn't return until that connection closes — a duration an attacker
-/// controls. Even a real TLS handshake is an attacker-paced network round
-/// trip. Running either inline on the single-threaded reactor would stall
-/// every other connection for as long as it takes.
+/// The handshake itself can block for a while: a TLS handshake is an
+/// attacker-paced network round trip. Running it inline on the single-threaded
+/// reactor would stall every other connection for as long as it takes.
 #[cfg(unix)]
 fn spawn_accepts<L: StreamServerListener>(
     listener: &Arc<L>,
@@ -606,9 +549,9 @@ fn spawn_accepts<L: StreamServerListener>(
     }
 }
 
-/// Stream-oriented transport loop shared by TLS and REALITY: each client is a
-/// separate TCP connection with its own poll fd; sessions are pinned to a
-/// connection (no address roaming).
+/// Stream-oriented transport loop for TLS: each client is a separate TCP
+/// connection with its own poll fd; sessions are pinned to a connection (no
+/// address roaming).
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn serve_stream<L: StreamServerListener>(
@@ -754,7 +697,7 @@ fn serve_stream<L: StreamServerListener>(
 }
 
 /// TLS-over-TCP transport loop: builds the listener and hands it to the
-/// stream-transport loop shared with REALITY.
+/// stream-transport loop.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn serve_tls(
@@ -1138,72 +1081,4 @@ pub fn run(_config_path: &str) -> Result<()> {
 /// Stop the server
 pub fn stop() {
     common::stop();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// REALITY transport (Go xtls/reality via FFI). Shares the stream-transport
-// loop with TLS (`serve_stream`, above) via the StreamServerListener /
-// StreamServerConn traits — sessions are pinned via Link::Stream (only one
-// stream transport runs at a time, so the id namespace can't collide).
-// Unauthenticated probes never reach here — the Go core relays them to
-// `dest`. Feature-gated.
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[cfg(all(unix, feature = "reality"))]
-fn build_reality_listener(
-    cfg: &ServerConfig,
-    listen_addr: SocketAddr,
-) -> Result<RealityServerListener> {
-    let r = &cfg.reality.server;
-    let key_file = r
-        .private_key_file
-        .as_deref()
-        .ok_or_else(|| VpnError::Config("reality.private_key_file is required".into()))?;
-    let identity = twocha_core::Identity::load(std::path::Path::new(key_file))?;
-    let private = identity.private_bytes();
-    let dest = r
-        .dest
-        .as_deref()
-        .ok_or_else(|| VpnError::Config("reality.dest is required".into()))?;
-    if r.server_names.is_empty() {
-        return Err(VpnError::Config(
-            "reality.server_names must not be empty".into(),
-        ));
-    }
-    RealityServerListener::bind(
-        listen_addr,
-        &private,
-        dest,
-        &r.server_names,
-        &r.short_ids,
-        r.max_time_diff_ms,
-    )
-    .map_err(VpnError::Io)
-}
-
-/// REALITY transport loop: builds the listener and hands it to the
-/// stream-transport loop shared with TLS.
-#[cfg(all(unix, feature = "reality"))]
-#[allow(clippy::too_many_arguments)]
-fn serve_reality(
-    cfg: &ServerConfig,
-    config_path: &str,
-    tun: &mut TunDevice,
-    state: &mut ServerState,
-    event_loop: &mut EventLoop,
-    control: Option<&ControlListener>,
-    listen_addr: SocketAddr,
-) -> Result<()> {
-    let listener = build_reality_listener(cfg, listen_addr)?;
-    serve_stream(
-        "reality/tcp",
-        listener,
-        cfg,
-        config_path,
-        tun,
-        state,
-        event_loop,
-        control,
-        listen_addr,
-    )
 }
