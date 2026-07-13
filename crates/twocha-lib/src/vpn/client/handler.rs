@@ -192,7 +192,12 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
 
 /// A built obfuscation transport, kept concrete so the QUIC carrier can be
 /// unwrapped for the threaded data plane after the handshake.
+// This enum only exists during connect setup — it is unwrapped into the data
+// plane right after the handshake, never held on the hot path — so the size gap
+// between the inline UDP carrier and the (already boxed) TLS variant is
+// deliberate; boxing the QUIC carrier would only add deref churn to the unwrap.
 #[cfg(unix)]
+#[allow(clippy::large_enum_variant)]
 enum BuiltTransport {
     Quic(UdpQuicClientTransport),
     // Boxed: the rustls connection dwarfs the UDP carrier

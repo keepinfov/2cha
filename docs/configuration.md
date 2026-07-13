@@ -139,7 +139,7 @@ off. See [Server Setup](./server-setup.md#5-gateway-mode-internet-access-for-cli
 
 ### Kernel offload and throughput (Linux)
 
-2cha automatically uses two kernel-offload features when the running kernel
+2cha automatically uses three kernel-offload features when the running kernel
 supports them — there is **no config knob**; each is probed at startup and the
 code falls back to a portable path if unavailable. Because of this, **achievable
 throughput depends on the kernel version**:
@@ -148,24 +148,24 @@ throughput depends on the kernel version**:
 |---|---|---|---|
 | **TUN GSO/GRO** | The kernel hands the tunnel large TSO super-segments to split on read and reassembles MTU packets, collapsing per-packet `read`/`write` syscalls. | Linux ≥ 2.6.27 (TSO); best on modern kernels | Desktop/server only |
 | **UDP GSO** (`UDP_SEGMENT`) | A run of equal-size datagrams to one peer is sent in **one** `sendmsg` and segmented by the kernel — the throughput-dominant full-MTU flow. | Linux ≥ 4.18 | All (probed) |
+| **UDP GRO** (`UDP_GRO`) | The kernel coalesces a run of same-flow, same-size inbound datagrams into one `recvmmsg`; 2cha reads the segment-size cmsg and splits it back into individual datagrams. | Linux ≥ 5.0 | All (probed) |
 
 Notes:
 
 - **Graceful degradation.** On a kernel too old for a feature, 2cha detects it
-  (build error or `sendmsg` returning `ENOPROTOOPT`/`EIO`) and permanently uses
-  the per-packet path for the life of the process. One binary runs correctly on
-  old and new kernels alike; only the syscall count (and thus peak throughput on
-  fast links) differs.
+  (build error, `sendmsg` returning `ENOPROTOOPT`/`EIO`, or the `UDP_GRO`
+  setsockopt failing) and permanently uses the per-packet path for the life of
+  the process. One binary runs correctly on old and new kernels alike; only the
+  syscall count (and thus peak throughput on fast links) differs.
 - **Android has no TUN offload.** On Android the `VpnService` owns the tunnel and
   2cha only wraps its file descriptor, which was created without `IFF_VNET_HDR` —
   so TUN offload is *structurally impossible* there and never used. Android still
-  benefits from UDP GSO on kernel ≥ 4.18 (Android 12+); older Android uses the
-  portable path.
-- **UDP GRO (receive coalescing) is not yet enabled** — it is a planned follow-up.
-- **Escape hatches.** Set `TWOCHA_NO_TUN_OFFLOAD=1` or `TWOCHA_NO_UDP_GSO=1` in the
-  environment to force the portable per-packet path (useful to sidestep a
-  misbehaving kernel/driver or to reproduce the fallback behaviour). Both are
-  logged at startup when set.
+  benefits from UDP GSO/GRO on kernel ≥ 4.18/5.0 (Android 12+); older Android
+  uses the portable path.
+- **Escape hatches.** Set `TWOCHA_NO_TUN_OFFLOAD=1`, `TWOCHA_NO_UDP_GSO=1`, or
+  `TWOCHA_NO_UDP_GRO=1` in the environment to force the portable per-packet path
+  (useful to sidestep a misbehaving kernel/driver or to reproduce the fallback
+  behaviour). Each is logged at startup when set.
 
 ## `[timeouts]` — both
 
