@@ -453,6 +453,7 @@ fn serve_udp(
     let mut send_pool: Vec<Vec<u8>> = Vec::with_capacity(udp_batch.capacity());
     let mut seal_scratch = SealScratch::default();
     let mut payload_buf = Vec::new();
+    let mut keepalive_buf = Vec::new();
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -486,8 +487,12 @@ fn serve_udp(
         for entry in state.sessions.values_mut() {
             if now >= entry.next_keepalive {
                 if let Link::Udp(addr) = entry.link {
-                    if let Ok(datagram) = entry.session.seal_data(&[]) {
-                        let _ = tunnel.send_to(&datagram, addr);
+                    if entry
+                        .session
+                        .seal_data_into(&[], &mut seal_scratch, &mut keepalive_buf)
+                        .is_ok()
+                    {
+                        let _ = tunnel.send_to(&keepalive_buf, addr);
                     }
                 }
                 entry.next_keepalive = now + keepalive_jitter();
@@ -701,8 +706,12 @@ fn serve_stream<L: StreamServerListener>(
             if now >= entry.next_keepalive {
                 if let Link::Stream(id) = entry.link {
                     if let Some(conn) = conns.get_mut(&id) {
-                        if let Ok(datagram) = entry.session.seal_data(&[]) {
-                            let _ = conn.send(&datagram);
+                        if entry
+                            .session
+                            .seal_data_into(&[], &mut seal_scratch, &mut seal_out)
+                            .is_ok()
+                        {
+                            let _ = conn.send(&seal_out);
                         }
                     }
                 }

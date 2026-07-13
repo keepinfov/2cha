@@ -416,8 +416,11 @@ fn run_event_loop(
         }
 
         if now >= next_keepalive {
-            if let Ok(datagram) = session.seal_data(&[]) {
-                let _ = transport.send(&datagram);
+            if session
+                .seal_data_into(&[], &mut bufs.seal_scratch, &mut bufs.keepalive)
+                .is_ok()
+            {
+                let _ = transport.send(&bufs.keepalive);
             }
             next_keepalive = now + keepalive_jitter();
         }
@@ -561,6 +564,8 @@ fn client_downlink_loop(
     let profile = cfg.obfs_profile();
     let mut batch = BatchBuffer::new(cfg.performance.batch_size);
     let mut payload = Vec::new();
+    let mut seal_scratch = SealScratch::default();
+    let mut keepalive_buf = Vec::new();
     let mut next_keepalive = Instant::now() + keepalive_jitter();
     let mut next_stats = Instant::now() + STATS_INTERVAL;
     let mut pending: Option<(ClientHandshake, Instant)> = None;
@@ -667,8 +672,13 @@ fn client_downlink_loop(
         }
 
         if now >= next_keepalive {
-            if let Ok(datagram) = session.read().unwrap().seal_data(&[]) {
-                let _ = tunnel.send_to(&datagram, remote);
+            if session
+                .read()
+                .unwrap()
+                .seal_data_into(&[], &mut seal_scratch, &mut keepalive_buf)
+                .is_ok()
+            {
+                let _ = tunnel.send_to(&keepalive_buf, remote);
             }
             next_keepalive = now + keepalive_jitter();
         }
@@ -965,6 +975,8 @@ struct IoBufs {
     send_pool: Vec<Vec<u8>>,
     batch: BatchBuffer,
     payload: Vec<u8>,
+    /// Reused sealed-keepalive datagram (TX maintenance path).
+    keepalive: Vec<u8>,
     flush_at: usize,
 }
 
@@ -979,6 +991,7 @@ impl IoBufs {
             send_pool: Vec::with_capacity(flush_at),
             batch: BatchBuffer::new(cfg.performance.batch_size),
             payload: Vec::new(),
+            keepalive: Vec::new(),
             flush_at,
         }
     }

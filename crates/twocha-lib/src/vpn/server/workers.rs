@@ -498,10 +498,16 @@ fn cleanup_sessions(shared: &SharedState) {
 /// Jittered keepalives keep NAT bindings open (worker 0 maintenance).
 fn send_keepalives(tunnel: &UdpTunnel, shared: &SharedState, now: Instant) {
     let entries: Vec<Arc<Entry>> = shared.sessions.read().unwrap().values().cloned().collect();
+    let mut scratch = SealScratch::default();
+    let mut datagram = Vec::new();
     for entry in entries {
         let mut next = entry.next_keepalive.lock().unwrap();
         if now >= *next {
-            if let Ok(datagram) = entry.session.seal_data(&[]) {
+            if entry
+                .session
+                .seal_data_into(&[], &mut scratch, &mut datagram)
+                .is_ok()
+            {
                 let _ = tunnel.send_to(&datagram, *entry.addr.lock().unwrap());
             }
             *next = now + keepalive_jitter();

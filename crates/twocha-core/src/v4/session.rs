@@ -3,7 +3,7 @@
 //! Owns the transport keys, deterministic u64 counters, counter masking,
 //! replay window and rekey bookkeeping for one tunnel session.
 
-use rand::{Rng, RngCore};
+use rand::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -49,10 +49,58 @@ const KEEPALIVE_PAD_MIN: usize = 24;
 const KEEPALIVE_PAD_MAX: usize = 256;
 
 /// Reusable scratch space for [`Session::seal_data_into`]: holds the inner
-/// plaintext frame between calls so the hot path allocates nothing.
+/// plaintext frame between calls so the hot path allocates nothing, plus a fast
+/// PRNG for padding content.
 #[derive(Default)]
 pub struct SealScratch {
     inner: Vec<u8>,
+    pad_rng: PadRng,
+}
+
+/// Fast, non-cryptographic PRNG (wyrand) used **only** to fill padding content.
+///
+/// Padding bytes ride *inside* the AEAD — their content is never observable and
+/// does not affect security (ChaCha20-Poly1305 is IND-CPA regardless of the
+/// plaintext), so generating them does not need the CSPRNG, and avoiding a
+/// `rand::thread_rng()` fill per packet trims the sub-MTU/keepalive TX path.
+/// Everything an observer *can* see — the padding *length*, the AWG magic
+/// header, the QUIC byte0 — still draws from `rand::thread_rng()` so it stays
+/// unpredictable. Seeded once per scratch from the CSPRNG.
+struct PadRng {
+    state: u64,
+}
+
+impl Default for PadRng {
+    fn default() -> Self {
+        let mut s = rand::random::<u64>();
+        if s == 0 {
+            s = 0x9E37_79B9_7F4A_7C15;
+        }
+        PadRng { state: s }
+    }
+}
+
+impl PadRng {
+    #[inline]
+    fn next_u64(&mut self) -> u64 {
+        // wyrand: state += golden-ratio constant; mix via a 128-bit multiply-fold.
+        self.state = self.state.wrapping_add(0xA076_1D64_78BD_642F);
+        let t = (self.state as u128).wrapping_mul((self.state ^ 0xE703_7ED1_A0B4_28DB) as u128);
+        ((t >> 64) ^ t) as u64
+    }
+
+    #[inline]
+    fn fill(&mut self, buf: &mut [u8]) {
+        let mut chunks = buf.chunks_exact_mut(8);
+        for c in &mut chunks {
+            c.copy_from_slice(&self.next_u64().to_le_bytes());
+        }
+        let rem = chunks.into_remainder();
+        if !rem.is_empty() {
+            let bytes = self.next_u64().to_le_bytes();
+            rem.copy_from_slice(&bytes[..rem.len()]);
+        }
+    }
 }
 
 /// An established session. The data-plane methods (`seal_data*`, `open_data*`)
@@ -184,14 +232,16 @@ impl Session {
             rng.gen_range(0..=data_pad_max.min(budget))
         };
 
-        // Inner framing (u16-BE length + payload + pad), padded in place
-        let inner = &mut scratch.inner;
+        // Inner framing (u16-BE length + payload + pad), padded in place.
+        // Disjoint borrows so the padding fill uses the fast `pad_rng` while the
+        // frame is built in `inner`.
+        let SealScratch { inner, pad_rng } = scratch;
         inner.clear();
         inner.extend_from_slice(&(payload.len() as u16).to_be_bytes());
         inner.extend_from_slice(payload);
         let pad_start = inner.len();
         inner.resize(pad_start + pad_len, 0);
-        rng.fill_bytes(&mut inner[pad_start..]);
+        pad_rng.fill(&mut inner[pad_start..]);
 
         out.clear();
         out.resize(hdr_len + inner.len() + POLY1305_TAG_SIZE, 0);

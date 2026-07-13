@@ -17,6 +17,12 @@ use twocha_protocol::{NetworkError, Result};
 /// could reach 1519 bytes.
 const RECV_BUF_LEN: usize = 2048;
 
+/// Upper bound on [`BatchBuffer`] capacity. Raised from the old hard cap of 64
+/// so a throughput-tuned deployment can set a larger `performance.batch_size`
+/// and amortize the batched-I/O syscall over more datagrams. At 1024 slots the
+/// per-batch receive memory is 1024 * 2048 = 2 MiB.
+const MAX_BATCH: usize = 1024;
+
 /// Rate-limited (1/s) warning for truncated datagrams so a flood of
 /// oversized packets cannot spam the log.
 fn warn_truncated(len: usize, src: Option<SocketAddr>) {
@@ -449,9 +455,12 @@ pub struct BatchBuffer {
 }
 
 impl BatchBuffer {
-    /// `batch_size` is clamped to 1..=64.
+    /// `batch_size` is clamped to `1..=MAX_BATCH`, honoring the configured
+    /// `performance.batch_size` (default 32). A larger batch amortizes the
+    /// `recvmmsg`/`sendmmsg` syscall over more datagrams; the ceiling bounds the
+    /// per-batch memory (`MAX_BATCH * RECV_BUF_LEN`).
     pub fn new(batch_size: usize) -> Self {
-        let n = batch_size.clamp(1, 64);
+        let n = batch_size.clamp(1, MAX_BATCH);
         BatchBuffer {
             bufs: vec![vec![0u8; RECV_BUF_LEN]; n],
             lens: vec![0; n],
@@ -731,7 +740,12 @@ mod tests {
     fn test_batch_buffer_clamp() {
         assert_eq!(BatchBuffer::new(0).capacity(), 1);
         assert_eq!(BatchBuffer::new(32).capacity(), 32);
-        assert_eq!(BatchBuffer::new(1000).capacity(), 64);
+        // Configured sizes up to the raised ceiling are honored verbatim.
+        assert_eq!(BatchBuffer::new(256).capacity(), 256);
+        assert_eq!(BatchBuffer::new(MAX_BATCH).capacity(), MAX_BATCH);
+        // Anything above the ceiling clamps to it.
+        assert_eq!(BatchBuffer::new(MAX_BATCH + 1).capacity(), MAX_BATCH);
+        assert_eq!(BatchBuffer::new(100_000).capacity(), MAX_BATCH);
     }
 
     #[test]
