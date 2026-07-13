@@ -10,9 +10,11 @@
 
 mod constants;
 mod error;
+pub mod obfs;
 mod replay;
 pub mod wire;
 
 pub use constants::*;
 pub use error::{CryptoError, NetworkError, ProtocolError, Result, TunError, VpnError};
+pub use obfs::{AwgParams, HeaderRange, MsgClass, ObfsProfile};
 pub use replay::ReplayWindow;

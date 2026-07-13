@@ -20,9 +20,10 @@ pub struct MobileExportParams {
     pub prefix: u8,
     pub route_all: bool,
     pub dns_servers: Vec<String>,
-    /// "quic" or "tls"
+    /// "quic", "tls" or "awg"
     pub transport: String,
     pub tls_sni: Option<String>,
+    pub awg: Option<super::AwgWizard>,
 }
 
 /// Build the app-importable JSON (field names match the Kotlin `VpnConfig`
@@ -57,6 +58,14 @@ pub fn mobile_config_json(p: &MobileExportParams) -> String {
     });
     if let Some(ref sni) = p.tls_sni {
         root["tls"] = json!({ "sni": sni });
+    }
+    if let Some(ref a) = p.awg {
+        root["awg"] = json!({
+            "h1": a.h[0], "h2": a.h[1], "h3": a.h[2], "h4": a.h[3],
+            "header_span": a.header_span,
+            "s1": a.s[0], "s2": a.s[1], "s3": a.s[2], "s4": a.s[3],
+            "jc": a.jc, "jmin": a.jmin, "jmax": a.jmax,
+        });
     }
     root.to_string()
 }
@@ -132,6 +141,7 @@ mod tests {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             transport: "quic".into(),
             tls_sni: None,
+            awg: None,
         });
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["client"]["server"], "203.0.113.7:51820");
@@ -166,6 +176,7 @@ mod tests {
             dns_servers: Vec::new(),
             transport: "tls".into(),
             tls_sni: Some("www.cloudflare.com".into()),
+            awg: None,
         });
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["client"]["transport"], "tls");
@@ -184,6 +195,7 @@ mod tests {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             transport: "quic".into(),
             tls_sni: None,
+            awg: None,
         });
         let qr = render_qr(&json).expect("config-sized payloads must fit a QR");
         assert!(qr.lines().count() > 10);

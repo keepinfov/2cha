@@ -51,6 +51,8 @@ pub struct ClientConfig {
     #[serde(default)]
     pub tls: TlsSection,
     #[serde(default)]
+    pub awg: super::common::AwgSection,
+    #[serde(default)]
     pub ipv4: Ipv4ClientSection,
     #[serde(default)]
     pub ipv6: Ipv6ClientSection,
@@ -162,7 +164,19 @@ impl ClientConfig {
             return Err(ConfigError::Invalid("ipv6.prefix must be 0..=128".into()));
         }
         self.server_public()?;
+        if self.client.transport == TransportKind::Awg {
+            self.awg.validate()?;
+            validate_awg_mtu(self.tun.mtu)?;
+        }
         Ok(())
+    }
+
+    /// The obfuscation profile the wire codec should use for this client.
+    pub fn obfs_profile(&self) -> twocha_protocol::ObfsProfile {
+        match self.client.transport {
+            TransportKind::Awg => twocha_protocol::ObfsProfile::Awg(self.awg.to_params()),
+            _ => twocha_protocol::ObfsProfile::Quic,
+        }
     }
 
     /// The server's static public key (required for clients)

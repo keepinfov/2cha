@@ -23,7 +23,7 @@ or `2cha init client --template > client.toml` (see [Quick Start](./quickstart.m
 | `listen` | string | **required** | IPv4 listen address `IP:port`, e.g. `"0.0.0.0:51820"`. |
 | `listen_v6` | string | `None` | Optional IPv6 listen address, e.g. `"[::]:51820"`. |
 | `max_clients` | integer | `256` | Maximum concurrent client sessions (must be > 0). |
-| `transport` | `"quic"`\|`"tls"` | `"quic"` | Obfuscation transport. **Must match the client's `transport`.** See [Transports](./transports.md). |
+| `transport` | `"quic"`\|`"tls"`\|`"awg"` | `"quic"` | Obfuscation transport. **Must match the client's `transport`.** See [Transports](./transports.md). |
 
 A server config must declare at least one `[[peers]]` entry or it fails validation at load.
 
@@ -34,7 +34,7 @@ A server config must declare at least one `[[peers]]` entry or it fails validati
 | `server` | string | **required** | Server address: `IP:port` or `host:port` (e.g. `"vpn.example.com:51820"`). |
 | `prefer_ipv6` | bool | `false` | Prefer an IPv6 address when a hostname resolves to both. |
 | `dns_lookup` | `"auto"`\|`"always"`\|`"never"` | `"auto"` | Hostname resolution mode. `"true"`/`"false"` are accepted aliases for `always`/`never`. `auto` parses an IP first, then falls back to DNS. |
-| `transport` | `"quic"`\|`"tls"` | `"quic"` | Obfuscation transport. **Must match the server's `transport`.** |
+| `transport` | `"quic"`\|`"tls"`\|`"awg"` | `"quic"` | Obfuscation transport. **Must match the server's `transport`.** |
 
 ## `[tun]` — both
 
@@ -160,6 +160,24 @@ off. See [Server Setup](./server-setup.md#5-gateway-mode-internet-access-for-cli
 
 See [Transports](./transports.md) for why a self-signed cert is safe here (Noise_IK provides
 the real authentication inside the TLS tunnel).
+
+## `[awg]` — both (only used when `transport = "awg"`)
+
+AmneziaWG-2.0-style randomized obfuscation. The wire-format keys **must be identical on both
+ends**; the junk/signature keys are client-only. `2cha init` generates a matched set — see
+[Transports](./transports.md#the-awg-section) for the full explanation and tag syntax.
+
+| Key | Type | Default | Description | Side |
+|---|---|---|---|---|
+| `h1`–`h4` | u32 | quadrant bases | Magic-header base for init/resp/cookie/data. Each packet's first 4 bytes are random in `[hN, hN + header_span]`; the four ranges must not overlap. | both |
+| `header_span` | u32 | `16777215` | Width of each header range. `0` = static (AmneziaWG 1.x) headers. | both |
+| `s1`–`s4` | u16 | `24`/`40`/`24`/`16` | Max random padding for init/resp/cookie/data packets. | both |
+| `jc` | u8 | `4` | Junk packets sent before each handshake. `0` disables. | client only |
+| `jmin` / `jmax` | u16 | `64` / `1024` | Junk-packet size range in bytes (`jmin <= jmax`). | client only |
+| `i1`–`i5` | string | `None` | Optional CPS signature-packet templates sent before the junk burst. | client only |
+
+**MTU note:** AWG's 4-byte header is 3 bytes wider than the QUIC short header, so with
+`transport = "awg"` the maximum `tun.mtu` is **1462** (vs 1465 for `quic`/`tls`).
 
 ---
 

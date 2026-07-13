@@ -32,6 +32,8 @@ pub struct ServerConfig {
     pub logging: LoggingSection,
     #[serde(default)]
     pub tls: TlsSection,
+    #[serde(default)]
+    pub awg: super::common::AwgSection,
 }
 
 /// An authorized peer entry
@@ -158,7 +160,19 @@ impl ServerConfig {
             ));
         }
         self.peer_keys()?;
+        if self.server.transport == super::TransportKind::Awg {
+            self.awg.validate()?;
+            validate_awg_mtu(self.tun.mtu)?;
+        }
         Ok(())
+    }
+
+    /// The obfuscation profile the wire codec should use for this server.
+    pub fn obfs_profile(&self) -> twocha_protocol::ObfsProfile {
+        match self.server.transport {
+            super::TransportKind::Awg => twocha_protocol::ObfsProfile::Awg(self.awg.to_params()),
+            _ => twocha_protocol::ObfsProfile::Quic,
+        }
     }
 
     /// Decoded whitelist of authorized peer public keys

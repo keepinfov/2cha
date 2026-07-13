@@ -30,9 +30,10 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use twocha_core::v4::{session::keepalive_jitter, ClientHandshake, SealScratch, Session};
 #[cfg(unix)]
-use twocha_core::{CipherSuite, ClientConfig, Identity, TransportKind};
+use twocha_core::{ClientConfig, Identity, TransportKind};
 #[cfg(unix)]
 use twocha_protocol::wire::{self, WireMsg};
+use twocha_protocol::ObfsProfile;
 use twocha_protocol::Result;
 #[cfg(unix)]
 use twocha_protocol::{NetworkError, VpnError};
@@ -112,7 +113,7 @@ pub fn run(config_path: &str, quiet: bool) -> Result<()> {
     // Initial Noise_IK handshake, driven over the transport (retry + backoff)
     let session = handshake_over_transport(
         transport.as_dyn_mut(),
-        cfg.crypto.cipher,
+        &cfg,
         &identity,
         server_public,
         common::flag(),
@@ -215,7 +216,9 @@ impl BuiltTransport {
 #[cfg(unix)]
 fn build_transport(cfg: &ClientConfig, server_addr: SocketAddr) -> Result<BuiltTransport> {
     let transport = match cfg.client.transport {
-        TransportKind::Quic => {
+        // AWG reuses the plain UDP carrier — only the wire profile and the
+        // pre-handshake junk/signature prelude differ from quic.
+        TransportKind::Quic | TransportKind::Awg => {
             let local_addr: SocketAddr = if server_addr.is_ipv6() {
                 SocketAddr::from(([0u16; 8], 0))
             } else {
@@ -353,6 +356,7 @@ fn run_event_loop(
         event_loop.add_fd(*fd, POLLIN);
     }
 
+    let profile = cfg.obfs_profile();
     let mut bufs = IoBufs::new(cfg);
     let mut next_keepalive = Instant::now() + keepalive_jitter();
     let mut next_stats = Instant::now() + STATS_INTERVAL;
@@ -372,6 +376,7 @@ fn run_event_loop(
                         &mut session,
                         &mut pending,
                         &mut bufs,
+                        &profile,
                         stats,
                     )?;
                 }
@@ -391,7 +396,17 @@ fn run_event_loop(
         let needs_rekey = session.should_rekey() || session.expired();
         let pending_stale = matches!(&pending, Some((_, t)) if t.elapsed() > REKEY_RETRY);
         if (needs_rekey && pending.is_none()) || pending_stale {
-            match ClientHandshake::new(cfg.crypto.cipher, identity, server_public) {
+            if cfg.client.transport == TransportKind::Awg {
+                for dg in crate::transport::awg_prelude::build_prelude(&cfg.awg) {
+                    let _ = transport.send(&dg);
+                }
+            }
+            match ClientHandshake::with_profile(
+                cfg.crypto.cipher,
+                identity,
+                server_public,
+                cfg.obfs_profile(),
+            ) {
                 Ok(hs) => {
                     let _ = transport.send(hs.datagram());
                     pending = Some((hs, now));
@@ -543,6 +558,7 @@ fn client_downlink_loop(
     let mut event_loop = EventLoop::new();
     event_loop.add_fd(tunnel.fd(), POLLIN);
 
+    let profile = cfg.obfs_profile();
     let mut batch = BatchBuffer::new(cfg.performance.batch_size);
     let mut payload = Vec::new();
     let mut next_keepalive = Instant::now() + keepalive_jitter();
@@ -566,7 +582,7 @@ fn client_downlink_loop(
                     if src != remote {
                         continue; // point-to-point filter
                     }
-                    match wire::parse(data) {
+                    match wire::parse_profile(&profile, data) {
                         Ok(WireMsg::Data {
                             receiver_cid,
                             masked_counter,
@@ -631,7 +647,17 @@ fn client_downlink_loop(
         };
         let pending_stale = matches!(&pending, Some((_, t)) if t.elapsed() > REKEY_RETRY);
         if (needs_rekey && pending.is_none()) || pending_stale {
-            match ClientHandshake::new(cfg.crypto.cipher, identity, server_public) {
+            if cfg.client.transport == TransportKind::Awg {
+                for dg in crate::transport::awg_prelude::build_prelude(&cfg.awg) {
+                    let _ = tunnel.send_to(&dg, remote);
+                }
+            }
+            match ClientHandshake::with_profile(
+                cfg.crypto.cipher,
+                identity,
+                server_public,
+                cfg.obfs_profile(),
+            ) {
                 Ok(hs) => {
                     let _ = tunnel.send_to(hs.datagram(), remote);
                     pending = Some((hs, now));
@@ -707,7 +733,7 @@ pub unsafe fn run_mobile(
 
     let session = handshake_over_transport(
         transport.as_dyn_mut(),
-        cfg.crypto.cipher,
+        &cfg,
         &identity,
         server_public,
         running,
@@ -740,11 +766,14 @@ pub unsafe fn run_mobile(
 #[cfg(unix)]
 fn handshake_over_transport(
     transport: &mut dyn ClientTransport,
-    suite: CipherSuite,
+    cfg: &ClientConfig,
     identity: &Identity,
     server_public: [u8; 32],
     running: &AtomicBool,
 ) -> Result<Session> {
+    let suite = cfg.crypto.cipher;
+    let profile = cfg.obfs_profile();
+    let awg_prelude = cfg.client.transport == TransportKind::Awg;
     transport.set_nonblocking(true)?;
     let mut buf = Vec::new();
 
@@ -790,7 +819,12 @@ fn handshake_over_transport(
             started.elapsed()
         );
 
-        let mut hs = ClientHandshake::new(suite, identity, server_public)?;
+        if awg_prelude {
+            for dg in crate::transport::awg_prelude::build_prelude(&cfg.awg) {
+                let _ = transport.send(&dg);
+            }
+        }
+        let mut hs = ClientHandshake::with_profile(suite, identity, server_public, profile.clone())?;
         if let Err(e) = transport.send(hs.datagram()) {
             send_failures += 1;
             last_send_err = e.to_string();
@@ -854,7 +888,7 @@ fn handshake_over_transport(
                     continue;
                 }
             }
-            match wire::parse(&buf) {
+            match wire::parse_profile(&profile, &buf) {
                 Ok(WireMsg::Cookie { nonce, sealed }) => {
                     cookies_seen += 1;
                     log::debug!("noise handshake: cookie challenge received, retrying init");
@@ -1003,6 +1037,7 @@ fn handle_transport_read(
     session: &mut Session,
     pending: &mut Option<(ClientHandshake, Instant)>,
     bufs: &mut IoBufs,
+    profile: &ObfsProfile,
     stats: Option<&StatsEmitter>,
 ) -> Result<()> {
     loop {
@@ -1015,7 +1050,7 @@ fn handle_transport_read(
             let Some((_, data)) = bufs.batch.get(i) else {
                 continue; // skipped slot (truncated / spoofed source)
             };
-            match wire::parse(data) {
+            match wire::parse_profile(profile, data) {
                 Ok(WireMsg::Data {
                     receiver_cid,
                     masked_counter,

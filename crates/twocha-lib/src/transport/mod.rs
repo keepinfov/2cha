@@ -18,6 +18,7 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::io::RawFd;
 
+pub mod awg_prelude;
 pub mod tls;
 pub mod udp_quic;
 

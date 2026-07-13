@@ -15,6 +15,7 @@ twocha-protocol.workspace = true
 twocha-core.workspace = true
 
 log.workspace = true
+rand.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

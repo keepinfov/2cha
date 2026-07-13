@@ -14,13 +14,15 @@
 
 Minimalist anti-censorship VPN with IPv4/IPv6 dual-stack support. Protocol v4: a Noise_IK
 handshake (X25519 + ChaCha20-Poly1305, forward secrecy, per-client keys) carried inside an
-obfuscation transport — UDP with QUIC mimicry by default, or real TLS 1.3 over TCP — to
-resist DPI classification and active probing.
+obfuscation transport — UDP with QUIC mimicry by default, real TLS 1.3 over TCP, or
+AmneziaWG-style randomized UDP — to resist DPI classification and active probing.
 
 ## Features
 
 - **DPI Resistance** — traffic mimics QUIC (no constant protocol bytes, randomized padding,
-  jittered keepalives), or a real TLS 1.3 session over TCP. See [Transports](docs/transports.md).
+  jittered keepalives), rides a real TLS 1.3 session over TCP, or uses AmneziaWG-2.0-style
+  randomization (no constant bytes at all, plus junk/signature packets). See
+  [Transports](docs/transports.md).
 - **Modern Crypto** — Noise_IK (X25519), ChaCha20-Poly1305 or AES-256-GCM, forward secrecy,
   automatic rekeying.
 - **Per-Client Keys** — clients are authenticated against a public-key whitelist; no shared PSK.
@@ -76,7 +78,7 @@ Full documentation lives in [`docs/`](docs/README.md):
 - **[Config CLI](docs/config-cli.md)** — inspect/edit configs with `2cha config`, validated and atomic
 - **[NixOS](docs/nixos.md)** — declarative `services.twocha` server/client
 - **[Configuration Reference](docs/configuration.md)** — every config key, type, and default
-- **[Transports](docs/transports.md)** — `quic` vs `tls`
+- **[Transports](docs/transports.md)** — `quic` vs `tls` vs `awg`
 - **[Routing](docs/routing.md)** — full vs split tunnel, DNS
 - **[Troubleshooting](docs/troubleshooting.md)** — common failures and fixes
 - **[Testing](docs/testing.md)** — the end-to-end network-namespace harness

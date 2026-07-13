@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::mac::HeaderMask;
 use crate::crypto::noise::SessionCrypto;
+use twocha_protocol::obfs::MsgClass;
 use twocha_protocol::wire::{self, CID_LEN};
 use twocha_protocol::{
-    CryptoError, ProtocolError, ReplayWindow, Result, MAX_PACKET_SIZE, POLY1305_TAG_SIZE,
+    CryptoError, ObfsProfile, ProtocolError, ReplayWindow, Result, MAX_PACKET_SIZE,
+    POLY1305_TAG_SIZE,
 };
 
 /// Initiate a new handshake after this much session time
@@ -62,6 +64,8 @@ pub struct Session {
     crypto: SessionCrypto,
     tx_mask: HeaderMask,
     rx_mask: HeaderMask,
+    /// On-wire framing for outbound data packets (QUIC-mimic or AWG).
+    profile: ObfsProfile,
     /// CID the peer puts on datagrams addressed to us
     pub local_cid: [u8; CID_LEN],
     /// CID we put on datagrams addressed to the peer
@@ -89,6 +93,7 @@ impl Session {
         crypto: SessionCrypto,
         tx_mask: HeaderMask,
         rx_mask: HeaderMask,
+        profile: ObfsProfile,
         local_cid: [u8; CID_LEN],
         remote_cid: [u8; CID_LEN],
         initiator: bool,
@@ -97,6 +102,7 @@ impl Session {
             crypto,
             tx_mask,
             rx_mask,
+            profile,
             local_cid,
             remote_cid,
             tx_counter: AtomicU64::new(0),
@@ -159,13 +165,23 @@ impl Session {
         }
         let counter = self.tx_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // Header/overhead depend on the profile (AWG's magic header is 3 bytes
+        // wider than QUIC's short header), and AWG can override the data pad max.
+        let hdr_len = wire::data_header_len(&self.profile);
+        let ctr_off = wire::data_counter_offset(&self.profile);
+        let overhead = hdr_len + 2 + POLY1305_TAG_SIZE;
+        let data_pad_max = match &self.profile {
+            ObfsProfile::Quic => DATA_PAD_MAX,
+            ObfsProfile::Awg(p) => p.pad_max(MsgClass::Data),
+        };
+
         let mut rng = rand::thread_rng();
         let pad_len = if payload.is_empty() {
-            // Keepalives (35 + at most 256 bytes) always fit in MAX_PACKET_SIZE
+            // Keepalives always fit in MAX_PACKET_SIZE (overhead + at most 256).
             rng.gen_range(KEEPALIVE_PAD_MIN..=KEEPALIVE_PAD_MAX)
         } else {
-            let budget = MAX_PACKET_SIZE.saturating_sub(DATA_OVERHEAD + payload.len());
-            rng.gen_range(0..=DATA_PAD_MAX.min(budget))
+            let budget = MAX_PACKET_SIZE.saturating_sub(overhead + payload.len());
+            rng.gen_range(0..=data_pad_max.min(budget))
         };
 
         // Inner framing (u16-BE length + payload + pad), padded in place
@@ -178,18 +194,32 @@ impl Session {
         rng.fill_bytes(&mut inner[pad_start..]);
 
         out.clear();
-        out.resize(wire::DATA_HEADER_LEN + inner.len() + POLY1305_TAG_SIZE, 0);
-        out[0] = 0x40 | (rng.gen::<u8>() & 0x3F);
-        out[1..1 + CID_LEN].copy_from_slice(&self.remote_cid);
-        // out[9..17] stays zeroed until the mask is derived from the ciphertext
+        out.resize(hdr_len + inner.len() + POLY1305_TAG_SIZE, 0);
+        match &self.profile {
+            ObfsProfile::Quic => {
+                out[0] = 0x40 | (rng.gen::<u8>() & 0x3F);
+                out[1..1 + CID_LEN].copy_from_slice(&self.remote_cid);
+            }
+            ObfsProfile::Awg(p) => {
+                let h = p.header(MsgClass::Data);
+                let hv = if h.min == h.max {
+                    h.min
+                } else {
+                    rng.gen_range(h.min..=h.max)
+                };
+                out[..wire::AWG_HEADER_LEN].copy_from_slice(&hv.to_be_bytes());
+                out[wire::AWG_HEADER_LEN..wire::AWG_HEADER_LEN + CID_LEN]
+                    .copy_from_slice(&self.remote_cid);
+            }
+        }
+        // The counter bytes at ctr_off stay zeroed until the mask is derived
+        // from the ciphertext.
         let n = self
             .crypto
-            .encrypt_into(counter, inner, &mut out[wire::DATA_HEADER_LEN..])?;
-        out.truncate(wire::DATA_HEADER_LEN + n);
-        let masked = self
-            .tx_mask
-            .mask_counter(counter, &out[wire::DATA_HEADER_LEN..]);
-        out[1 + CID_LEN..wire::DATA_HEADER_LEN].copy_from_slice(&masked);
+            .encrypt_into(counter, inner, &mut out[hdr_len..])?;
+        out.truncate(hdr_len + n);
+        let masked = self.tx_mask.mask_counter(counter, &out[hdr_len..]);
+        out[ctr_off..ctr_off + 8].copy_from_slice(&masked);
 
         self.last_send_ms
             .store(self.created.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -297,6 +327,7 @@ mod tests {
             client.into_session().unwrap(),
             HeaderMask::new(&seed_client, &seed_server, 0x01),
             HeaderMask::new(&seed_client, &seed_server, 0x02),
+            ObfsProfile::Quic,
             [3; CID_LEN],
             [4; CID_LEN],
             true,
@@ -305,6 +336,7 @@ mod tests {
             server.into_session().unwrap(),
             HeaderMask::new(&seed_client, &seed_server, 0x02),
             HeaderMask::new(&seed_client, &seed_server, 0x01),
+            ObfsProfile::Quic,
             [4; CID_LEN],
             [3; CID_LEN],
             false,

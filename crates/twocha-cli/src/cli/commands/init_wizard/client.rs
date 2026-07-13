@@ -104,6 +104,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<()> {
         },
         transport: transport.kind,
         tls_sni: transport.sni,
+        awg: transport.awg,
     });
 
     twocha_core::ClientConfig::parse(&config)

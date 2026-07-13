@@ -255,6 +255,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
                 dns_servers,
                 transport: transport.kind.clone(),
                 tls_sni: transport.sni.clone(),
+                awg: transport.awg.clone(),
             });
             mobiles.push(MobileClient {
                 name,
@@ -276,6 +277,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
                 dns_servers,
                 transport: transport.kind.clone(),
                 tls_sni: transport.sni.clone(),
+                awg: transport.awg.clone(),
             });
 
             peers.push(PeerParams {
@@ -317,6 +319,7 @@ pub fn run(output_dir: Option<&Path>) -> Result<PathBuf> {
         tls_sni: transport.sni.clone(),
         tls_cert_file: transport.cert_file.clone(),
         tls_key_file: transport.key_file.clone(),
+        awg: transport.awg.clone(),
     });
 
     let parsed = twocha_core::ServerConfig::parse(&server_cfg)

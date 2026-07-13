@@ -40,6 +40,7 @@ use twocha_core::v4::{
 use twocha_core::{ServerConfig, TransportKind};
 #[cfg(unix)]
 use twocha_protocol::wire::{self, WireMsg, CID_LEN};
+use twocha_protocol::ObfsProfile;
 use twocha_protocol::Result;
 #[cfg(unix)]
 use twocha_protocol::VpnError;
@@ -81,6 +82,8 @@ struct SessionEntry {
 #[cfg(unix)]
 struct ServerState {
     engine: ServerHandshakeEngine,
+    /// Wire framing used to classify inbound datagrams (QUIC-mimic or AWG).
+    profile: ObfsProfile,
     limiter: RateLimiter,
     allowed: HashSet<[u8; 32]>,
     /// Optional labels for log/list output, keyed by peer public key
@@ -182,7 +185,11 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Opt-in worker pool: QUIC + Linux + performance.worker_threads >= 2.
     // It needs a multi-queue TUN, so force the flag on when active.
-    let workers = if cfg.server.transport == TransportKind::Quic && cfg!(target_os = "linux") {
+    let workers = if matches!(
+        cfg.server.transport,
+        TransportKind::Quic | TransportKind::Awg
+    ) && cfg!(target_os = "linux")
+    {
         cfg.performance.worker_threads
     } else {
         0
@@ -277,7 +284,12 @@ pub fn run(config_path: &str) -> Result<()> {
         .collect();
 
     let mut state = ServerState {
-        engine: ServerHandshakeEngine::new(cfg.crypto.cipher, &identity),
+        engine: ServerHandshakeEngine::with_profile(
+            cfg.crypto.cipher,
+            &identity,
+            cfg.obfs_profile(),
+        ),
+        profile: cfg.obfs_profile(),
         limiter: RateLimiter::new(),
         allowed: peer_keys.into_iter().collect(),
         peer_names,
@@ -296,11 +308,16 @@ pub fn run(config_path: &str) -> Result<()> {
     );
 
     #[cfg(target_os = "linux")]
-    let serve_result = if workers >= 2 && cfg.server.transport == TransportKind::Quic {
+    let serve_result = if workers >= 2
+        && matches!(
+            cfg.server.transport,
+            TransportKind::Quic | TransportKind::Awg
+        ) {
         // Multi-worker pool consumes the tun (one queue per worker) and
         // builds its own shared state; `state` stays unused on this path.
         let ServerState {
             engine,
+            profile,
             allowed,
             peer_names,
             ..
@@ -310,6 +327,7 @@ pub fn run(config_path: &str) -> Result<()> {
             config_path,
             tun,
             engine,
+            profile,
             allowed,
             peer_names,
             control.as_ref(),
@@ -359,7 +377,7 @@ fn serve_transport(
     listen_addr: SocketAddr,
 ) -> Result<()> {
     match cfg.server.transport {
-        TransportKind::Quic => serve_udp(
+        TransportKind::Quic | TransportKind::Awg => serve_udp(
             cfg,
             config_path,
             tun,
@@ -1007,7 +1025,7 @@ fn handle_datagram(
     data: &[u8],
     payload_buf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    let msg = wire::parse(data).ok()?;
+    let msg = wire::parse_profile(&state.profile, data).ok()?;
 
     match msg {
         WireMsg::Init { .. } => {

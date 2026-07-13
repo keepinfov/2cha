@@ -11,9 +11,9 @@ pub use client::{
     example_client_config, ClientConfig, DnsSection, Ipv4ClientSection, Ipv6ClientSection,
 };
 pub use common::{
-    decode_config_public_key, prefix_to_netmask_v4, prefix_to_netmask_v6, CipherSuite, ConfigError,
-    CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TlsSection, TransportKind,
-    TunSection,
+    decode_config_public_key, prefix_to_netmask_v4, prefix_to_netmask_v6, AwgSection, CipherSuite,
+    ConfigError, CryptoSection, LoggingSection, PerformanceSection, TimeoutsSection, TlsSection,
+    TransportKind, TunSection,
 };
 pub use edit::{get_value, set_value};
 pub use server::{

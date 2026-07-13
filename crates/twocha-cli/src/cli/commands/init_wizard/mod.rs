@@ -31,6 +31,42 @@ fn prompt_cipher(theme: &ColorfulTheme) -> Result<String> {
     Ok(ciphers[idx].to_string())
 }
 
+/// AmneziaWG obfuscation parameters generated once per wizard run and shared,
+/// byte-for-byte, between the server and every client it emits (the magic
+/// headers and padding are part of the wire format — both ends must agree).
+#[derive(Clone)]
+pub struct AwgWizard {
+    pub h: [u32; 4],
+    pub header_span: u32,
+    pub s: [u16; 4],
+    pub jc: u8,
+    pub jmin: u16,
+    pub jmax: u16,
+}
+
+impl AwgWizard {
+    /// Roll a fresh set of parameters: four non-overlapping magic-header ranges
+    /// (one random base per 2^30 quadrant, so the `header_span`-wide ranges can
+    /// never collide) plus sane default padding and junk sizes.
+    fn generate() -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        const QUADRANT: u32 = 0x4000_0000;
+        const SPAN: u32 = 0x00ff_ffff;
+        // Base within a quadrant, leaving room for the span so the range stays
+        // inside its quadrant and thus disjoint from the others.
+        let mut base = |k: u32| k * QUADRANT + rng.gen_range(0..(QUADRANT - SPAN));
+        AwgWizard {
+            h: [base(0), base(1), base(2), base(3)],
+            header_span: SPAN,
+            s: [24, 40, 24, 16],
+            jc: 4,
+            jmin: 64,
+            jmax: 1024,
+        }
+    }
+}
+
 /// The obfuscation transport choice gathered from the wizard.
 #[derive(Default)]
 pub struct TransportChoice {
@@ -38,12 +74,21 @@ pub struct TransportChoice {
     pub sni: Option<String>,
     pub cert_file: Option<String>,
     pub key_file: Option<String>,
+    pub awg: Option<AwgWizard>,
 }
 
 impl TransportChoice {
     fn quic() -> Self {
         TransportChoice {
             kind: "quic".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn awg() -> Self {
+        TransportChoice {
+            kind: "awg".to_string(),
+            awg: Some(AwgWizard::generate()),
             ..Default::default()
         }
     }
@@ -56,6 +101,7 @@ fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoi
     let items = [
         "quic  — UDP, QUIC-mimicry framing (default)",
         "tls   — TCP, real TLS 1.3 with Noise inside (e.g. on :443)",
+        "awg   — UDP, AmneziaWG-style randomized headers + junk packets",
     ];
 
     let idx = Select::with_theme(theme)
@@ -68,6 +114,7 @@ fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoi
     match idx {
         0 => Ok(TransportChoice::quic()),
         1 => prompt_tls(theme, server),
+        2 => Ok(TransportChoice::awg()),
         _ => unreachable!("transport selection out of range"),
     }
 }
@@ -108,6 +155,7 @@ fn prompt_tls(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
         sni: Some(sni),
         cert_file,
         key_file,
+        awg: None,
     })
 }
 
