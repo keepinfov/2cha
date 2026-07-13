@@ -9,6 +9,67 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::Duration;
 use twocha_protocol::{NetworkError, Result};
 
+// UDP GSO socket option. glibc's headers define it but the `libc` crate only
+// exposes it for uclibc/android/l4re, so mirror the kernel value here (stable
+// UAPI). `SOL_UDP` and the `CMSG_*` helpers come from `libc`. UDP GSO needs
+// kernel >= 4.18; older kernels reject the cmsg and we fall back to `sendmmsg`.
+#[cfg(target_os = "linux")]
+const UDP_SEGMENT: libc::c_int = 103;
+
+/// Cap on datagrams coalesced into one GSO `sendmsg`. The kernel historically
+/// limits a GSO super-buffer to 64 segments (`UDP_MAX_SEGMENTS`); staying at or
+/// below that keeps a single `sendmsg` valid across kernels.
+#[cfg(target_os = "linux")]
+const MAX_GSO_SEGMENTS: usize = 64;
+
+/// Maximal run of datagrams starting at `i` that can share one GSO `sendmsg`:
+/// consecutive datagrams of exactly `seg` bytes, plus an optional single
+/// shorter trailing datagram (the last GSO segment may be short). Bounded by
+/// [`MAX_GSO_SEGMENTS`] and a 64 KiB aggregate. Returns `(end, total_bytes)`.
+#[cfg(target_os = "linux")]
+fn gso_run(payloads: &[&[u8]], i: usize, seg: usize) -> (usize, usize) {
+    const GSO_MAX_BYTES: usize = 65535;
+    let mut j = i;
+    let mut total = 0usize;
+    while j < payloads.len()
+        && payloads[j].len() == seg
+        && (j - i) < MAX_GSO_SEGMENTS
+        && total + seg <= GSO_MAX_BYTES
+    {
+        total += seg;
+        j += 1;
+    }
+    if j < payloads.len()
+        && !payloads[j].is_empty()
+        && payloads[j].len() < seg
+        && (j - i) < MAX_GSO_SEGMENTS
+        && total + payloads[j].len() <= GSO_MAX_BYTES
+    {
+        total += payloads[j].len();
+        j += 1;
+    }
+    (j, total)
+}
+
+/// A GSO `sendmsg` failure meaning the kernel doesn't support UDP segmentation
+/// (too old): disable GSO permanently and fall back to `sendmmsg`.
+#[cfg(target_os = "linux")]
+fn gso_unsupported(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP) | Some(libc::EIO) | Some(libc::EINVAL)
+    )
+}
+
+/// Whether a raw I/O error is a transient "try again later".
+#[cfg(target_os = "linux")]
+fn is_wouldblock_io(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 /// Receive buffer size per datagram. Deliberately larger than
 /// `MAX_PACKET_SIZE` (1500): a datagram that fills the buffer (or carries
 /// `MSG_TRUNC`) was truncated by the kernel and must be dropped, not fed to
@@ -83,6 +144,11 @@ pub struct UdpTunnel {
     socket: UdpSocket,
     config: TunnelConfig,
     recv_buffer: Vec<u8>,
+    /// GSO send (UDP_SEGMENT) is probed lazily: it starts enabled on Linux and
+    /// is disabled permanently the first time a GSO `sendmsg` reports the option
+    /// is unsupported (old kernel), after which every send uses `sendmmsg`.
+    #[cfg(target_os = "linux")]
+    gso: std::sync::atomic::AtomicBool,
 }
 
 impl UdpTunnel {
@@ -101,10 +167,21 @@ impl UdpTunnel {
 
         Self::set_socket_buffers(&socket, config.recv_buffer_size, config.send_buffer_size);
 
+        // Escape hatch (ops / testing): force the portable `sendmmsg` path,
+        // matching the TUN offload override.
+        #[cfg(target_os = "linux")]
+        let gso_enabled = std::env::var_os("TWOCHA_NO_UDP_GSO").is_none();
+        #[cfg(target_os = "linux")]
+        if !gso_enabled {
+            log::info!("TWOCHA_NO_UDP_GSO set; UDP GSO disabled");
+        }
+
         Ok(UdpTunnel {
             socket,
             config,
             recv_buffer: vec![0u8; RECV_BUF_LEN],
+            #[cfg(target_os = "linux")]
+            gso: std::sync::atomic::AtomicBool::new(gso_enabled),
         })
     }
 
@@ -294,8 +371,39 @@ impl UdpTunnel {
     /// Send multiple datagrams in as few syscalls as possible (Linux).
     /// Returns the number actually handed to the kernel; under UDP semantics
     /// the rest are dropped (kernel send buffer full).
+    ///
+    /// When GSO is available, consecutive datagrams to the *same* destination
+    /// are grouped and equal-length runs within each group are segmented by the
+    /// kernel in one `sendmsg` (the server download burst to a single client is
+    /// exactly this shape); everything else uses `sendmmsg`.
     #[cfg(target_os = "linux")]
     pub fn send_batch(&self, msgs: &[(Vec<u8>, SocketAddr)]) -> Result<usize> {
+        use std::sync::atomic::Ordering;
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        if !self.gso.load(Ordering::Relaxed) {
+            return self.send_batch_mmsg(msgs);
+        }
+        let mut sent = 0;
+        let mut i = 0;
+        while i < msgs.len() {
+            let addr = msgs[i].1;
+            // Group the maximal run of consecutive datagrams to this address.
+            let mut k = i + 1;
+            while k < msgs.len() && msgs[k].1 == addr {
+                k += 1;
+            }
+            let payloads: Vec<&[u8]> = msgs[i..k].iter().map(|(d, _)| d.as_slice()).collect();
+            sent += self.gso_send_payloads(&payloads, addr)?;
+            i = k;
+        }
+        Ok(sent)
+    }
+
+    /// `sendmmsg` fallback used when GSO is disabled or unavailable.
+    #[cfg(target_os = "linux")]
+    fn send_batch_mmsg(&self, msgs: &[(Vec<u8>, SocketAddr)]) -> Result<usize> {
         if msgs.is_empty() {
             return Ok(0);
         }
@@ -366,8 +474,141 @@ impl UdpTunnel {
 
     /// Send multiple datagrams to a single fixed destination in as few
     /// syscalls as possible (client hot path: everything goes to the server).
+    ///
+    /// When UDP GSO is available, maximal runs of equal-length datagrams (plus
+    /// an optional shorter trailing datagram) are handed to the kernel as a
+    /// single `sendmsg` that segments them on the wire; the throughput-dominant
+    /// full-MTU bulk flow is exactly such a run. Odd-sized datagrams and the
+    /// fallback path use `sendmmsg`.
     #[cfg(target_os = "linux")]
     pub fn send_batch_to(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
+        use std::sync::atomic::Ordering;
+        if datagrams.is_empty() {
+            return Ok(0);
+        }
+        if !self.gso.load(Ordering::Relaxed) {
+            return self.send_batch_to_mmsg(datagrams, addr);
+        }
+        let payloads: Vec<&[u8]> = datagrams.iter().map(|d| d.as_slice()).collect();
+        self.gso_send_payloads(&payloads, addr)
+    }
+
+    /// GSO grouping engine shared by [`UdpTunnel::send_batch_to`] and
+    /// [`UdpTunnel::send_batch`]: all `payloads` go to `addr`; maximal
+    /// equal-length runs (plus a shorter tail) are sent as one segmenting
+    /// `sendmsg`, odd sizes as plain `send_to`. Assumes GSO is currently
+    /// enabled; the first unsupported error disables it permanently.
+    #[cfg(target_os = "linux")]
+    fn gso_send_payloads(&self, payloads: &[&[u8]], addr: SocketAddr) -> Result<usize> {
+        use std::sync::atomic::Ordering;
+        let (storage, addr_len) = encode_sockaddr(addr);
+        let mut sent = 0;
+        let mut i = 0;
+        while i < payloads.len() {
+            let seg = payloads[i].len();
+            // A GSO run needs a non-empty, u16-bounded segment size.
+            if seg == 0 || seg > u16::MAX as usize {
+                if self.socket.send_to(payloads[i], addr).is_ok() {
+                    sent += 1;
+                }
+                i += 1;
+                continue;
+            }
+            let (j, total) = gso_run(payloads, i, seg);
+            if j - i >= 2 {
+                let mut iovecs: Vec<libc::iovec> = payloads[i..j]
+                    .iter()
+                    .map(|d| libc::iovec {
+                        iov_base: d.as_ptr() as *mut libc::c_void,
+                        iov_len: d.len(),
+                    })
+                    .collect();
+                match self.sendmsg_gso(&mut iovecs, seg as u16, &storage, addr_len) {
+                    Ok(_) => {
+                        log::trace!("GSO sent {} datagrams ({} bytes) to {}", j - i, total, addr);
+                        sent += j - i;
+                        i = j;
+                        continue;
+                    }
+                    Err(e) if gso_unsupported(&e) => {
+                        // Old kernel: disable GSO for the life of this socket. The
+                        // remainder of this flush goes per-datagram; every later
+                        // batch takes the `sendmmsg` path via the top-level guard.
+                        log::info!("UDP GSO unsupported ({e}); falling back to sendmmsg");
+                        self.gso.store(false, Ordering::Relaxed);
+                        for d in &payloads[i..] {
+                            if self.socket.send_to(d, addr).is_ok() {
+                                sent += 1;
+                            }
+                        }
+                        return Ok(sent);
+                    }
+                    Err(e) if is_wouldblock_io(&e) => break,
+                    Err(_) => {
+                        // Transient error on this run: per-datagram best effort.
+                        for d in &payloads[i..j] {
+                            if self.socket.send_to(d, addr).is_ok() {
+                                sent += 1;
+                            }
+                        }
+                        i = j;
+                        continue;
+                    }
+                }
+            } else {
+                if self.socket.send_to(payloads[i], addr).is_ok() {
+                    sent += 1;
+                }
+                i += 1;
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Low-level GSO `sendmsg`: gather `iovecs` into one datagram the kernel
+    /// segments every `seg` bytes (the final segment may be shorter).
+    #[cfg(target_os = "linux")]
+    fn sendmsg_gso(
+        &self,
+        iovecs: &mut [libc::iovec],
+        seg: u16,
+        storage: &libc::sockaddr_storage,
+        addr_len: libc::socklen_t,
+    ) -> std::io::Result<usize> {
+        // 8-byte-aligned control buffer large enough for one UDP_SEGMENT cmsg.
+        let mut cmsg_buf = [0u64; 4];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_name = storage as *const _ as *mut libc::c_void;
+        msg.msg_namelen = addr_len;
+        msg.msg_iov = iovecs.as_mut_ptr();
+        msg.msg_iovlen = iovecs.len() as _;
+        msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = std::mem::size_of_val(&cmsg_buf) as _;
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_UDP;
+            (*cmsg).cmsg_type = UDP_SEGMENT;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
+            let seg_bytes = seg.to_ne_bytes();
+            std::ptr::copy_nonoverlapping(seg_bytes.as_ptr(), libc::CMSG_DATA(cmsg), seg_bytes.len());
+            msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) as _;
+            loop {
+                let r = libc::sendmsg(self.fd(), &msg, 0);
+                if r < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(e);
+                }
+                return Ok(r as usize);
+            }
+        }
+    }
+
+    /// `sendmmsg` fallback used when GSO is disabled or unavailable.
+    #[cfg(target_os = "linux")]
+    fn send_batch_to_mmsg(&self, datagrams: &[Vec<u8>], addr: SocketAddr) -> Result<usize> {
         if datagrams.is_empty() {
             return Ok(0);
         }
@@ -814,6 +1055,112 @@ mod tests {
         assert!(receiver.recv_from_any().unwrap().is_none());
         let (_, data) = receiver.recv_from_any().unwrap().unwrap();
         assert_eq!(data, b"ok");
+    }
+
+    /// GSO send must place each logical datagram on the wire as its own
+    /// datagram: `send_batch_to` coalesces a run of equal-size datagrams (plus a
+    /// shorter tail) into one `sendmsg`, and the kernel segments it back out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_send_batch_to_gso_segments() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        // Four full 1000-byte segments + one shorter 400-byte tail → one GSO
+        // sendmsg that the kernel splits into five datagrams.
+        let mut datagrams: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 1000]).collect();
+        datagrams.push(vec![0xAA; 400]);
+        assert_eq!(sender.send_batch_to(&datagrams, dst).unwrap(), 5);
+        std::thread::sleep(Duration::from_millis(50));
+
+        // The receiver has no GRO, so it observes five separate datagrams.
+        let mut batch = BatchBuffer::new(16);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 5, "GSO super-datagram must arrive as 5 wire datagrams");
+        for (i, d) in datagrams.iter().enumerate() {
+            let (_, data) = batch.get(i).unwrap();
+            assert_eq!(data, &d[..], "segment {i} mismatch");
+        }
+    }
+
+    /// A run of unequal-length datagrams cannot be one GSO run; the mixed batch
+    /// must still deliver every datagram intact (per-datagram / sendmmsg path).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_send_batch_to_mixed_sizes() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        let datagrams: Vec<Vec<u8>> =
+            vec![vec![1u8; 300], vec![2u8; 1200], vec![3u8; 300], vec![4u8; 300]];
+        assert_eq!(sender.send_batch_to(&datagrams, dst).unwrap(), 4);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut batch = BatchBuffer::new(16);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 4);
+        for (i, d) in datagrams.iter().enumerate() {
+            assert_eq!(batch.get(i).unwrap().1, &d[..], "datagram {i} mismatch");
+        }
+    }
+
+    /// `send_batch` GSO: a same-destination run of equal-size datagrams is
+    /// segmented by the kernel and arrives as individual datagrams.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_send_batch_gso_same_dst() {
+        let sender = tunnel_on_loopback();
+        let receiver = tunnel_on_loopback();
+        receiver.set_nonblocking(true).unwrap();
+        let dst = local_addr(&receiver);
+
+        let msgs: Vec<(Vec<u8>, SocketAddr)> =
+            (0..4u8).map(|i| (vec![i; 800], dst)).collect();
+        assert_eq!(sender.send_batch(&msgs).unwrap(), 4);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut batch = BatchBuffer::new(16);
+        let n = receiver.recv_batch(&mut batch).unwrap();
+        assert_eq!(n, 4);
+        for i in 0..4usize {
+            assert_eq!(batch.get(i).unwrap().1, &vec![i as u8; 800][..]);
+        }
+    }
+
+    /// `send_batch` with two interleaved destinations must deliver every
+    /// datagram to the correct peer (same-dst grouping must not cross peers).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_send_batch_two_dsts() {
+        let sender = tunnel_on_loopback();
+        let rx_a = tunnel_on_loopback();
+        let rx_b = tunnel_on_loopback();
+        rx_a.set_nonblocking(true).unwrap();
+        rx_b.set_nonblocking(true).unwrap();
+        let a = local_addr(&rx_a);
+        let b = local_addr(&rx_b);
+
+        // Two equal-size runs to A, split by one datagram to B.
+        let msgs: Vec<(Vec<u8>, SocketAddr)> = vec![
+            (vec![1u8; 600], a),
+            (vec![2u8; 600], a),
+            (vec![9u8; 600], b),
+            (vec![3u8; 600], a),
+        ];
+        assert_eq!(sender.send_batch(&msgs).unwrap(), 4);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut ba = BatchBuffer::new(16);
+        let na = rx_a.recv_batch(&mut ba).unwrap();
+        assert_eq!(na, 3, "A must receive its three datagrams");
+        let mut bb = BatchBuffer::new(16);
+        let nb = rx_b.recv_batch(&mut bb).unwrap();
+        assert_eq!(nb, 1, "B must receive its one datagram");
+        assert_eq!(bb.get(0).unwrap().1, &vec![9u8; 600][..]);
     }
 
     #[test]
