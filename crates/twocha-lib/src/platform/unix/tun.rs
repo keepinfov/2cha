@@ -152,11 +152,7 @@ impl TunDevice {
         };
 
         let actual_name = dev.name().map_err(map_io)?;
-        log::info!(
-            "TUN device created: {} (offload: {})",
-            actual_name,
-            offload
-        );
+        log::info!("TUN device created: {} (offload: {})", actual_name, offload);
 
         Ok(TunDevice {
             dev,

@@ -450,7 +450,9 @@ impl UdpTunnel {
         // Collect boundaries first so the copies below don't borrow `self`
         // twice (recv_buffer shared + gro_pending mutable).
         let mut chunks: Vec<(usize, usize)> = Vec::new();
-        each_gro_segment(len, seg.unwrap_or(0), |start, clen| chunks.push((start, clen)));
+        each_gro_segment(len, seg.unwrap_or(0), |start, clen| {
+            chunks.push((start, clen))
+        });
         let Some(&(fstart, flen)) = chunks.first() else {
             return Ok(None); // len == 0
         };
@@ -552,9 +554,9 @@ impl UdpTunnel {
                     None
                 };
                 match seg {
-                    Some(s) => each_gro_segment(len, s, |start, clen| {
-                        batch.push_view(i, start, clen, src)
-                    }),
+                    Some(s) => {
+                        each_gro_segment(len, s, |start, clen| batch.push_view(i, start, clen, src))
+                    }
                     None => batch.push_view(i, 0, len, src),
                 }
             }
@@ -822,7 +824,11 @@ impl UdpTunnel {
             (*cmsg).cmsg_type = UDP_SEGMENT;
             (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
             let seg_bytes = seg.to_ne_bytes();
-            std::ptr::copy_nonoverlapping(seg_bytes.as_ptr(), libc::CMSG_DATA(cmsg), seg_bytes.len());
+            std::ptr::copy_nonoverlapping(
+                seg_bytes.as_ptr(),
+                libc::CMSG_DATA(cmsg),
+                seg_bytes.len(),
+            );
             msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) as _;
             loop {
                 let r = libc::sendmsg(self.fd(), &msg, 0);
@@ -1330,7 +1336,13 @@ mod tests {
     fn test_gro_chunks_splits_evenly_and_tail() {
         assert_eq!(
             collect_gro_chunks(4200, 1000),
-            vec![(0, 1000), (1000, 1000), (2000, 1000), (3000, 1000), (4000, 200)]
+            vec![
+                (0, 1000),
+                (1000, 1000),
+                (2000, 1000),
+                (3000, 1000),
+                (4000, 200)
+            ]
         );
         assert_eq!(
             collect_gro_chunks(3000, 1000),
@@ -1542,8 +1554,12 @@ mod tests {
         receiver.set_nonblocking(true).unwrap();
         let dst = local_addr(&receiver);
 
-        let datagrams: Vec<Vec<u8>> =
-            vec![vec![1u8; 300], vec![2u8; 1200], vec![3u8; 300], vec![4u8; 300]];
+        let datagrams: Vec<Vec<u8>> = vec![
+            vec![1u8; 300],
+            vec![2u8; 1200],
+            vec![3u8; 300],
+            vec![4u8; 300],
+        ];
         assert_eq!(sender.send_batch_to(&datagrams, dst).unwrap(), 4);
         std::thread::sleep(Duration::from_millis(50));
 
@@ -1565,8 +1581,7 @@ mod tests {
         receiver.set_nonblocking(true).unwrap();
         let dst = local_addr(&receiver);
 
-        let msgs: Vec<(Vec<u8>, SocketAddr)> =
-            (0..4u8).map(|i| (vec![i; 800], dst)).collect();
+        let msgs: Vec<(Vec<u8>, SocketAddr)> = (0..4u8).map(|i| (vec![i; 800], dst)).collect();
         assert_eq!(sender.send_batch(&msgs).unwrap(), 4);
         std::thread::sleep(Duration::from_millis(50));
 

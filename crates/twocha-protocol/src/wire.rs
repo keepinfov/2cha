@@ -354,7 +354,11 @@ pub const AWG_DATA_HEADER_LEN: usize = AWG_HEADER_LEN + CID_LEN + 8;
 
 /// Build an AWG handshake-init datagram with zeroed MAC fields, returning the
 /// buffer plus the mac1/mac2 offsets for the caller to patch.
-pub fn encode_init_awg(header: u32, noise: &[u8], padding: &[u8]) -> Result<(Vec<u8>, usize, usize)> {
+pub fn encode_init_awg(
+    header: u32,
+    noise: &[u8],
+    padding: &[u8],
+) -> Result<(Vec<u8>, usize, usize)> {
     if noise.len() != NOISE_INIT_LEN {
         return Err(ProtocolError::CorruptedPacket("init noise len".into()).into());
     }
@@ -619,7 +623,8 @@ mod tests {
     fn test_awg_init_roundtrip() {
         let p = awg_params();
         let noise = [7u8; NOISE_INIT_LEN];
-        let (mut pkt, mac1_off, mac2_off) = encode_init_awg(0x1000_1234, &noise, &[9u8; 20]).unwrap();
+        let (mut pkt, mac1_off, mac2_off) =
+            encode_init_awg(0x1000_1234, &noise, &[9u8; 20]).unwrap();
         pkt[mac1_off..mac1_off + MAC_LEN].copy_from_slice(&[0xAA; MAC_LEN]);
         pkt[mac2_off..mac2_off + MAC_LEN].copy_from_slice(&[0xBB; MAC_LEN]);
         match parse_awg(&p, &pkt).unwrap() {

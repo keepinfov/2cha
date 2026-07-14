@@ -185,4 +185,3 @@ mod tests {
         assert!(validate_endpoint("host:99999").is_err());
     }
 }
-

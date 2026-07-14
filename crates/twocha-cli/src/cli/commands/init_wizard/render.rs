@@ -60,9 +60,17 @@ fn awg_section(transport: &str, awg: Option<&AwgWizard>) -> String {
          # and S1-S4 are part of the wire format and MUST match on both ends; jc/\n\
          # jmin/jmax are client-only. Regenerate a matched pair with 2cha init.\n[awg]\n",
     );
-    let _ = writeln!(s, "h1 = {}\nh2 = {}\nh3 = {}\nh4 = {}", a.h[0], a.h[1], a.h[2], a.h[3]);
+    let _ = writeln!(
+        s,
+        "h1 = {}\nh2 = {}\nh3 = {}\nh4 = {}",
+        a.h[0], a.h[1], a.h[2], a.h[3]
+    );
     let _ = writeln!(s, "header_span = {}", a.header_span);
-    let _ = writeln!(s, "s1 = {}\ns2 = {}\ns3 = {}\ns4 = {}", a.s[0], a.s[1], a.s[2], a.s[3]);
+    let _ = writeln!(
+        s,
+        "s1 = {}\ns2 = {}\ns3 = {}\ns4 = {}",
+        a.s[0], a.s[1], a.s[2], a.s[3]
+    );
     let _ = writeln!(s, "jc = {}\njmin = {}\njmax = {}", a.jc, a.jmin, a.jmax);
     s
 }

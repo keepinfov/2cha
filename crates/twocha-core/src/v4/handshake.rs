@@ -273,14 +273,14 @@ impl ServerHandshakeEngine {
         let (noise, mac1_region, mac1, mac2_region, mac2) =
             match wire::parse_profile(&self.profile, datagram)? {
                 WireMsg::Init {
-                noise,
-                mac1_region,
-                mac1,
-                mac2_region,
-                mac2,
-            } => (noise, mac1_region, mac1, mac2_region, mac2),
-            _ => return Err(ProtocolError::UnexpectedPacket("not an init".into()).into()),
-        };
+                    noise,
+                    mac1_region,
+                    mac1,
+                    mac2_region,
+                    mac2,
+                } => (noise, mac1_region, mac1, mac2_region, mac2),
+                _ => return Err(ProtocolError::UnexpectedPacket("not an init".into()).into()),
+            };
 
         // 1. Cheapest check first; failure = silent drop (anti-amplification)
         if !mac_verify(&self.own_mac1_key, mac1_region, mac1) {

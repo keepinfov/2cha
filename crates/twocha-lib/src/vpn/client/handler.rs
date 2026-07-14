@@ -839,7 +839,8 @@ fn handshake_over_transport(
                 let _ = transport.send(&dg);
             }
         }
-        let mut hs = ClientHandshake::with_profile(suite, identity, server_public, profile.clone())?;
+        let mut hs =
+            ClientHandshake::with_profile(suite, identity, server_public, profile.clone())?;
         if let Err(e) = transport.send(hs.datagram()) {
             send_failures += 1;
             last_send_err = e.to_string();

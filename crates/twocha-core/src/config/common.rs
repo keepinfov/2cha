@@ -220,9 +220,7 @@ impl AwgSection {
     /// Validate internal consistency (called from client/server `validate`).
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.jmin > self.jmax {
-            return Err(ConfigError::Invalid(
-                "awg.jmin must be <= awg.jmax".into(),
-            ));
+            return Err(ConfigError::Invalid("awg.jmin must be <= awg.jmax".into()));
         }
         if self.jc > 0 && self.jmax == 0 {
             return Err(ConfigError::Invalid(
