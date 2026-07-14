@@ -33,7 +33,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub tls: TlsSection,
     #[serde(default)]
-    pub reality: super::common::RealitySection,
+    pub awg: super::common::AwgSection,
 }
 
 /// An authorized peer entry
@@ -133,12 +133,7 @@ impl ServerConfig {
         let path = path.as_ref();
         let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
         let mut config = Self::parse(&content)?;
-        resolve_paths(
-            &mut config.crypto,
-            &mut config.tls,
-            &mut config.reality,
-            path,
-        );
+        resolve_paths(&mut config.crypto, &mut config.tls, path);
         config.validate()?;
         Ok(config)
     }
@@ -165,25 +160,19 @@ impl ServerConfig {
             ));
         }
         self.peer_keys()?;
-        if self.server.transport == super::TransportKind::Reality {
-            if self.reality.server.private_key_file.is_none() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires reality.private_key_file".into(),
-                ));
-            }
-            if self.reality.server.dest.is_none() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires reality.dest (a real host:port to borrow)"
-                        .into(),
-                ));
-            }
-            if self.reality.server.server_names.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "transport = \"reality\" requires a non-empty reality.server_names".into(),
-                ));
-            }
+        if self.server.transport == super::TransportKind::Awg {
+            self.awg.validate()?;
+            validate_awg_mtu(self.tun.mtu)?;
         }
         Ok(())
+    }
+
+    /// The obfuscation profile the wire codec should use for this server.
+    pub fn obfs_profile(&self) -> twocha_protocol::ObfsProfile {
+        match self.server.transport {
+            super::TransportKind::Awg => twocha_protocol::ObfsProfile::Awg(self.awg.to_params()),
+            _ => twocha_protocol::ObfsProfile::Quic,
+        }
     }
 
     /// Decoded whitelist of authorized peer public keys
@@ -312,7 +301,6 @@ pub(super) fn resolve_relative_path(path_str: &mut String, config_path: &Path) {
 pub(super) fn resolve_paths(
     crypto: &mut super::common::CryptoSection,
     tls: &mut super::common::TlsSection,
-    reality: &mut super::common::RealitySection,
     config_path: &Path,
 ) {
     resolve_relative_path(&mut crypto.private_key_file, config_path);
@@ -320,9 +308,6 @@ pub(super) fn resolve_paths(
         resolve_relative_path(cert, config_path);
     }
     if let Some(key) = tls.key_file.as_mut() {
-        resolve_relative_path(key, config_path);
-    }
-    if let Some(key) = reality.server.private_key_file.as_mut() {
         resolve_relative_path(key, config_path);
     }
 }
@@ -543,23 +528,5 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.server.transport, TransportKind::Tls);
         assert_eq!(cfg.tls.sni, "example.com");
-    }
-
-    #[test]
-    fn test_reality_server_validation() {
-        let base = format!(
-            "[server]\nlisten = \"0.0.0.0:443\"\ntransport = \"reality\"\n\
-             [tun]\n[crypto]\nprivate_key_file = \"k\"\n[[peers]]\npublic_key = \"{KEY_A}\"\n",
-        );
-        // Missing the whole [reality] section → rejected.
-        assert!(ServerConfig::parse(&base).unwrap().validate().is_err());
-
-        let full = format!(
-            "{base}[reality]\nprivate_key_file = \"r.key\"\ndest = \"example.com:443\"\n\
-             server_names = [\"example.com\"]\nshort_ids = [\"0123456789abcdef\"]\n",
-        );
-        let cfg = ServerConfig::parse(&full).unwrap();
-        assert_eq!(cfg.server.transport, TransportKind::Reality);
-        cfg.validate().expect("complete reality config validates");
     }
 }

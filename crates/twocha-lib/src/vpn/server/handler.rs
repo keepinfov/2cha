@@ -8,8 +8,6 @@
 use crate::platform::unix::{
     is_would_block, routing, BatchBuffer, EventLoop, TunDevice, TunnelConfig, UdpTunnel, POLLIN,
 };
-#[cfg(feature = "reality")]
-use crate::transport::reality::RealityServerListener;
 #[cfg(unix)]
 use crate::transport::tls::TlsServerListener;
 #[cfg(unix)]
@@ -42,6 +40,7 @@ use twocha_core::v4::{
 use twocha_core::{ServerConfig, TransportKind};
 #[cfg(unix)]
 use twocha_protocol::wire::{self, WireMsg, CID_LEN};
+use twocha_protocol::ObfsProfile;
 use twocha_protocol::Result;
 #[cfg(unix)]
 use twocha_protocol::VpnError;
@@ -53,8 +52,8 @@ const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How a session's packets reach the peer. UDP carries the peer's address
-/// (which can roam); a stream transport (TLS or REALITY) pins the session to
-/// a specific accepted connection, identified by its per-listener id.
+/// (which can roam); a stream transport (TLS) pins the session to a specific
+/// accepted connection, identified by its per-listener id.
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Link {
@@ -83,6 +82,8 @@ struct SessionEntry {
 #[cfg(unix)]
 struct ServerState {
     engine: ServerHandshakeEngine,
+    /// Wire framing used to classify inbound datagrams (QUIC-mimic or AWG).
+    profile: ObfsProfile,
     limiter: RateLimiter,
     allowed: HashSet<[u8; 32]>,
     /// Optional labels for log/list output, keyed by peer public key
@@ -184,7 +185,11 @@ pub fn run(config_path: &str) -> Result<()> {
 
     // Opt-in worker pool: QUIC + Linux + performance.worker_threads >= 2.
     // It needs a multi-queue TUN, so force the flag on when active.
-    let workers = if cfg.server.transport == TransportKind::Quic && cfg!(target_os = "linux") {
+    let workers = if matches!(
+        cfg.server.transport,
+        TransportKind::Quic | TransportKind::Awg
+    ) && cfg!(target_os = "linux")
+    {
         cfg.performance.worker_threads
     } else {
         0
@@ -279,7 +284,12 @@ pub fn run(config_path: &str) -> Result<()> {
         .collect();
 
     let mut state = ServerState {
-        engine: ServerHandshakeEngine::new(cfg.crypto.cipher, &identity),
+        engine: ServerHandshakeEngine::with_profile(
+            cfg.crypto.cipher,
+            &identity,
+            cfg.obfs_profile(),
+        ),
+        profile: cfg.obfs_profile(),
         limiter: RateLimiter::new(),
         allowed: peer_keys.into_iter().collect(),
         peer_names,
@@ -298,11 +308,16 @@ pub fn run(config_path: &str) -> Result<()> {
     );
 
     #[cfg(target_os = "linux")]
-    let serve_result = if workers >= 2 && cfg.server.transport == TransportKind::Quic {
+    let serve_result = if workers >= 2
+        && matches!(
+            cfg.server.transport,
+            TransportKind::Quic | TransportKind::Awg
+        ) {
         // Multi-worker pool consumes the tun (one queue per worker) and
         // builds its own shared state; `state` stays unused on this path.
         let ServerState {
             engine,
+            profile,
             allowed,
             peer_names,
             ..
@@ -312,6 +327,7 @@ pub fn run(config_path: &str) -> Result<()> {
             config_path,
             tun,
             engine,
+            profile,
             allowed,
             peer_names,
             control.as_ref(),
@@ -361,7 +377,7 @@ fn serve_transport(
     listen_addr: SocketAddr,
 ) -> Result<()> {
     match cfg.server.transport {
-        TransportKind::Quic => serve_udp(
+        TransportKind::Quic | TransportKind::Awg => serve_udp(
             cfg,
             config_path,
             tun,
@@ -379,57 +395,6 @@ fn serve_transport(
             control,
             listen_addr,
         ),
-        TransportKind::Reality => serve_reality_dispatch(
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        ),
-    }
-}
-
-/// REALITY transport dispatch. Errors cleanly unless compiled with
-/// `--features reality`.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn serve_reality_dispatch(
-    cfg: &ServerConfig,
-    config_path: &str,
-    tun: &mut TunDevice,
-    state: &mut ServerState,
-    event_loop: &mut EventLoop,
-    control: Option<&ControlListener>,
-    listen_addr: SocketAddr,
-) -> Result<()> {
-    #[cfg(feature = "reality")]
-    {
-        serve_reality(
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        )
-    }
-    #[cfg(not(feature = "reality"))]
-    {
-        let _ = (
-            cfg,
-            config_path,
-            tun,
-            state,
-            event_loop,
-            control,
-            listen_addr,
-        );
-        Err(VpnError::Config(
-            "reality transport requires building with --features reality".into(),
-        ))
     }
 }
 
@@ -488,6 +453,7 @@ fn serve_udp(
     let mut send_pool: Vec<Vec<u8>> = Vec::with_capacity(udp_batch.capacity());
     let mut seal_scratch = SealScratch::default();
     let mut payload_buf = Vec::new();
+    let mut keepalive_buf = Vec::new();
 
     while common::running() {
         let events = event_loop.poll(100)?;
@@ -521,8 +487,12 @@ fn serve_udp(
         for entry in state.sessions.values_mut() {
             if now >= entry.next_keepalive {
                 if let Link::Udp(addr) = entry.link {
-                    if let Ok(datagram) = entry.session.seal_data(&[]) {
-                        let _ = tunnel.send_to(&datagram, addr);
+                    if entry
+                        .session
+                        .seal_data_into(&[], &mut seal_scratch, &mut keepalive_buf)
+                        .is_ok()
+                    {
+                        let _ = tunnel.send_to(&keepalive_buf, addr);
                     }
                 }
                 entry.next_keepalive = now + keepalive_jitter();
@@ -561,8 +531,7 @@ fn build_tls_listener(cfg: &ServerConfig, listen_addr: SocketAddr) -> Result<Tls
 #[cfg(unix)]
 enum HandshakeOutcome<C> {
     Established(C),
-    /// Peer was rejected and already handled (e.g. a REALITY probe relayed to
-    /// its decoy `dest`) — nothing to register.
+    /// Peer was rejected and already handled — nothing to register.
     Rejected,
     Failed(SocketAddr, std::io::Error),
 }
@@ -570,12 +539,9 @@ enum HandshakeOutcome<C> {
 /// Drain the listener's accept backlog (cheap and non-blocking) and hand each
 /// accepted TCP stream to a fresh thread to run the transport handshake.
 ///
-/// The handshake itself can block for a long time: a REALITY probe that fails
-/// auth gets relayed to a decoy `dest` inside the Go core, and the call
-/// doesn't return until that connection closes — a duration an attacker
-/// controls. Even a real TLS handshake is an attacker-paced network round
-/// trip. Running either inline on the single-threaded reactor would stall
-/// every other connection for as long as it takes.
+/// The handshake itself can block for a while: a TLS handshake is an
+/// attacker-paced network round trip. Running it inline on the single-threaded
+/// reactor would stall every other connection for as long as it takes.
 #[cfg(unix)]
 fn spawn_accepts<L: StreamServerListener>(
     listener: &Arc<L>,
@@ -606,9 +572,9 @@ fn spawn_accepts<L: StreamServerListener>(
     }
 }
 
-/// Stream-oriented transport loop shared by TLS and REALITY: each client is a
-/// separate TCP connection with its own poll fd; sessions are pinned to a
-/// connection (no address roaming).
+/// Stream-oriented transport loop for TLS: each client is a separate TCP
+/// connection with its own poll fd; sessions are pinned to a connection (no
+/// address roaming).
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn serve_stream<L: StreamServerListener>(
@@ -740,8 +706,12 @@ fn serve_stream<L: StreamServerListener>(
             if now >= entry.next_keepalive {
                 if let Link::Stream(id) = entry.link {
                     if let Some(conn) = conns.get_mut(&id) {
-                        if let Ok(datagram) = entry.session.seal_data(&[]) {
-                            let _ = conn.send(&datagram);
+                        if entry
+                            .session
+                            .seal_data_into(&[], &mut seal_scratch, &mut seal_out)
+                            .is_ok()
+                        {
+                            let _ = conn.send(&seal_out);
                         }
                     }
                 }
@@ -754,7 +724,7 @@ fn serve_stream<L: StreamServerListener>(
 }
 
 /// TLS-over-TCP transport loop: builds the listener and hands it to the
-/// stream-transport loop shared with REALITY.
+/// stream-transport loop.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn serve_tls(
@@ -1064,7 +1034,7 @@ fn handle_datagram(
     data: &[u8],
     payload_buf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    let msg = wire::parse(data).ok()?;
+    let msg = wire::parse_profile(&state.profile, data).ok()?;
 
     match msg {
         WireMsg::Init { .. } => {
@@ -1138,72 +1108,4 @@ pub fn run(_config_path: &str) -> Result<()> {
 /// Stop the server
 pub fn stop() {
     common::stop();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// REALITY transport (Go xtls/reality via FFI). Shares the stream-transport
-// loop with TLS (`serve_stream`, above) via the StreamServerListener /
-// StreamServerConn traits — sessions are pinned via Link::Stream (only one
-// stream transport runs at a time, so the id namespace can't collide).
-// Unauthenticated probes never reach here — the Go core relays them to
-// `dest`. Feature-gated.
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[cfg(all(unix, feature = "reality"))]
-fn build_reality_listener(
-    cfg: &ServerConfig,
-    listen_addr: SocketAddr,
-) -> Result<RealityServerListener> {
-    let r = &cfg.reality.server;
-    let key_file = r
-        .private_key_file
-        .as_deref()
-        .ok_or_else(|| VpnError::Config("reality.private_key_file is required".into()))?;
-    let identity = twocha_core::Identity::load(std::path::Path::new(key_file))?;
-    let private = identity.private_bytes();
-    let dest = r
-        .dest
-        .as_deref()
-        .ok_or_else(|| VpnError::Config("reality.dest is required".into()))?;
-    if r.server_names.is_empty() {
-        return Err(VpnError::Config(
-            "reality.server_names must not be empty".into(),
-        ));
-    }
-    RealityServerListener::bind(
-        listen_addr,
-        &private,
-        dest,
-        &r.server_names,
-        &r.short_ids,
-        r.max_time_diff_ms,
-    )
-    .map_err(VpnError::Io)
-}
-
-/// REALITY transport loop: builds the listener and hands it to the
-/// stream-transport loop shared with TLS.
-#[cfg(all(unix, feature = "reality"))]
-#[allow(clippy::too_many_arguments)]
-fn serve_reality(
-    cfg: &ServerConfig,
-    config_path: &str,
-    tun: &mut TunDevice,
-    state: &mut ServerState,
-    event_loop: &mut EventLoop,
-    control: Option<&ControlListener>,
-    listen_addr: SocketAddr,
-) -> Result<()> {
-    let listener = build_reality_listener(cfg, listen_addr)?;
-    serve_stream(
-        "reality/tcp",
-        listener,
-        cfg,
-        config_path,
-        tun,
-        state,
-        event_loop,
-        control,
-        listen_addr,
-    )
 }

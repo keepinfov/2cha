@@ -15,15 +15,6 @@
 //! man-in-the-middle who terminates TLS still cannot complete Noise_IK without
 //! the server's static private key, so the tunnel fails closed. Pinning the
 //! TLS cert would add nothing and would leak a stable fingerprint.
-//!
-//! ## REALITY
-//!
-//! The anti-probe gate this module's docs used to defer is implemented as its
-//! own transport, [`super::reality`]: a Go `xtls/reality` core (via FFI)
-//! inspects the ClientHello and relays unauthenticated probes to a real
-//! backend while borrowing its certificate. This module's TLS sessions all
-//! proceed unconditionally — REALITY is a separate `TransportKind`, not a mode
-//! of this one.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -387,8 +378,8 @@ impl super::StreamServerListener for TlsServerListener {
     }
 
     /// Complete the TLS handshake on an accepted stream. Every accepted TLS
-    /// session proceeds — REALITY (which does gate unauthenticated probes) is
-    /// its own transport ([`super::reality`]), not layered onto this one.
+    /// session proceeds; authentication is enforced by the Noise_IK handshake
+    /// riding inside.
     fn handshake(
         &self,
         stream: TcpStream,

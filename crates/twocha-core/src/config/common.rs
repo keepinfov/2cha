@@ -4,6 +4,7 @@
 
 use serde::Deserialize;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use twocha_protocol::obfs::{AwgParams, HeaderRange};
 
 /// Supported cipher suites
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -34,9 +35,10 @@ pub enum TransportKind {
     Quic,
     /// Real TLS 1.3 over TCP with Noise riding inside.
     Tls,
-    /// REALITY: anti-probe TLS via the Go xtls/reality core. Requires the
-    /// `reality` build feature; unauthenticated probes are handed to a real site.
-    Reality,
+    /// UDP with AmneziaWG-2.0-style randomized framing: per-packet magic
+    /// headers, configurable padding, junk + signature packets before the
+    /// handshake. See [`AwgSection`].
+    Awg,
 }
 
 impl std::fmt::Display for TransportKind {
@@ -44,7 +46,7 @@ impl std::fmt::Display for TransportKind {
         match self {
             TransportKind::Quic => write!(f, "quic"),
             TransportKind::Tls => write!(f, "tls"),
-            TransportKind::Reality => write!(f, "reality"),
+            TransportKind::Awg => write!(f, "awg"),
         }
     }
 }
@@ -77,57 +79,161 @@ impl Default for TlsSection {
     }
 }
 
-/// REALITY transport configuration. Only consulted when `transport = "reality"`
-/// and the `reality` build feature is enabled. Keys use the same format as
-/// `2cha reality-keygen` (base64 X25519 public key, hex short id).
+/// AmneziaWG-2.0-style obfuscation. Only consulted when `transport = "awg"`.
 ///
-/// Server-only and client-only settings live in separate structs — a client
-/// config has no business reading `dest`, nor a server reading `public_key` —
-/// but both are flattened back into one `[reality]` TOML table so the config
-/// file format (and every existing deployment's config) is unchanged.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealitySection {
-    #[serde(flatten)]
-    pub server: RealityServerFields,
-    #[serde(flatten)]
-    pub client: RealityClientFields,
+/// All fields except the junk counts (`jc`/`jmin`/`jmax`, which are client-only)
+/// **must be identical on both ends** — the magic-header ranges and padding are
+/// part of the wire format. Generate a matched pair with the `2cha init` wizard.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AwgSection {
+    /// Junk packets sent before each handshake (client-only). 0 disables.
+    #[serde(default = "default_awg_jc")]
+    pub jc: u8,
+    /// Minimum junk-packet size in bytes.
+    #[serde(default = "default_awg_jmin")]
+    pub jmin: u16,
+    /// Maximum junk-packet size in bytes.
+    #[serde(default = "default_awg_jmax")]
+    pub jmax: u16,
+    /// S1–S4: max extra padding for init / resp / cookie / data packets.
+    #[serde(default = "default_awg_s1")]
+    pub s1: u16,
+    #[serde(default = "default_awg_s2")]
+    pub s2: u16,
+    #[serde(default = "default_awg_s3")]
+    pub s3: u16,
+    #[serde(default = "default_awg_s4")]
+    pub s4: u16,
+    /// H1–H4: magic-header base values for init / resp / cookie / data. Each
+    /// packet's header is a random value in `[hN, hN + header_span]`.
+    #[serde(default = "default_awg_h1")]
+    pub h1: u32,
+    #[serde(default = "default_awg_h2")]
+    pub h2: u32,
+    #[serde(default = "default_awg_h3")]
+    pub h3: u32,
+    #[serde(default = "default_awg_h4")]
+    pub h4: u32,
+    /// Width of each magic-header range (0 = static headers, AmneziaWG 1.x
+    /// style; non-zero = dynamic per-packet headers, 2.0 style). The four
+    /// resulting ranges must not overlap.
+    #[serde(default = "default_awg_header_span")]
+    pub header_span: u32,
+    /// I1–I5: optional CPS signature-packet templates sent before the handshake
+    /// (client-only). See `docs/transports.md` for the tag syntax.
+    #[serde(default)]
+    pub i1: Option<String>,
+    #[serde(default)]
+    pub i2: Option<String>,
+    #[serde(default)]
+    pub i3: Option<String>,
+    #[serde(default)]
+    pub i4: Option<String>,
+    #[serde(default)]
+    pub i5: Option<String>,
 }
 
-/// `[reality]` fields only a REALITY server consults.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealityServerFields {
-    /// Path to the REALITY X25519 private key (raw 32 bytes, mode 0600).
-    #[serde(default)]
-    pub private_key_file: Option<String>,
-    /// Real site to borrow a certificate from / relay probes to (`host:port`).
-    #[serde(default)]
-    pub dest: Option<String>,
-    /// Accepted SNIs. A ClientHello for any other name is proxied to `dest`.
-    #[serde(default)]
-    pub server_names: Vec<String>,
-    /// Accepted short ids (hex, up to 16 chars).
-    #[serde(default)]
-    pub short_ids: Vec<String>,
-    /// Max client/server clock skew in milliseconds (0 = no check).
-    #[serde(default)]
-    pub max_time_diff_ms: u64,
+fn default_awg_jc() -> u8 {
+    4
+}
+fn default_awg_jmin() -> u16 {
+    64
+}
+fn default_awg_jmax() -> u16 {
+    1024
+}
+fn default_awg_s1() -> u16 {
+    24
+}
+fn default_awg_s2() -> u16 {
+    40
+}
+fn default_awg_s3() -> u16 {
+    24
+}
+fn default_awg_s4() -> u16 {
+    16
+}
+fn default_awg_h1() -> u32 {
+    0x1000_0000
+}
+fn default_awg_h2() -> u32 {
+    0x2000_0000
+}
+fn default_awg_h3() -> u32 {
+    0x3000_0000
+}
+fn default_awg_h4() -> u32 {
+    0x4000_0000
+}
+fn default_awg_header_span() -> u32 {
+    0x00ff_ffff
 }
 
-/// `[reality]` fields only a REALITY client consults.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct RealityClientFields {
-    /// Server's REALITY public key (base64 X25519).
-    #[serde(default)]
-    pub public_key: Option<String>,
-    /// Short id to present (hex), matching one of the server's.
-    #[serde(default)]
-    pub short_id: Option<String>,
-    /// SNI to mimic; one of the server's `server_names`.
-    #[serde(default)]
-    pub server_name: Option<String>,
-    /// uTLS browser fingerprint (`chrome`/`firefox`/`safari`/`edge`; default chrome).
-    #[serde(default)]
-    pub fingerprint: String,
+impl Default for AwgSection {
+    fn default() -> Self {
+        AwgSection {
+            jc: default_awg_jc(),
+            jmin: default_awg_jmin(),
+            jmax: default_awg_jmax(),
+            s1: default_awg_s1(),
+            s2: default_awg_s2(),
+            s3: default_awg_s3(),
+            s4: default_awg_s4(),
+            h1: default_awg_h1(),
+            h2: default_awg_h2(),
+            h3: default_awg_h3(),
+            h4: default_awg_h4(),
+            header_span: default_awg_header_span(),
+            i1: None,
+            i2: None,
+            i3: None,
+            i4: None,
+            i5: None,
+        }
+    }
+}
+
+impl AwgSection {
+    /// The shared magic-header ranges + padding, as consumed by the wire codec.
+    pub fn to_params(&self) -> AwgParams {
+        let range = |h: u32| HeaderRange::new(h, h.saturating_add(self.header_span));
+        AwgParams {
+            headers: [
+                range(self.h1),
+                range(self.h2),
+                range(self.h3),
+                range(self.h4),
+            ],
+            padding: [self.s1, self.s2, self.s3, self.s4],
+        }
+    }
+
+    /// The configured I1–I5 CPS templates, in order, skipping unset ones.
+    pub fn signature_templates(&self) -> Vec<&str> {
+        [&self.i1, &self.i2, &self.i3, &self.i4, &self.i5]
+            .into_iter()
+            .filter_map(|o| o.as_deref())
+            .collect()
+    }
+
+    /// Validate internal consistency (called from client/server `validate`).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.jmin > self.jmax {
+            return Err(ConfigError::Invalid("awg.jmin must be <= awg.jmax".into()));
+        }
+        if self.jc > 0 && self.jmax == 0 {
+            return Err(ConfigError::Invalid(
+                "awg.jmax must be > 0 when awg.jc > 0".into(),
+            ));
+        }
+        if self.to_params().has_overlap() {
+            return Err(ConfigError::Invalid(
+                "awg H1–H4 ranges (hN..hN+header_span) must not overlap".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// TUN device configuration
@@ -176,6 +282,23 @@ pub fn validate_tun_mtu(mtu: u16) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid(format!(
             "tun.mtu must be 576..={} (got {}): each packet gains 35 bytes of \
              tunnel overhead and must fit in a 1500-byte datagram",
+            max, mtu
+        )));
+    }
+    Ok(())
+}
+
+/// AmneziaWG's 4-byte magic header is 3 bytes wider than the QUIC short header,
+/// so its data overhead is 38 bytes and a full-MTU packet needs a slightly
+/// lower cap than [`validate_tun_mtu`].
+pub fn validate_awg_mtu(mtu: u16) -> Result<(), ConfigError> {
+    const AWG_DATA_OVERHEAD: usize =
+        twocha_protocol::wire::AWG_DATA_HEADER_LEN + 2 + twocha_protocol::POLY1305_TAG_SIZE;
+    let max = (twocha_protocol::MAX_PACKET_SIZE - AWG_DATA_OVERHEAD) as u16;
+    if mtu > max {
+        return Err(ConfigError::Invalid(format!(
+            "tun.mtu must be <= {} for transport = \"awg\" (got {}): AWG's magic \
+             header adds 3 bytes over quic, so each packet gains 38 bytes of overhead",
             max, mtu
         )));
     }
@@ -374,6 +497,54 @@ mod tests {
         assert!(validate_tun_mtu(575).is_err());
         assert!(validate_tun_mtu(1466).is_err());
         assert!(validate_tun_mtu(1500).is_err());
+    }
+
+    #[test]
+    fn test_awg_defaults_validate() {
+        let awg = AwgSection::default();
+        assert!(awg.validate().is_ok());
+        // The four default header ranges are disjoint quadrant bases.
+        assert!(!awg.to_params().has_overlap());
+    }
+
+    #[test]
+    fn test_awg_rejects_overlapping_headers() {
+        let mut awg = AwgSection::default();
+        // Push H2's base inside H1's span so the two ranges collide.
+        awg.h2 = awg.h1 + 1;
+        assert!(awg.validate().is_err());
+    }
+
+    #[test]
+    fn test_awg_rejects_inverted_junk_range() {
+        let mut awg = AwgSection {
+            jmin: 100,
+            jmax: 50,
+            ..Default::default()
+        };
+        assert!(awg.validate().is_err());
+        awg.jmin = 50;
+        awg.jmax = 50;
+        assert!(awg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_awg_static_headers_allowed() {
+        // header_span = 0 (AmneziaWG 1.x static headers): distinct bases stay
+        // disjoint single-value ranges.
+        let awg = AwgSection {
+            header_span: 0,
+            ..Default::default()
+        };
+        assert!(awg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_awg_mtu_bounds() {
+        // AWG data overhead is 38 bytes, capping the MTU 3 below the QUIC max.
+        assert!(validate_awg_mtu(1420).is_ok());
+        assert!(validate_awg_mtu(1462).is_ok());
+        assert!(validate_awg_mtu(1463).is_err());
     }
 
     #[test]

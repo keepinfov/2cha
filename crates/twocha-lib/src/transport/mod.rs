@@ -10,7 +10,6 @@
 //! - **TLS** (`tls`): each v4 datagram is length-prefixed and tunnelled inside a
 //!   *real* TLS 1.3 session over TCP. A passive or active observer sees genuine
 //!   TLS; the Noise_IK handshake (and thus all authentication) rides inside.
-//!   See [`tls`] for the REALITY-readiness seam.
 //!
 //! The redundant QUIC framing carried inside TLS is wasted bytes but keeps the
 //! crypto core untouched; it can be stripped later as an optimisation.
@@ -19,8 +18,7 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::io::RawFd;
 
-#[cfg(feature = "reality")]
-pub mod reality;
+pub mod awg_prelude;
 pub mod tls;
 pub mod udp_quic;
 
@@ -92,8 +90,8 @@ pub trait ClientTransport {
     fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()>;
 }
 
-/// One accepted, transport-handshaked server connection (TLS or REALITY):
-/// exactly the per-connection surface the server's poll loop needs.
+/// One accepted, transport-handshaked server connection (TLS): exactly the
+/// per-connection surface the server's poll loop needs.
 pub trait StreamServerConn: Send + 'static {
     fn send(&mut self, datagram: &[u8]) -> io::Result<()>;
     fn recv(&mut self, out: &mut Vec<u8>) -> io::Result<bool>;
@@ -102,16 +100,13 @@ pub trait StreamServerConn: Send + 'static {
     fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()>;
 }
 
-/// A stream-oriented server transport listener (TLS, REALITY): one accepted
-/// TCP connection per client, camouflaged by a transport-specific handshake.
+/// A stream-oriented server transport listener (TLS): one accepted TCP
+/// connection per client, camouflaged by a transport-specific handshake.
 ///
 /// Accept is split from handshake so callers can run the handshake off the
-/// reactor thread: a REALITY handshake that fails auth is *not* a quick
-/// rejection — the Go core relays the whole connection to a decoy `dest` and
-/// blocks until that connection closes, which an attacker can hold open
-/// indefinitely. Even a real TLS handshake is an attacker-paced network round
-/// trip. Either one running inline on the single-threaded reactor would stall
-/// every other connection for as long as it takes.
+/// reactor thread: a TLS handshake is an attacker-paced network round trip, and
+/// running it inline on the single-threaded reactor would stall every other
+/// connection for as long as it takes.
 pub trait StreamServerListener: Send + Sync + 'static {
     type Conn: StreamServerConn;
 
@@ -120,9 +115,8 @@ pub trait StreamServerListener: Send + Sync + 'static {
     fn accept_raw(&self) -> io::Result<Option<(TcpStream, SocketAddr)>>;
 
     /// Run the (possibly slow) transport handshake on an accepted stream.
-    /// `Ok(None)` means the peer was rejected and already handled (e.g. a
-    /// REALITY probe relayed to its decoy `dest`) — there is nothing to
-    /// register.
+    /// `Ok(None)` means the peer was rejected and already handled — there is
+    /// nothing to register.
     fn handshake(&self, stream: TcpStream, peer: SocketAddr) -> io::Result<Option<Self::Conn>>;
 
     fn pollfd(&self) -> RawFd;

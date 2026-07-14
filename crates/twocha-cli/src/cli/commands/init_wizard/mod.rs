@@ -31,6 +31,42 @@ fn prompt_cipher(theme: &ColorfulTheme) -> Result<String> {
     Ok(ciphers[idx].to_string())
 }
 
+/// AmneziaWG obfuscation parameters generated once per wizard run and shared,
+/// byte-for-byte, between the server and every client it emits (the magic
+/// headers and padding are part of the wire format — both ends must agree).
+#[derive(Clone)]
+pub struct AwgWizard {
+    pub h: [u32; 4],
+    pub header_span: u32,
+    pub s: [u16; 4],
+    pub jc: u8,
+    pub jmin: u16,
+    pub jmax: u16,
+}
+
+impl AwgWizard {
+    /// Roll a fresh set of parameters: four non-overlapping magic-header ranges
+    /// (one random base per 2^30 quadrant, so the `header_span`-wide ranges can
+    /// never collide) plus sane default padding and junk sizes.
+    fn generate() -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        const QUADRANT: u32 = 0x4000_0000;
+        const SPAN: u32 = 0x00ff_ffff;
+        // Base within a quadrant, leaving room for the span so the range stays
+        // inside its quadrant and thus disjoint from the others.
+        let mut base = |k: u32| k * QUADRANT + rng.gen_range(0..(QUADRANT - SPAN));
+        AwgWizard {
+            h: [base(0), base(1), base(2), base(3)],
+            header_span: SPAN,
+            s: [24, 40, 24, 16],
+            jc: 4,
+            jmin: 64,
+            jmax: 1024,
+        }
+    }
+}
+
 /// The obfuscation transport choice gathered from the wizard.
 #[derive(Default)]
 pub struct TransportChoice {
@@ -38,14 +74,7 @@ pub struct TransportChoice {
     pub sni: Option<String>,
     pub cert_file: Option<String>,
     pub key_file: Option<String>,
-    /// REALITY: the real HTTPS site to borrow/mimic (server_names + client SNI).
-    pub reality_server_name: Option<String>,
-    /// REALITY server-side: real `host:port` that non-clients are proxied to.
-    pub reality_dest: Option<String>,
-    /// REALITY client-side: the server's REALITY public key (base64).
-    pub reality_public_key: Option<String>,
-    /// REALITY client-side: the shared short id (hex).
-    pub reality_short_id: Option<String>,
+    pub awg: Option<AwgWizard>,
 }
 
 impl TransportChoice {
@@ -55,25 +84,29 @@ impl TransportChoice {
             ..Default::default()
         }
     }
+
+    fn awg() -> Self {
+        TransportChoice {
+            kind: "awg".to_string(),
+            awg: Some(AwgWizard::generate()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Prompt for the obfuscation transport. When `server` is true and TLS is
 /// chosen, also offer to supply a custom certificate/key (otherwise the server
-/// auto-generates a self-signed cert for the SNI at startup). The REALITY
-/// option is only offered when the binary was built with the `reality` feature.
+/// auto-generates a self-signed cert for the SNI at startup).
 fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
-    // `items` is only mutated when the reality feature adds a third option.
-    #[cfg_attr(not(feature = "reality"), allow(unused_mut))]
-    let mut items = vec![
+    let items = [
         "quic  — UDP, QUIC-mimicry framing (default)",
         "tls   — TCP, real TLS 1.3 with Noise inside (e.g. on :443)",
+        "awg   — UDP, AmneziaWG-style randomized headers + junk packets",
     ];
-    #[cfg(feature = "reality")]
-    items.push("reality — TCP :443; borrows a real site's TLS, probes see that site");
 
     let idx = Select::with_theme(theme)
         .with_prompt("Transport")
-        .items(&items)
+        .items(items)
         .default(0)
         .interact()
         .map_err(wizard_io_err)?;
@@ -81,8 +114,7 @@ fn prompt_transport(theme: &ColorfulTheme, server: bool) -> Result<TransportChoi
     match idx {
         0 => Ok(TransportChoice::quic()),
         1 => prompt_tls(theme, server),
-        #[cfg(feature = "reality")]
-        2 => prompt_reality(theme, server),
+        2 => Ok(TransportChoice::awg()),
         _ => unreachable!("transport selection out of range"),
     }
 }
@@ -123,65 +155,12 @@ fn prompt_tls(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
         sni: Some(sni),
         cert_file,
         key_file,
-        ..Default::default()
+        awg: None,
     })
 }
 
-/// REALITY transport prompts. The server side generates keys later (in the
-/// server wizard) and only needs the borrowed site + probe fallback; the client
-/// side takes the server's REALITY public key and short id.
-#[cfg(feature = "reality")]
-fn prompt_reality(theme: &ColorfulTheme, server: bool) -> Result<TransportChoice> {
-    let server_name: String = Input::with_theme(theme)
-        .with_prompt("  REALITY site to borrow (a real HTTPS host, e.g. www.mozilla.org)")
-        .default("www.mozilla.org".to_string())
-        .interact_text()
-        .map_err(wizard_io_err)?;
-
-    if server {
-        let dest: String = Input::with_theme(theme)
-            .with_prompt("  Probe fallback target (host:port non-clients are proxied to)")
-            .default(format!("{}:443", server_name))
-            .validate_with(|s: &String| validate_endpoint(s))
-            .interact_text()
-            .map_err(wizard_io_err)?;
-        Ok(TransportChoice {
-            kind: "reality".to_string(),
-            reality_server_name: Some(server_name),
-            reality_dest: Some(dest),
-            ..Default::default()
-        })
-    } else {
-        let public_key: String = Input::with_theme(theme)
-            .with_prompt("  Server REALITY public key (base64, from 2cha reality-keygen)")
-            .validate_with(|s: &String| -> std::result::Result<(), String> {
-                twocha_core::decode_public_key(s.trim())
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            })
-            .interact_text()
-            .map_err(wizard_io_err)?;
-        let short_id: String = Input::with_theme(theme)
-            .with_prompt("  REALITY short id (hex)")
-            .validate_with(|s: &String| -> std::result::Result<(), String> {
-                twocha_core::crypto::reality::parse_short_id(s.trim())
-                    .map(|_| ())
-                    .ok_or_else(|| "expected 1–16 hex digits".to_string())
-            })
-            .interact_text()
-            .map_err(wizard_io_err)?;
-        Ok(TransportChoice {
-            kind: "reality".to_string(),
-            reality_server_name: Some(server_name),
-            reality_public_key: Some(public_key.trim().to_string()),
-            reality_short_id: Some(short_id.trim().to_string()),
-            ..Default::default()
-        })
-    }
-}
-
 /// Validate a "host:port" endpoint (domain names allowed)
-fn validate_endpoint(s: &str) -> std::result::Result<(), String> {
+pub fn validate_endpoint(s: &str) -> std::result::Result<(), String> {
     let Some((host, port)) = s.rsplit_once(':') else {
         return Err("expected host:port, e.g. vpn.example.com:51820".to_string());
     };

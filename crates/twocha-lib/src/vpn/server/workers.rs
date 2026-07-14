@@ -38,7 +38,7 @@ use twocha_core::v4::{
 };
 use twocha_core::ServerConfig;
 use twocha_protocol::wire::{self, WireMsg, CID_LEN};
-use twocha_protocol::{Result, VpnError};
+use twocha_protocol::{ObfsProfile, Result, VpnError};
 
 const COOKIE_ROTATE_INTERVAL: Duration = Duration::from_secs(120);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
@@ -64,6 +64,8 @@ struct ControlPlane {
 
 struct SharedState {
     control: Mutex<ControlPlane>,
+    /// Wire framing used to classify inbound datagrams (QUIC-mimic or AWG).
+    profile: ObfsProfile,
     /// Established sessions keyed by our receive-CID
     sessions: RwLock<HashMap<[u8; CID_LEN], Arc<Entry>>>,
     /// Learned inner tunnel IP -> session (for TUN->UDP routing)
@@ -80,6 +82,7 @@ pub(super) fn serve_udp_workers(
     config_path: &str,
     tun: TunDevice,
     engine: ServerHandshakeEngine,
+    profile: ObfsProfile,
     allowed: HashSet<[u8; 32]>,
     peer_names: HashMap<[u8; 32], String>,
     control: Option<&ControlListener>,
@@ -94,6 +97,7 @@ pub(super) fn serve_udp_workers(
             peer_names,
             cid_by_peer: HashMap::new(),
         }),
+        profile,
         sessions: RwLock::new(HashMap::new()),
         cid_by_inner_ip: RwLock::new(HashMap::new()),
         max_clients: cfg.server.max_clients,
@@ -128,8 +132,9 @@ pub(super) fn serve_udp_workers(
     }
 
     log::info!(
-        "Listening on {} (udp/quic, {} workers, multi-queue tun)",
+        "Listening on {} (udp/{}, {} workers, multi-queue tun)",
         listen_addr,
+        cfg.server.transport,
         workers
     );
 
@@ -338,7 +343,7 @@ fn handle_datagram(
     data: &[u8],
     payload_buf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    let msg = wire::parse(data).ok()?;
+    let msg = wire::parse_profile(&shared.profile, data).ok()?;
 
     match msg {
         WireMsg::Init { .. } => {
@@ -493,10 +498,16 @@ fn cleanup_sessions(shared: &SharedState) {
 /// Jittered keepalives keep NAT bindings open (worker 0 maintenance).
 fn send_keepalives(tunnel: &UdpTunnel, shared: &SharedState, now: Instant) {
     let entries: Vec<Arc<Entry>> = shared.sessions.read().unwrap().values().cloned().collect();
+    let mut scratch = SealScratch::default();
+    let mut datagram = Vec::new();
     for entry in entries {
         let mut next = entry.next_keepalive.lock().unwrap();
         if now >= *next {
-            if let Ok(datagram) = entry.session.seal_data(&[]) {
+            if entry
+                .session
+                .seal_data_into(&[], &mut scratch, &mut datagram)
+                .is_ok()
+            {
                 let _ = tunnel.send_to(&datagram, *entry.addr.lock().unwrap());
             }
             *next = now + keepalive_jitter();

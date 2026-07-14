@@ -331,6 +331,164 @@ pub fn unframe_inner(plaintext: &[u8]) -> Result<&[u8]> {
         .ok_or_else(|| ProtocolError::CorruptedPacket("inner length".into()).into())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AmneziaWG-2.0-style framing
+//
+// No fixed bytes: every datagram opens with a random 4-byte "magic header"
+// drawn from a configured per-class range. The receiver classifies by which
+// range the leading big-endian u32 falls into. Layouts:
+//   init:   H1(4) + noise(144) + S1 pad + mac1(16) + mac2(16)
+//   resp:   H2(4) + noise(88)  + S2 pad + mac1(16)
+//   cookie: H3(4) + nonce(24)  + sealed(32) + S3 pad
+//   data:   H4(4) + receiver_cid(8) + masked_counter(8) + ciphertext
+// (Data padding is carried inside the AEAD, not appended, since trailing bytes
+// can't be told from ciphertext — see `AwgParams::padding`.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+use crate::obfs::{AwgParams, MsgClass, ObfsProfile};
+
+/// Length of the AmneziaWG magic header.
+pub const AWG_HEADER_LEN: usize = 4;
+/// AmneziaWG data header: magic header + receiver CID + masked counter.
+pub const AWG_DATA_HEADER_LEN: usize = AWG_HEADER_LEN + CID_LEN + 8;
+
+/// Build an AWG handshake-init datagram with zeroed MAC fields, returning the
+/// buffer plus the mac1/mac2 offsets for the caller to patch.
+pub fn encode_init_awg(
+    header: u32,
+    noise: &[u8],
+    padding: &[u8],
+) -> Result<(Vec<u8>, usize, usize)> {
+    if noise.len() != NOISE_INIT_LEN {
+        return Err(ProtocolError::CorruptedPacket("init noise len".into()).into());
+    }
+    let mut out = Vec::with_capacity(AWG_HEADER_LEN + noise.len() + padding.len() + 2 * MAC_LEN);
+    out.extend_from_slice(&header.to_be_bytes());
+    out.extend_from_slice(noise);
+    out.extend_from_slice(padding);
+    let mac1_off = out.len();
+    out.extend_from_slice(&[0u8; MAC_LEN]);
+    let mac2_off = out.len();
+    out.extend_from_slice(&[0u8; MAC_LEN]);
+    Ok((out, mac1_off, mac2_off))
+}
+
+/// Build an AWG handshake-response datagram with a zeroed MAC1 field.
+pub fn encode_resp_awg(header: u32, noise: &[u8], padding: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if noise.len() != NOISE_RESP_LEN {
+        return Err(ProtocolError::CorruptedPacket("resp noise len".into()).into());
+    }
+    let mut out = Vec::with_capacity(AWG_HEADER_LEN + noise.len() + padding.len() + MAC_LEN);
+    out.extend_from_slice(&header.to_be_bytes());
+    out.extend_from_slice(noise);
+    out.extend_from_slice(padding);
+    let mac1_off = out.len();
+    out.extend_from_slice(&[0u8; MAC_LEN]);
+    Ok((out, mac1_off))
+}
+
+/// Build an AWG cookie-reply datagram (stateless, no MAC).
+pub fn encode_cookie_awg(
+    header: u32,
+    nonce: &[u8; COOKIE_NONCE_LEN],
+    sealed: &[u8; COOKIE_SEALED_LEN],
+    padding: &[u8],
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(AWG_HEADER_LEN + COOKIE_NONCE_LEN + COOKIE_SEALED_LEN + padding.len());
+    out.extend_from_slice(&header.to_be_bytes());
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(sealed);
+    out.extend_from_slice(padding);
+    out
+}
+
+/// Classify and parse an inbound AWG datagram against the header ranges.
+/// Returns an error for anything that matches no range or is too small;
+/// callers MUST drop such datagrams silently.
+pub fn parse_awg<'a>(params: &AwgParams, buf: &'a [u8]) -> Result<WireMsg<'a>> {
+    if buf.len() < AWG_HEADER_LEN {
+        return Err(too_small(buf.len()));
+    }
+    let header = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let class = params
+        .classify(header)
+        .ok_or_else(|| ProtocolError::CorruptedPacket("awg magic header".into()))?;
+    let len = buf.len();
+    match class {
+        MsgClass::Init => {
+            if len < AWG_HEADER_LEN + NOISE_INIT_LEN + 2 * MAC_LEN {
+                return Err(too_small(len));
+            }
+            Ok(WireMsg::Init {
+                noise: &buf[AWG_HEADER_LEN..AWG_HEADER_LEN + NOISE_INIT_LEN],
+                mac1_region: &buf[..len - 2 * MAC_LEN],
+                mac1: &buf[len - 2 * MAC_LEN..len - MAC_LEN],
+                mac2_region: &buf[..len - MAC_LEN],
+                mac2: &buf[len - MAC_LEN..],
+            })
+        }
+        MsgClass::Resp => {
+            if len < AWG_HEADER_LEN + NOISE_RESP_LEN + MAC_LEN {
+                return Err(too_small(len));
+            }
+            Ok(WireMsg::Resp {
+                noise: &buf[AWG_HEADER_LEN..AWG_HEADER_LEN + NOISE_RESP_LEN],
+                mac1_region: &buf[..len - MAC_LEN],
+                mac1: &buf[len - MAC_LEN..],
+            })
+        }
+        MsgClass::Cookie => {
+            let need = AWG_HEADER_LEN + COOKIE_NONCE_LEN + COOKIE_SEALED_LEN;
+            if len < need {
+                return Err(too_small(len));
+            }
+            Ok(WireMsg::Cookie {
+                nonce: &buf[AWG_HEADER_LEN..AWG_HEADER_LEN + COOKIE_NONCE_LEN],
+                sealed: &buf[AWG_HEADER_LEN + COOKIE_NONCE_LEN..need],
+            })
+        }
+        MsgClass::Data => {
+            if len < AWG_DATA_HEADER_LEN {
+                return Err(too_small(len));
+            }
+            let mut receiver_cid = [0u8; CID_LEN];
+            receiver_cid.copy_from_slice(&buf[AWG_HEADER_LEN..AWG_HEADER_LEN + CID_LEN]);
+            let mut masked_counter = [0u8; 8];
+            masked_counter.copy_from_slice(&buf[AWG_HEADER_LEN + CID_LEN..AWG_DATA_HEADER_LEN]);
+            Ok(WireMsg::Data {
+                receiver_cid,
+                masked_counter,
+                ciphertext: &buf[AWG_DATA_HEADER_LEN..],
+            })
+        }
+    }
+}
+
+/// Parse an inbound datagram under the active obfuscation profile.
+pub fn parse_profile<'a>(profile: &ObfsProfile, buf: &'a [u8]) -> Result<WireMsg<'a>> {
+    match profile {
+        ObfsProfile::Quic => parse(buf),
+        ObfsProfile::Awg(p) => parse_awg(p, buf),
+    }
+}
+
+/// On-wire data header length for a profile: the bytes before the ciphertext.
+pub fn data_header_len(profile: &ObfsProfile) -> usize {
+    match profile {
+        ObfsProfile::Quic => DATA_HEADER_LEN,
+        ObfsProfile::Awg(_) => AWG_DATA_HEADER_LEN,
+    }
+}
+
+/// Byte offset of the (masked) counter within a data header, for a profile.
+pub fn data_counter_offset(profile: &ObfsProfile) -> usize {
+    match profile {
+        ObfsProfile::Quic => 1 + CID_LEN,
+        ObfsProfile::Awg(_) => AWG_HEADER_LEN + CID_LEN,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +605,95 @@ mod tests {
         let (mut pkt, _) = encode_resp(&noise, &[5u8; 40], &rnd()).unwrap();
         pkt.push(0xEE); // trailing junk breaks declared length
         assert!(parse(&pkt).is_err());
+    }
+
+    fn awg_params() -> AwgParams {
+        AwgParams {
+            headers: [
+                crate::obfs::HeaderRange::new(0x1000_0000, 0x1000_ffff),
+                crate::obfs::HeaderRange::new(0x2000_0000, 0x2000_ffff),
+                crate::obfs::HeaderRange::new(0x3000_0000, 0x3000_ffff),
+                crate::obfs::HeaderRange::new(0x4000_0000, 0x4000_ffff),
+            ],
+            padding: [24, 24, 24, 24],
+        }
+    }
+
+    #[test]
+    fn test_awg_init_roundtrip() {
+        let p = awg_params();
+        let noise = [7u8; NOISE_INIT_LEN];
+        let (mut pkt, mac1_off, mac2_off) =
+            encode_init_awg(0x1000_1234, &noise, &[9u8; 20]).unwrap();
+        pkt[mac1_off..mac1_off + MAC_LEN].copy_from_slice(&[0xAA; MAC_LEN]);
+        pkt[mac2_off..mac2_off + MAC_LEN].copy_from_slice(&[0xBB; MAC_LEN]);
+        match parse_awg(&p, &pkt).unwrap() {
+            WireMsg::Init {
+                noise: n,
+                mac1,
+                mac2,
+                mac1_region,
+                mac2_region,
+            } => {
+                assert_eq!(n, &noise[..]);
+                assert_eq!(mac1, &[0xAA; MAC_LEN]);
+                assert_eq!(mac2, &[0xBB; MAC_LEN]);
+                assert_eq!(mac1_region.len(), pkt.len() - 2 * MAC_LEN);
+                assert_eq!(mac2_region.len(), pkt.len() - MAC_LEN);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_awg_resp_and_cookie_roundtrip() {
+        let p = awg_params();
+        let noise = [3u8; NOISE_RESP_LEN];
+        let (pkt, mac1_off) = encode_resp_awg(0x2000_abcd, &noise, &[5u8; 8]).unwrap();
+        assert_eq!(mac1_off, pkt.len() - MAC_LEN);
+        assert!(matches!(parse_awg(&p, &pkt).unwrap(), WireMsg::Resp { .. }));
+
+        let ck = encode_cookie_awg(
+            0x3000_0001,
+            &[4; COOKIE_NONCE_LEN],
+            &[6; COOKIE_SEALED_LEN],
+            &[0; 12],
+        );
+        match parse_awg(&p, &ck).unwrap() {
+            WireMsg::Cookie { nonce, sealed } => {
+                assert_eq!(nonce, &[4; COOKIE_NONCE_LEN]);
+                assert_eq!(sealed, &[6; COOKIE_SEALED_LEN]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_awg_data_layout_and_reject() {
+        let p = awg_params();
+        // Build a data datagram by hand the way the session hot path does.
+        let ct = vec![8u8; 40];
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&0x4000_5678u32.to_be_bytes());
+        pkt.extend_from_slice(&[1u8; CID_LEN]);
+        pkt.extend_from_slice(&[2u8; 8]);
+        pkt.extend_from_slice(&ct);
+        match parse_awg(&p, &pkt).unwrap() {
+            WireMsg::Data {
+                receiver_cid,
+                masked_counter,
+                ciphertext,
+            } => {
+                assert_eq!(receiver_cid, [1u8; CID_LEN]);
+                assert_eq!(masked_counter, [2u8; 8]);
+                assert_eq!(ciphertext, &ct[..]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        // A header matching no configured range is rejected (junk drops silently).
+        let mut junk = pkt.clone();
+        junk[0..4].copy_from_slice(&0x0BAD_0000u32.to_be_bytes());
+        assert!(parse_awg(&p, &junk).is_err());
+        assert!(parse_awg(&p, &[0u8; 3]).is_err());
     }
 }

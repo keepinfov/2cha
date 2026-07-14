@@ -3,6 +3,8 @@
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 
+use super::AwgWizard;
+
 pub struct ServerParams {
     pub listen: String,
     pub max_clients: usize,
@@ -17,11 +19,7 @@ pub struct ServerParams {
     pub tls_sni: Option<String>,
     pub tls_cert_file: Option<String>,
     pub tls_key_file: Option<String>,
-    // REALITY (only used when transport == "reality")
-    pub reality_key_file: Option<String>,
-    pub reality_dest: Option<String>,
-    pub reality_server_names: Vec<String>,
-    pub reality_short_ids: Vec<String>,
+    pub awg: Option<AwgWizard>,
 }
 
 pub struct PeerParams {
@@ -40,65 +38,40 @@ pub struct ClientParams {
     pub dns_servers: Vec<String>,
     pub transport: String,
     pub tls_sni: Option<String>,
-    // REALITY (only used when transport == "reality")
-    pub reality_public_key: Option<String>,
-    pub reality_short_id: Option<String>,
-    pub reality_server_name: Option<String>,
+    pub awg: Option<AwgWizard>,
 }
 
-/// Comma-separated, double-quoted TOML array body (no brackets).
-fn quoted_list(items: &[String]) -> String {
-    items
-        .iter()
-        .map(|i| format!("\"{}\"", i))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Render a server `[reality]` section, or empty for non-REALITY transports.
-fn reality_server_section(p: &ServerParams) -> String {
-    if p.transport != "reality" {
+/// Render a top-level `[awg]` section, or an empty string for non-AWG
+/// transports. The magic-header ranges and padding **must be identical** on the
+/// server and every client, so the wizard renders the same `[awg]` block into
+/// both from a single generated `AwgWizard`.
+fn awg_section(transport: &str, awg: Option<&AwgWizard>) -> String {
+    if transport != "awg" {
         return String::new();
     }
+    let a = match awg {
+        Some(a) => a,
+        None => return String::new(),
+    };
     let mut s = String::from(
-        "\n# REALITY transport: unauthenticated connections (censor probes) are\n\
-         # proxied to a real HTTPS site (`dest`), so they see that site's genuine\n\
-         # certificate; authenticated 2cha clients tunnel Noise inside. Generate\n\
-         # keys with `2cha reality-keygen`. Needs the glibc/container build.\n[reality]\n",
+        "\n# AmneziaWG-style obfuscation: no fixed bytes on the wire. Each packet's\n\
+         # 4-byte header is a random value drawn from a per-message-type range, and\n\
+         # the client fires junk packets before each handshake. H1-H4, header_span\n\
+         # and S1-S4 are part of the wire format and MUST match on both ends; jc/\n\
+         # jmin/jmax are client-only. Regenerate a matched pair with 2cha init.\n[awg]\n",
     );
-    if let Some(k) = &p.reality_key_file {
-        let _ = writeln!(s, "private_key_file = \"{}\"", k);
-    }
-    if let Some(d) = &p.reality_dest {
-        let _ = writeln!(s, "dest = \"{}\"", d);
-    }
     let _ = writeln!(
         s,
-        "server_names = [{}]",
-        quoted_list(&p.reality_server_names)
+        "h1 = {}\nh2 = {}\nh3 = {}\nh4 = {}",
+        a.h[0], a.h[1], a.h[2], a.h[3]
     );
-    let _ = writeln!(s, "short_ids = [{}]", quoted_list(&p.reality_short_ids));
-    s
-}
-
-/// Render a client `[reality]` section, or empty for non-REALITY transports.
-fn reality_client_section(p: &ClientParams) -> String {
-    if p.transport != "reality" {
-        return String::new();
-    }
-    let mut s = String::from(
-        "\n# REALITY transport: mimics a real HTTPS site. All three values come\n\
-         # from the server admin (2cha reality-keygen).\n[reality]\n",
+    let _ = writeln!(s, "header_span = {}", a.header_span);
+    let _ = writeln!(
+        s,
+        "s1 = {}\ns2 = {}\ns3 = {}\ns4 = {}",
+        a.s[0], a.s[1], a.s[2], a.s[3]
     );
-    if let Some(k) = &p.reality_public_key {
-        let _ = writeln!(s, "public_key = \"{}\"", k);
-    }
-    if let Some(id) = &p.reality_short_id {
-        let _ = writeln!(s, "short_id = \"{}\"", id);
-    }
-    if let Some(sn) = &p.reality_server_name {
-        let _ = writeln!(s, "server_name = \"{}\"", sn);
-    }
+    let _ = writeln!(s, "jc = {}\njmin = {}\njmax = {}", a.jc, a.jmin, a.jmax);
     s
 }
 
@@ -152,7 +125,7 @@ pub fn render_server(p: &ServerParams) -> String {
 [server]
 listen = "{listen}"
 max_clients = {max_clients}
-# Obfuscation transport: "quic" (UDP), "tls" (TCP), or "reality". Must match clients.
+# Obfuscation transport: "quic" (UDP), "tls" (TCP) or "awg" (UDP). Must match clients.
 transport = "{transport}"
 
 [tun]
@@ -176,7 +149,7 @@ private_key_file = "{key_file}"
         p.tls_cert_file.as_deref(),
         p.tls_key_file.as_deref(),
     ));
-    out.push_str(&reality_server_section(p));
+    out.push_str(&awg_section(&p.transport, p.awg.as_ref()));
 
     out.push('\n');
     if p.peers.is_empty() {
@@ -241,7 +214,7 @@ pub fn render_client(p: &ClientParams) -> String {
     dns_v4.push(']');
 
     let mut extra = tls_section(&p.transport, p.tls_sni.as_deref(), None, None);
-    extra.push_str(&reality_client_section(p));
+    extra.push_str(&awg_section(&p.transport, p.awg.as_ref()));
 
     format!(
         r#"# 2cha VPN Client Configuration v1.0
@@ -251,7 +224,7 @@ pub fn render_client(p: &ClientParams) -> String {
 [client]
 # Server address: IP:port or domain:port
 server = "{endpoint}"
-# Obfuscation transport: "quic" (UDP), "tls" (TCP), or "reality". Must match the server.
+# Obfuscation transport: "quic" (UDP), "tls" (TCP) or "awg" (UDP). Must match the server.
 transport = "{transport}"
 {extra}
 [tun]
@@ -312,10 +285,7 @@ mod tests {
             tls_sni: None,
             tls_cert_file: None,
             tls_key_file: None,
-            reality_key_file: None,
-            reality_dest: None,
-            reality_server_names: Vec::new(),
-            reality_short_ids: Vec::new(),
+            awg: None,
         }
     }
 
@@ -351,9 +321,7 @@ mod tests {
             dns_servers: super::super::default_dns_servers(),
             transport: "quic".into(),
             tls_sni: None,
-            reality_public_key: None,
-            reality_short_id: None,
-            reality_server_name: None,
+            awg: None,
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
         assert!(cfg.validate().is_ok());
@@ -387,9 +355,7 @@ mod tests {
             dns_servers: Vec::new(),
             transport: "tls".into(),
             tls_sni: Some("www.example.com".into()),
-            reality_public_key: None,
-            reality_short_id: None,
-            reality_server_name: None,
+            awg: None,
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
         assert!(cfg.validate().is_ok());
@@ -397,43 +363,68 @@ mod tests {
         assert_eq!(cfg.tls.sni, "www.example.com");
     }
 
+    fn sample_awg() -> AwgWizard {
+        AwgWizard {
+            h: [0x0012_3456, 0x4012_3456, 0x8012_3456, 0xC012_3456],
+            header_span: 0x00ff_ffff,
+            s: [24, 40, 24, 16],
+            jc: 4,
+            jmin: 64,
+            jmax: 1024,
+        }
+    }
+
     #[test]
-    fn test_render_server_reality_parses() {
+    fn test_render_server_awg_parses() {
         let mut p = server_params(vec![PeerParams {
             public_key: twocha_core::encode_public_key(&[7u8; 32]),
             name: "laptop".into(),
         }]);
-        p.transport = "reality".into();
-        p.reality_key_file = Some("/etc/2cha/reality.key".into());
-        p.reality_dest = Some("www.mozilla.org:443".into());
-        p.reality_server_names = vec!["www.mozilla.org".into()];
-        p.reality_short_ids = vec!["0123456789abcdef".into()];
+        p.transport = "awg".into();
+        p.awg = Some(sample_awg());
         let rendered = render_server(&p);
         let cfg = twocha_core::ServerConfig::parse(&rendered).unwrap();
-        assert_eq!(cfg.server.transport, twocha_core::TransportKind::Reality);
-        cfg.validate().expect("reality server config validates");
+        assert_eq!(cfg.server.transport, twocha_core::TransportKind::Awg);
+        assert_eq!(cfg.awg.h1, 0x0012_3456);
+        assert_eq!(cfg.awg.header_span, 0x00ff_ffff);
+        cfg.validate().unwrap();
     }
 
     #[test]
-    fn test_render_client_reality_parses() {
+    fn test_render_client_awg_parses_and_matches_server() {
+        let awg = sample_awg();
         let rendered = render_client(&ClientParams {
-            endpoint: "vpn.example.com:443".into(),
+            endpoint: "vpn.example.com:51820".into(),
             cipher: "chacha20-poly1305".into(),
             key_file: "/etc/2cha/client.key".into(),
             server_public_key: twocha_core::encode_public_key(&[9u8; 32]),
             address: Ipv4Addr::new(10, 8, 0, 2),
             prefix: 24,
-            route_all: false,
-            dns_servers: Vec::new(),
-            transport: "reality".into(),
+            route_all: true,
+            dns_servers: super::super::default_dns_servers(),
+            transport: "awg".into(),
             tls_sni: None,
-            reality_public_key: Some(twocha_core::encode_public_key(&[3u8; 32])),
-            reality_short_id: Some("0123456789abcdef".into()),
-            reality_server_name: Some("www.mozilla.org".into()),
+            awg: Some(awg),
         });
         let cfg = twocha_core::ClientConfig::parse(&rendered).unwrap();
-        assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.client.transport, twocha_core::TransportKind::Reality);
+        cfg.validate().unwrap();
+        assert_eq!(cfg.client.transport, twocha_core::TransportKind::Awg);
+        // Client-only junk knobs survive the round trip.
+        assert_eq!(cfg.awg.jc, 4);
+        assert_eq!(cfg.awg.h4, 0xC012_3456);
+    }
+
+    #[test]
+    fn test_wizard_awg_headers_are_disjoint() {
+        // Every generated set must render into a config with disjoint ranges.
+        for _ in 0..64 {
+            let mut p = server_params(Vec::new());
+            p.transport = "awg".into();
+            p.awg = Some(AwgWizard::generate());
+            let rendered = render_server(&p);
+            let cfg = twocha_core::ServerConfig::parse(&rendered).unwrap();
+            assert!(!cfg.awg.to_params().has_overlap());
+        }
     }
 
     #[test]

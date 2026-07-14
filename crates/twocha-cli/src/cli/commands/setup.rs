@@ -48,8 +48,8 @@ pub fn cmd_setup(yes: bool, config: Option<&str>) -> Result<()> {
         .map_err(|e| VpnError::Config(e.to_string()))?
         .port();
     let proto = match cfg.server.transport {
-        TransportKind::Quic => "udp",
-        TransportKind::Tls | TransportKind::Reality => "tcp",
+        TransportKind::Quic | TransportKind::Awg => "udp",
+        TransportKind::Tls => "tcp",
     };
 
     // ── Phase 2: systemd service ─────────────────────────────────────────

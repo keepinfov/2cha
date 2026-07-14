@@ -18,10 +18,21 @@ use crate::crypto::mac::{
 };
 use crate::crypto::noise::Handshake;
 use crate::v4::session::Session;
+use twocha_protocol::obfs::{AwgParams, MsgClass};
 use twocha_protocol::wire::{
     self, LongHeaderRandom, WireMsg, CID_LEN, INIT_PAYLOAD_LEN, MAC_LEN, RESP_PAYLOAD_LEN,
 };
-use twocha_protocol::{CryptoError, ProtocolError, Result, VpnError};
+use twocha_protocol::{CryptoError, ObfsProfile, ProtocolError, Result, VpnError};
+
+/// Pick a random magic-header value inside the configured range for `class`.
+fn pick_header(p: &AwgParams, class: MsgClass) -> u32 {
+    let h = p.header(class);
+    if h.min == h.max {
+        h.min
+    } else {
+        rand::thread_rng().gen_range(h.min..=h.max)
+    }
+}
 
 fn long_header_random() -> LongHeaderRandom {
     let mut rng = rand::thread_rng();
@@ -53,6 +64,7 @@ fn random_padding(min: usize, max: usize) -> Vec<u8> {
 /// Client side of one handshake attempt
 pub struct ClientHandshake {
     hs: Handshake,
+    profile: ObfsProfile,
     local_cid: [u8; CID_LEN],
     seed_local: Zeroizing<[u8; 32]>,
     local_public: [u8; 32],
@@ -65,6 +77,15 @@ pub struct ClientHandshake {
 
 impl ClientHandshake {
     pub fn new(suite: CipherSuite, identity: &Identity, server_public: [u8; 32]) -> Result<Self> {
+        Self::with_profile(suite, identity, server_public, ObfsProfile::Quic)
+    }
+
+    pub fn with_profile(
+        suite: CipherSuite,
+        identity: &Identity,
+        server_public: [u8; 32],
+        profile: ObfsProfile,
+    ) -> Result<Self> {
         let mut rng = rand::thread_rng();
         let mut local_cid = [0u8; CID_LEN];
         rng.fill_bytes(&mut local_cid);
@@ -80,15 +101,24 @@ impl ClientHandshake {
         payload[CID_LEN + 32..].copy_from_slice(&unix_nanos().to_le_bytes());
 
         let noise = hs.write_message(&payload)?;
-        let padding = random_padding(wire::init_padding_len(0), wire::init_padding_len(120));
-        let (mut init, mac1_off, mac2_off) =
-            wire::encode_init(&noise, &padding, &long_header_random())?;
+        let (mut init, mac1_off, mac2_off) = match &profile {
+            ObfsProfile::Quic => {
+                let padding =
+                    random_padding(wire::init_padding_len(0), wire::init_padding_len(120));
+                wire::encode_init(&noise, &padding, &long_header_random())?
+            }
+            ObfsProfile::Awg(p) => {
+                let padding = random_padding(0, p.pad_max(MsgClass::Init));
+                wire::encode_init_awg(pick_header(p, MsgClass::Init), &noise, &padding)?
+            }
+        };
 
         let m1 = mac(&mac1_key(&server_public), &init[..mac1_off]);
         init[mac1_off..mac1_off + MAC_LEN].copy_from_slice(&m1);
 
         Ok(ClientHandshake {
             hs,
+            profile,
             local_cid,
             seed_local,
             local_public: identity.public_bytes(),
@@ -117,7 +147,7 @@ impl ClientHandshake {
 
     /// Consume the server's response datagram and establish the session
     pub fn complete(mut self, resp_datagram: &[u8]) -> Result<Session> {
-        let (noise, mac1_region, mac1) = match wire::parse(resp_datagram)? {
+        let (noise, mac1_region, mac1) = match wire::parse_profile(&self.profile, resp_datagram)? {
             WireMsg::Resp {
                 noise,
                 mac1_region,
@@ -153,6 +183,7 @@ impl ClientHandshake {
             crypto,
             tx_mask,
             rx_mask,
+            self.profile.clone(),
             self.local_cid,
             remote_cid,
             true,
@@ -178,6 +209,7 @@ pub enum InitOutcome {
 /// Server-side handshake processor (stateless except handshake timestamps)
 pub struct ServerHandshakeEngine {
     suite: CipherSuite,
+    profile: ObfsProfile,
     identity_private: Zeroizing<[u8; 32]>,
     own_mac1_key: Zeroizing<[u8; 32]>,
     cookie: CookieFactory,
@@ -187,11 +219,16 @@ pub struct ServerHandshakeEngine {
 
 impl ServerHandshakeEngine {
     pub fn new(suite: CipherSuite, identity: &Identity) -> Self {
+        Self::with_profile(suite, identity, ObfsProfile::Quic)
+    }
+
+    pub fn with_profile(suite: CipherSuite, identity: &Identity, profile: ObfsProfile) -> Self {
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
         let public = identity.public_bytes();
         ServerHandshakeEngine {
             suite,
+            profile,
             identity_private: identity.private_bytes(),
             own_mac1_key: mac1_key(&public),
             cookie: CookieFactory::new(&public, secret),
@@ -233,16 +270,17 @@ impl ServerHandshakeEngine {
         under_load: bool,
         is_allowed: impl Fn(&[u8; 32]) -> bool,
     ) -> Result<InitOutcome> {
-        let (noise, mac1_region, mac1, mac2_region, mac2) = match wire::parse(datagram)? {
-            WireMsg::Init {
-                noise,
-                mac1_region,
-                mac1,
-                mac2_region,
-                mac2,
-            } => (noise, mac1_region, mac1, mac2_region, mac2),
-            _ => return Err(ProtocolError::UnexpectedPacket("not an init".into()).into()),
-        };
+        let (noise, mac1_region, mac1, mac2_region, mac2) =
+            match wire::parse_profile(&self.profile, datagram)? {
+                WireMsg::Init {
+                    noise,
+                    mac1_region,
+                    mac1,
+                    mac2_region,
+                    mac2,
+                } => (noise, mac1_region, mac1, mac2_region, mac2),
+                _ => return Err(ProtocolError::UnexpectedPacket("not an init".into()).into()),
+            };
 
         // 1. Cheapest check first; failure = silent drop (anti-amplification)
         if !mac_verify(&self.own_mac1_key, mac1_region, mac1) {
@@ -257,12 +295,20 @@ impl ServerHandshakeEngine {
                 let mut nonce = [0u8; COOKIE_NONCE_LEN];
                 rand::thread_rng().fill_bytes(&mut nonce);
                 let sealed = self.cookie.seal(&nonce, &cookie, mac1)?;
-                let reply = wire::encode_cookie(
-                    &nonce,
-                    &sealed,
-                    &random_padding(8, 64),
-                    &long_header_random(),
-                );
+                let reply = match &self.profile {
+                    ObfsProfile::Quic => wire::encode_cookie(
+                        &nonce,
+                        &sealed,
+                        &random_padding(8, 64),
+                        &long_header_random(),
+                    ),
+                    ObfsProfile::Awg(p) => wire::encode_cookie_awg(
+                        pick_header(p, MsgClass::Cookie),
+                        &nonce,
+                        &sealed,
+                        &random_padding(0, p.pad_max(MsgClass::Cookie)),
+                    ),
+                };
                 return Ok(InitOutcome::CookieReply(reply));
             }
         }
@@ -308,8 +354,16 @@ impl ServerHandshakeEngine {
         resp_payload[CID_LEN..].copy_from_slice(&*seed_server);
         let resp_noise = hs.write_message(&resp_payload)?;
 
-        let (mut resp, mac1_off) =
-            wire::encode_resp(&resp_noise, &random_padding(24, 160), &long_header_random())?;
+        let (mut resp, mac1_off) = match &self.profile {
+            ObfsProfile::Quic => {
+                wire::encode_resp(&resp_noise, &random_padding(24, 160), &long_header_random())?
+            }
+            ObfsProfile::Awg(p) => wire::encode_resp_awg(
+                pick_header(p, MsgClass::Resp),
+                &resp_noise,
+                &random_padding(0, p.pad_max(MsgClass::Resp)),
+            )?,
+        };
         let m1 = mac(&mac1_key(&peer_public), &resp[..mac1_off]);
         resp[mac1_off..mac1_off + MAC_LEN].copy_from_slice(&m1);
 
@@ -317,7 +371,15 @@ impl ServerHandshakeEngine {
         // Responder directions are mirrored relative to the initiator
         let tx_mask = HeaderMask::new(&seed_client, &seed_server, 0x02);
         let rx_mask = HeaderMask::new(&seed_client, &seed_server, 0x01);
-        let session = Session::new(crypto, tx_mask, rx_mask, server_cid, client_cid, false);
+        let session = Session::new(
+            crypto,
+            tx_mask,
+            rx_mask,
+            self.profile.clone(),
+            server_cid,
+            client_cid,
+            false,
+        );
 
         Ok(InitOutcome::Established {
             datagram: resp,
@@ -404,6 +466,140 @@ mod tests {
             }
             _ => panic!("expected data"),
         }
+    }
+
+    #[test]
+    fn test_full_handshake_and_data_awg() {
+        use twocha_protocol::obfs::{AwgParams, HeaderRange};
+
+        // Four disjoint quadrant ranges + non-trivial padding, mirroring what
+        // the wizard/config produce.
+        let span = 0x00ff_ffffu32;
+        let profile = ObfsProfile::Awg(AwgParams {
+            headers: [
+                HeaderRange::new(0x1000_0000, 0x1000_0000 + span),
+                HeaderRange::new(0x5000_0000, 0x5000_0000 + span),
+                HeaderRange::new(0x9000_0000, 0x9000_0000 + span),
+                HeaderRange::new(0xD000_0000, 0xD000_0000 + span),
+            ],
+            padding: [24, 40, 24, 16],
+        });
+
+        let client_id = Identity::generate();
+        let server_id = Identity::generate();
+        let client_pub = client_id.public_bytes();
+        let mut engine = ServerHandshakeEngine::with_profile(
+            CipherSuite::ChaCha20Poly1305,
+            &server_id,
+            profile.clone(),
+        );
+
+        let ch = ClientHandshake::with_profile(
+            CipherSuite::ChaCha20Poly1305,
+            &client_id,
+            server_id.public_bytes(),
+            profile.clone(),
+        )
+        .unwrap();
+
+        // The init must classify as AWG (not the QUIC long header): its leading
+        // u32 falls in H1's range and there is no fixed QUIC version byte.
+        assert!(matches!(
+            wire::parse_profile(&profile, ch.datagram()).unwrap(),
+            WireMsg::Init { .. }
+        ));
+
+        let (resp, server_session) =
+            match engine.handle_init(ch.datagram(), &addr(), false, |k| *k == client_pub) {
+                InitOutcome::Established {
+                    datagram, session, ..
+                } => (datagram, session),
+                _ => panic!("expected established"),
+            };
+        let client_session = ch.complete(&resp).unwrap();
+
+        assert_eq!(client_session.remote_cid, server_session.local_cid);
+
+        // Data round-trips both ways through the AWG framing.
+        let dg = client_session.seal_data(b"ping").unwrap();
+        match wire::parse_profile(&profile, &dg).unwrap() {
+            WireMsg::Data {
+                receiver_cid,
+                masked_counter,
+                ciphertext,
+            } => {
+                assert_eq!(receiver_cid, server_session.local_cid);
+                let payload = server_session
+                    .open_data(masked_counter, ciphertext)
+                    .unwrap();
+                assert_eq!(payload, b"ping");
+            }
+            _ => panic!("expected data"),
+        }
+
+        let dg = server_session.seal_data(b"pong").unwrap();
+        match wire::parse_profile(&profile, &dg).unwrap() {
+            WireMsg::Data {
+                masked_counter,
+                ciphertext,
+                ..
+            } => {
+                let payload = client_session
+                    .open_data(masked_counter, ciphertext)
+                    .unwrap();
+                assert_eq!(payload, b"pong");
+            }
+            _ => panic!("expected data"),
+        }
+    }
+
+    #[test]
+    fn test_profile_mismatch_never_establishes() {
+        use twocha_protocol::obfs::{AwgParams, HeaderRange};
+
+        let span = 0x00ff_ffffu32;
+        let awg = ObfsProfile::Awg(AwgParams {
+            headers: [
+                HeaderRange::new(0x1000_0000, 0x1000_0000 + span),
+                HeaderRange::new(0x5000_0000, 0x5000_0000 + span),
+                HeaderRange::new(0x9000_0000, 0x9000_0000 + span),
+                HeaderRange::new(0xD000_0000, 0xD000_0000 + span),
+            ],
+            padding: [24, 40, 24, 16],
+        });
+
+        let client_id = Identity::generate();
+        let server_id = Identity::generate();
+        let client_pub = client_id.public_bytes();
+
+        // AWG client init against a QUIC server: the server can't classify the
+        // datagram as an init, so it drops it (Ignored) — never Established.
+        let ch = ClientHandshake::with_profile(
+            CipherSuite::ChaCha20Poly1305,
+            &client_id,
+            server_id.public_bytes(),
+            awg.clone(),
+        )
+        .unwrap();
+        let mut quic_engine = ServerHandshakeEngine::new(CipherSuite::ChaCha20Poly1305, &server_id);
+        assert!(!matches!(
+            quic_engine.handle_init(ch.datagram(), &addr(), false, |k| *k == client_pub),
+            InitOutcome::Established { .. }
+        ));
+
+        // QUIC client init against an AWG server: same outcome the other way.
+        let ch = ClientHandshake::new(
+            CipherSuite::ChaCha20Poly1305,
+            &client_id,
+            server_id.public_bytes(),
+        )
+        .unwrap();
+        let mut awg_engine =
+            ServerHandshakeEngine::with_profile(CipherSuite::ChaCha20Poly1305, &server_id, awg);
+        assert!(!matches!(
+            awg_engine.handle_init(ch.datagram(), &addr(), false, |k| *k == client_pub),
+            InitOutcome::Established { .. }
+        ));
     }
 
     #[test]

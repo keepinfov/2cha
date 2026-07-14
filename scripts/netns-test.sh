@@ -6,7 +6,7 @@
 # Optionally captures the wire traffic for DPI inspection.
 #
 # Usage: sudo scripts/netns-test.sh [--capture /tmp/2cha.pcap] [--keep]
-#                                    [--tls] [--workers N]
+#                                    [--tls | --awg] [--workers N]
 set -euo pipefail
 
 NS_S=2cha-srv
@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
         --capture) CAPTURE="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
         --tls) MODE=tls; shift ;;
+        --awg) MODE=awg; shift ;;
         --workers) WORKERS="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -96,9 +97,18 @@ ip -n "$NS_C" link set "$VETH_C" up
 # In TLS mode both ends select transport = "tls" and share an SNI. The server
 # auto-generates a self-signed cert for that SNI (no cert/key files needed);
 # Noise_IK still runs *inside* the TLS tunnel for authentication.
+#
+# In AWG mode both ends select transport = "awg" and share an *identical* [awg]
+# section: the magic-header ranges (H1-H4) and padding (S1-S4) are part of the
+# wire format, so a mismatch means no handshake ever validates. jc/jmin/jmax are
+# client-only (junk packets), but sharing them here is harmless.
 if [ "$MODE" = "tls" ]; then
     SRV_TRANSPORT=$'transport = "tls"\n\n[tls]\nsni = "'"$TLS_SNI"$'"'
     CLI_TRANSPORT=$'transport = "tls"\n\n[tls]\nsni = "'"$TLS_SNI"$'"'
+elif [ "$MODE" = "awg" ]; then
+    AWG_SECTION=$'[awg]\nh1 = 271896630\nh2 = 1345638454\nh3 = 2419380278\nh4 = 3493122102\nheader_span = 16777215\ns1 = 24\ns2 = 40\ns3 = 24\ns4 = 16\njc = 4\njmin = 64\njmax = 1024'
+    SRV_TRANSPORT=$'transport = "awg"\n\n'"$AWG_SECTION"
+    CLI_TRANSPORT=$'transport = "awg"\n\n'"$AWG_SECTION"
 else
     SRV_TRANSPORT=""
     CLI_TRANSPORT=""
@@ -295,6 +305,10 @@ if [ -n "$CAPTURE" ]; then
         if [ "$MODE" = "tls" ]; then
             echo "   inspect with: wireshark $CAPTURE   (should show a real TLS 1.3 handshake: ClientHello/ServerHello/Certificate)"
             echo "   handshake:    tshark -r $CAPTURE -Y tls.handshake.type"
+        elif [ "$MODE" = "awg" ]; then
+            echo "   inspect with: wireshark $CAPTURE   (no fixed protocol bytes; junk packets precede the handshake)"
+            echo "   first bytes:  tshark -r $CAPTURE -T fields -e udp.payload | cut -c1-8   (magic headers should vary per packet)"
+            echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e udp.payload | tr -d '\\n:,' | xxd -r -p)"
         else
             echo "   inspect with: wireshark $CAPTURE   (packets should classify as QUIC)"
             echo "   entropy:      ent < <(tshark -r $CAPTURE -T fields -e udp.payload | tr -d '\\n:,' | xxd -r -p)"

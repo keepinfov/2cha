@@ -30,7 +30,7 @@ day-to-day operation.
 | Guide | What it covers |
 |---|---|
 | [Configuration Reference](./configuration.md) | Every config key, type, default, and side. |
-| [Transports](./transports.md) | `quic` vs `tls`, the `[tls]` section, when to use which. |
+| [Transports](./transports.md) | `quic` vs `tls` vs `awg`, the `[tls]`/`[awg]` sections, when to use which. |
 | [Routing](./routing.md) | Full vs split tunnel, pushed routes, DNS. |
 | [Troubleshooting](./troubleshooting.md) | Common failures and how to fix them. |
 | [Testing](./testing.md) | The end-to-end network-namespace test harness. |
